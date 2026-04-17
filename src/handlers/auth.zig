@@ -36,8 +36,10 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     if (!pwd_result.valid) {
         if (pwd_result.too_short) {
             try http.jsonError(r, 400, "Password must be at least 8 characters");
-        } else {
+        } else if (pwd_result.too_long) {
             try http.jsonError(r, 400, "Password is too long");
+        } else {
+            try http.jsonError(r, 400, "Password must contain at least one letter and one number");
         }
         return;
     }
@@ -255,6 +257,17 @@ pub fn handleVerifyEmail(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 }
 
 pub fn handleForgotPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
+    // SECURITY: Rate limit to stop forgot-password from being used to spam
+    // users or as an oracle. Limiter already exists in rate_limiter.initAll.
+    const client_ip = http.getClientIp(r);
+    if (rate_limiter.forgot_password_limiter) |*limiter| {
+        if (!limiter.isAllowed(client_ip)) {
+            r.setHeader("Retry-After", "60") catch {};
+            try http.jsonError(r, 429, "Too many password reset requests. Please wait 1 minute.");
+            return;
+        }
+    }
+
     const request = http.parseBody(req_alloc, r, struct { email: []const u8 }) catch {
         try http.jsonError(r, 400, "Invalid JSON body");
         return;
@@ -275,12 +288,13 @@ pub fn handleForgotPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void 
         const expires = std.time.timestamp() + 3600; // 1 hour
 
         _ = db.setResetToken(req_alloc, user.id, token, expires) catch {};
-        
-        // Send email
+
+        // SECURITY: Never log the token itself. Anyone with read access to
+        // systemd journal would otherwise be able to trigger forgot-password
+        // on any email and then lift the reset token from the logs.
         email.sendPasswordResetEmail(req_alloc, user.email, token) catch |err| {
-            std.debug.print("Failed to send reset email: {}\n", .{err});
+            std.debug.print("Failed to send reset email to {s}: {}\n", .{ user.email, err });
         };
-        std.debug.print("Reset token for {s}: {s}\n", .{user.email, token});
     }
 
     // Always return success to prevent email enumeration
@@ -297,6 +311,20 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 400, "Invalid JSON body");
         return;
     };
+
+    // SECURITY: Validate new password strength — previously reset-password
+    // would accept any password, bypassing the signup strength rules.
+    const pwd_result = validation.validatePasswordStrength(request.new_password);
+    if (!pwd_result.valid) {
+        if (pwd_result.too_short) {
+            try http.jsonError(r, 400, "Password must be at least 8 characters");
+        } else if (pwd_result.too_long) {
+            try http.jsonError(r, 400, "Password is too long");
+        } else {
+            try http.jsonError(r, 400, "Password must contain at least one letter and one number");
+        }
+        return;
+    }
 
     const db_result = db.getUserByResetToken(req_alloc, request.token) catch {
         try http.jsonError(r, 500, "Database error");
@@ -328,8 +356,15 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     };
 
-    // Clear reset token (optional, but good practice)
-    // db.clearResetToken(req_alloc, user.id) ...
+    // SECURITY: Invalidate the reset token so it can't be replayed, and
+    // kill every existing session for this user — on password reset all
+    // devices should be forced to re-authenticate.
+    db.clearResetToken(req_alloc, user.id) catch |err| {
+        std.debug.print("Failed to clear reset token for {s}: {}\n", .{ user.id, err });
+    };
+    db.deleteUserSessions(req_alloc, user.id) catch |err| {
+        std.debug.print("Failed to invalidate sessions for {s}: {}\n", .{ user.id, err });
+    };
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "Password reset successfully" });
 }

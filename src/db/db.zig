@@ -58,6 +58,7 @@ pub const updateUserVerified = impl.updateUserVerified;
 pub const updateUserName = impl.updateUserName;
 pub const updateUserPassword = impl.updateUserPassword;
 pub const setResetToken = impl.setResetToken;
+pub const clearResetToken = impl.clearResetToken;
 pub const setVerificationToken = impl.setVerificationToken;
 pub const getUserByResetToken = impl.getUserByResetToken;
 pub const getUserByVerificationToken = impl.getUserByVerificationToken;

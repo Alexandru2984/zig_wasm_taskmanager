@@ -138,6 +138,13 @@ pub fn setResetToken(allocator: std.mem.Allocator, user_id: []const u8, token: [
     , .{ .record_id = user_id, .reset_tkn = token, .expires = expires });
 }
 
+pub fn clearResetToken(allocator: std.mem.Allocator, user_id: []const u8) !void {
+    const result = try queryWithVars(allocator,
+        \\UPDATE type::record($record_id) SET reset_token = NONE, reset_expires = NONE;
+    , .{ .record_id = user_id });
+    allocator.free(result);
+}
+
 pub fn setVerificationToken(allocator: std.mem.Allocator, user_id: []const u8, token: []const u8, expires: i64) ![]u8 {
     return queryWithVars(allocator,
         \\UPDATE type::record($record_id) SET verification_token = $verification_tkn, verification_expires = $expires;

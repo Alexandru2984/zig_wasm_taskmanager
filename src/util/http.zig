@@ -4,6 +4,7 @@ const std = @import("std");
 const zap = @import("zap");
 const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
+const config = @import("../config/config.zig");
 
 // ==========================================
 // REQUEST HELPERS
@@ -51,7 +52,10 @@ pub fn setAuthCookie(r: zap.Request, token: []const u8) void {
         .name = "session_token",
         .value = token,
         .http_only = true,
-        .secure = false, // Set to true in production with HTTPS
+        // SECURITY: Mark Secure so the cookie is only sent over HTTPS.
+        // All production deployments sit behind nginx+TLS; for pure-local
+        // http://127.0.0.1 testing, set COOKIE_INSECURE=1 in .env.
+        .secure = !std.mem.eql(u8, config.getOrDefault("COOKIE_INSECURE", "0"), "1"),
         .same_site = .Strict,
         .max_age_s = 7 * 24 * 60 * 60, // 7 days in seconds
         .path = "/",

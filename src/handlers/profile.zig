@@ -131,8 +131,10 @@ pub fn changePassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     if (!pwd_result.valid) {
         if (pwd_result.too_short) {
             try http.jsonError(r, 400, "New password must be at least 8 characters");
-        } else {
+        } else if (pwd_result.too_long) {
             try http.jsonError(r, 400, "New password is too long");
+        } else {
+            try http.jsonError(r, 400, "New password must contain at least one letter and one number");
         }
         return;
     }

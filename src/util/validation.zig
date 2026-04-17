@@ -52,8 +52,10 @@ pub fn validatePasswordStrength(password: []const u8) PasswordValidationResult {
     }
     
     result.weak = !has_letter or !has_number;
-    result.valid = !result.too_short and !result.too_long;
-    
+    // SECURITY: `weak` is now load-bearing — previously computed and ignored,
+    // which let users sign up with passwords like "aaaaaaaa".
+    result.valid = !result.too_short and !result.too_long and !result.weak;
+
     return result;
 }
 
@@ -64,60 +66,19 @@ pub const PasswordValidationResult = struct {
     weak: bool = false,
 };
 
-/// Sanitize string for SurrealQL to prevent injection attacks
-/// Returns a new allocated string with dangerous characters escaped
-pub fn sanitizeForSurrealQL(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    // Calculate required length
-    var extra_len: usize = 0;
-    for (input) |c| {
-        switch (c) {
-            '"', '\\', '\'' => extra_len += 1,
-            else => {},
-        }
-    }
-    
-    var result = try allocator.alloc(u8, input.len + extra_len);
-    var i: usize = 0;
-    
-    for (input) |c| {
-        switch (c) {
-            '"' => {
-                result[i] = '\\';
-                result[i + 1] = '"';
-                i += 2;
-            },
-            '\\' => {
-                result[i] = '\\';
-                result[i + 1] = '\\';
-                i += 2;
-            },
-            '\'' => {
-                result[i] = '\\';
-                result[i + 1] = '\'';
-                i += 2;
-            },
-            else => {
-                result[i] = c;
-                i += 1;
-            },
-        }
-    }
-    
-    return result[0..i];
-}
-
 /// Validate name (no special SQL characters, reasonable length)
 pub fn validateName(name: []const u8) bool {
     if (name.len < 1 or name.len > 100) return false;
     
-    // Block dangerous characters
+    // Block dangerous characters. `&` is legitimate in names ("Tom & Jerry"),
+    // output escaping is the consumer's job.
     for (name) |c| {
         switch (c) {
-            '<', '>', '"', '\'', '\\', ';', '&' => return false,
+            '<', '>', '"', '\'', '\\', ';' => return false,
             else => {},
         }
     }
-    
+
     return true;
 }
 
@@ -141,7 +102,17 @@ test "validatePasswordStrength" {
     const result1 = validatePasswordStrength("short");
     try std.testing.expect(!result1.valid);
     try std.testing.expect(result1.too_short);
-    
+
     const result2 = validatePasswordStrength("password123");
     try std.testing.expect(result2.valid);
+
+    // Weak: letters only, no digit
+    const result3 = validatePasswordStrength("aaaaaaaa");
+    try std.testing.expect(!result3.valid);
+    try std.testing.expect(result3.weak);
+
+    // Weak: digits only, no letter
+    const result4 = validatePasswordStrength("12345678");
+    try std.testing.expect(!result4.valid);
+    try std.testing.expect(result4.weak);
 }
