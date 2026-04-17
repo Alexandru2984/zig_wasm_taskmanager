@@ -335,14 +335,27 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 }
 
 pub fn handleLogout(r: zap.Request, req_alloc: std.mem.Allocator) !void {
+    // Try session_token cookie first (preferred), fall back to Authorization: Bearer
+    var token_opt: ?[]const u8 = null;
+
     r.parseCookies(false);
     if (r.getCookieStr(req_alloc, "session_token")) |maybe_cookie| {
-        if (maybe_cookie) |token| {
-            db.deleteSession(req_alloc, token) catch |err| {
-                std.debug.print("Failed to delete session: {}\n", .{err});
-            };
-        }
+        if (maybe_cookie) |t| token_opt = t;
     } else |_| {}
+
+    if (token_opt == null) {
+        if (r.getHeader("authorization")) |auth_header| {
+            if (std.mem.startsWith(u8, auth_header, "Bearer ")) {
+                token_opt = auth_header[7..];
+            }
+        }
+    }
+
+    if (token_opt) |token| {
+        db.deleteSession(req_alloc, token) catch |err| {
+            std.debug.print("Failed to delete session: {}\n", .{err});
+        };
+    }
 
     http.clearAuthCookie(r);
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "logged out" });

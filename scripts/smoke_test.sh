@@ -147,12 +147,27 @@ TASK_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
 
 if [ ! -z "$TASK_ID" ]; then
     echo "Created Task ID: $TASK_ID"
-    
+
     test_endpoint "Get Tasks (List)" "GET" "/api/tasks" "" "$TASK_ID" "$NEW_TOKEN" || true
-    
+
     test_endpoint "Toggle Task" "PUT" "/api/tasks/$TASK_ID" "" "true" "$NEW_TOKEN" || true
-    
+
     test_endpoint "Delete Task" "DELETE" "/api/tasks/$TASK_ID" "" "success" "$NEW_TOKEN" || true
+fi
+
+echo ""
+echo "=== Logout ==="
+test_endpoint "Logout" "POST" "/api/auth/logout" "" "logged out" "$NEW_TOKEN" || true
+# After logout, the token must no longer authenticate
+echo -n "Testing Session Invalidated After Logout... "
+resp=$(curl -s -H "Authorization: Bearer $NEW_TOKEN" "$BASE_URL/api/auth/me" 2>&1)
+if echo "$resp" | grep -q "Not authenticated"; then
+    echo -e "${GREEN}✓ PASS${NC}"
+    PASS=$((PASS + 1))
+else
+    echo -e "${RED}✗ FAIL${NC}"
+    echo "  Got: ${resp:0:100}..."
+    FAIL=$((FAIL + 1))
 fi
 
 echo ""

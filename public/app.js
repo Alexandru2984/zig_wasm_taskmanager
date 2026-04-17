@@ -262,7 +262,15 @@ async function handleLogin(e) {
     }
 }
 
-function logout() {
+async function logout() {
+    try {
+        await fetch('/api/auth/logout', {
+            method: 'POST',
+            credentials: 'include'
+        });
+    } catch (err) {
+        console.warn('Server logout failed, clearing client state anyway:', err);
+    }
     removeToken();
     showLoggedOut();
     loadTasks(); // Will now load from localStorage
