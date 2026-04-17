@@ -1,0 +1,21 @@
+# Credentials & secrets
+db_settings.txt
+mail_settings.txt
+
+# Compiled binaries
+taskmanager
+*.so
+
+# WASM build artifacts
+public/app.wasm
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
