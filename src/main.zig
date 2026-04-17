@@ -131,6 +131,9 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
     } else if (std.mem.eql(u8, path, "/api/auth/me")) {
         try auth_handler.handleMe(r, req_alloc);
         return;
+    } else if (std.mem.eql(u8, path, "/api/auth/logout")) {
+        try auth_handler.handleLogout(r, req_alloc);
+        return;
     } else if (std.mem.eql(u8, path, "/api/auth/forgot-password")) {
         try auth_handler.handleForgotPassword(r, req_alloc);
         return;

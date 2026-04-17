@@ -334,6 +334,20 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "Password reset successfully" });
 }
 
+pub fn handleLogout(r: zap.Request, req_alloc: std.mem.Allocator) !void {
+    r.parseCookies(false);
+    if (r.getCookieStr(req_alloc, "session_token")) |maybe_cookie| {
+        if (maybe_cookie) |token| {
+            db.deleteSession(req_alloc, token) catch |err| {
+                std.debug.print("Failed to delete session: {}\n", .{err});
+            };
+        }
+    } else |_| {}
+
+    http.clearAuthCookie(r);
+    try http.jsonSuccess(r, models.SuccessResponse{ .status = "logged out" });
+}
+
 pub fn handleResendVerification(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     // Require authentication
     const user_id = http.getCurrentUserId(req_alloc, r) orelse {
