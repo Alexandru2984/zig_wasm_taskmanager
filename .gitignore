@@ -1,21 +1,34 @@
-# Credentials & secrets
-db_settings.txt
-mail_settings.txt
+# Zig
+zig-out/
+zig-cache/
+.zig-cache/
 
-# Compiled binaries
-taskmanager
+# Build artifacts
+*.o
+*.a
 *.so
+*.dylib
 
-# WASM build artifacts
+# WASM (generated)
 public/app.wasm
 
-# OS files
+# OS
 .DS_Store
 Thumbs.db
 
-# Editor files
+# IDE
+.idea/
+.vscode/
 *.swp
 *.swo
 *~
-.vscode/
-.idea/
+
+# SurrealDB
+*.db
+surreal.db/
+
+# Environment
+.env
+.env.local
+mail_settings.txt
+db_settings.txt

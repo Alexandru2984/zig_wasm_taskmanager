@@ -155,7 +155,7 @@
                 </div>
                 <div class="form-group">
                     <label for="signupPassword">Password</label>
-                    <input type="password" id="signupPassword" required minlength="8" placeholder="••••••••">
+                    <input type="password" id="signupPassword" required minlength="4" placeholder="••••••••">
                 </div>
                 <div class="form-error" id="signupError"></div>
                 <button type="submit" class="btn-submit">Create Account</button>
@@ -175,17 +175,22 @@
             <p class="modal-desc">Enter the 6-digit code sent to your email.</p>
             <form id="verifyForm" onsubmit="handleVerifyEmail(event)">
                 <div class="code-input-group">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required>
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required>
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required>
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required>
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required>
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required>
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 0)">
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 1)">
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 2)">
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 3)">
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 4)">
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 5)">
                 </div>
                 <div class="form-error" id="verifyError"></div>
                 <div class="form-success hidden" id="verifySuccess">✅ Email verified successfully!</div>
                 <button type="submit" class="btn-submit">Verify Account</button>
             </form>
+            <p class="modal-footer" id="resendSection">
+                Didn't receive it? 
+                <a href="#" id="resendLink" onclick="handleResendCode(event)">Resend Code</a>
+                <span id="resendTimer" class="resend-timer hidden"></span>
+            </p>
         </div>
     </div>
 
@@ -232,8 +237,8 @@
             </div>
 
             <div class="profile-tabs">
-                <button class="tab-btn active" onclick="switchProfileTab('edit', event)">Edit Profile</button>
-                <button class="tab-btn" onclick="switchProfileTab('password', event)">Change Password</button>
+                <button class="tab-btn active" onclick="switchProfileTab('edit')">Edit Profile</button>
+                <button class="tab-btn" onclick="switchProfileTab('password')">Change Password</button>
             </div>
 
             <!-- Edit Profile Tab -->
@@ -258,11 +263,11 @@
                     </div>
                     <div class="form-group">
                         <label for="newPassword">New Password</label>
-                        <input type="password" id="newPassword" required minlength="8" placeholder="••••••••">
+                        <input type="password" id="newPassword" required minlength="4" placeholder="••••••••">
                     </div>
                     <div class="form-group">
                         <label for="confirmPassword">Confirm New Password</label>
-                        <input type="password" id="confirmPassword" required minlength="8" placeholder="••••••••">
+                        <input type="password" id="confirmPassword" required minlength="4" placeholder="••••••••">
                     </div>
                     <div class="form-error" id="passwordError"></div>
                     <div class="form-success hidden" id="passwordSuccess">✅ Password changed!</div>
