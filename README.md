@@ -9,7 +9,7 @@ A **full-stack Task Manager** built entirely in Zig — backend, frontend logic,
 - **Pure Zig Backend** — HTTP server with [Zap](https://github.com/zigzap/zap) framework (facil.io)
 - **Zig → WebAssembly Frontend** — UI logic compiled to WASM
 - **SurrealDB Integration** — Persistent storage for users, tasks, and sessions
-- **Secure Authentication** — Signup, login, password reset, email verification
+- **Secure Authentication** — Signup, login, server-side logout, password reset, email verification
 - **Security First** — Argon2id hashing, Rate Limiting, Security Headers, Safe JSON parsing
 - **Modern Dark UI** — Glassmorphism, smooth animations, Zig-themed colors
 
@@ -97,10 +97,12 @@ zig-task-manager/
 │   ├── main.zig          # Server entry point & routing
 │   ├── app.zig           # Application state & lifecycle
 │   ├── handlers/         # Request handlers
-│   │   ├── auth.zig      # Authentication endpoints
-│   │   ├── tasks.zig     # Task management
-│   │   ├── profile.zig   # User profile
-│   │   └── system.zig    # Health & metrics
+│   │   ├── auth.zig      # Signup, login, logout, verify, reset
+│   │   ├── tasks.zig     # Task CRUD
+│   │   ├── profile.zig   # User profile & password change
+│   │   └── system.zig    # /health, /ready, /metrics
+│   ├── config/
+│   │   └── config.zig    # .env loader
 │   ├── domain/
 │   │   └── models.zig    # Data structures
 │   ├── db/
@@ -108,15 +110,21 @@ zig-task-manager/
 │   │   ├── surreal.zig   # SurrealDB implementation
 │   │   └── http_client.zig # Optimized HTTP client
 │   ├── services/
-│   │   ├── auth.zig      # Hashing & tokens
+│   │   ├── auth.zig      # Argon2id hashing & token generation
 │   │   └── email.zig     # Email sending (Brevo API)
 │   └── util/
-│       ├── http.zig      # HTTP helpers (JSON, Errors)
-│       └── validation.zig # Input validation
-├── frontend/             # WASM frontend source
-├── public/               # Static assets
-├── scripts/              # Helper scripts (smoke tests)
-└── build.zig             # Build configuration
+│       ├── http.zig      # HTTP helpers (cookies, JSON, errors)
+│       ├── json.zig      # JSON helpers
+│       ├── log.zig       # Structured logging
+│       ├── rate_limiter.zig # Per-IP rate limiting
+│       └── validation.zig   # Input validation
+├── frontend/src/main.zig # WASM frontend source
+├── public/               # Static assets (+ app.wasm after build)
+├── scripts/smoke_test.sh # API smoke tests (19 cases)
+├── docs/DEPLOY.md        # Deployment guide
+├── build.zig             # Build configuration
+├── build.zig.zon         # Zig package manifest (Zap dep)
+└── .env.example          # Config template
 ```
 
 ## 🔐 Security Features
@@ -124,23 +132,62 @@ zig-task-manager/
 | Feature | Implementation |
 |---------|----------------|
 | **Password Hashing** | Argon2id (industry standard) |
-| **Session Management** | Server-side sessions in SurrealDB |
-| **Rate Limiting** | IP-based limiting for Signup/Login |
-| **Headers** | `X-Content-Type-Options`, `X-Frame-Options` |
-| **Input Validation** | Strict JSON parsing & type checking |
+| **Session Management** | Server-side sessions in SurrealDB, 7-day expiry, invalidated on logout |
+| **Logout** | `POST /api/auth/logout` — deletes the session server-side for both cookie and `Authorization: Bearer` clients |
+| **Session Cookie** | `HttpOnly`, `SameSite=Strict`, 7-day max-age |
+| **Rate Limiting** | Per-IP limiting for signup (3/min) and login (5/min) |
+| **Headers** | `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `X-XSS-Protection` |
+| **Input Validation** | Strict JSON parsing, email/password/name validators |
+| **CORS** | Single configured origin (no wildcard in prod) |
+| **Secrets** | Loaded from `.env`, never checked into git |
 
 ## 🛠️ Development
 
 ```bash
-# Build only
+# Debug build (fast compile, slow binary ~36MB)
 zig build
 
-# Build and run
+# Release build for production (~9MB)
+zig build -Doptimize=ReleaseFast
+
+# Run directly
 zig build run
 
-# Run smoke tests
+# Run smoke tests (19 cases)
 ./scripts/smoke_test.sh
 ```
+
+## 🚢 Deployment
+
+The reference deployment runs the release binary under systemd with nginx
+as TLS-terminating reverse proxy and SurrealDB in Docker on the same host.
+
+`/etc/systemd/system/taskmanager.service`:
+
+```ini
+[Unit]
+Description=Zig Task Manager
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/home/USER/taskmanager/zig-out/bin/taskmanager
+WorkingDirectory=/home/USER/taskmanager
+Restart=always
+RestartSec=5
+User=USER
+Group=USER
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Nginx proxies `https://your.domain/` to `127.0.0.1:$PORT` (default 9000)
+and forwards `X-Real-IP` so rate limiting sees the real client IP.
+
+See `docs/DEPLOY.md` for the full VPS walkthrough (SurrealDB docker,
+Zig install, nginx config, Let's Encrypt).
 
 ## 📦 Dependencies
 
