@@ -3,14 +3,21 @@
 # Run after any changes to verify basic functionality
 # Usage: ./scripts/smoke_test.sh [BASE_URL]
 
+set -u
+
 BASE_URL="${1:-http://127.0.0.1:9000}"
 PASS=0
 FAIL=0
 
+# Cookie jar: session auth survives between requests WITHOUT leaking tokens
+# via `ps aux` (the previous script embedded the Bearer token directly in
+# every curl argv).
+COOKIE_JAR="$(mktemp --tmpdir smoke-cookies.XXXXXX)"
+trap 'rm -f "$COOKIE_JAR" /tmp/last_response.json' EXIT
+
 # Colors
 GREEN='\033[0;32m'
 RED='\033[0;31m'
-YELLOW='\033[1;33m'
 NC='\033[0m'
 
 echo "=================================="
@@ -19,45 +26,33 @@ echo "=================================="
 echo "Base URL: $BASE_URL"
 echo ""
 
+curl_opts=( -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" )
+
 # Helper function
 test_endpoint() {
     local name="$1"
     local method="$2"
     local endpoint="$3"
-    local data="$4"
+    local data="${4:-}"
     local expected="$5"
-    local token="$6"
-    
+
     echo -n "Testing $name... "
-    
-    local auth_header=""
-    if [ ! -z "$token" ]; then
-        auth_header="-H \"Authorization: Bearer $token\""
-    fi
-    
+
     if [ "$method" = "GET" ]; then
-        if [ ! -z "$token" ]; then
-            response=$(curl -s -H "Authorization: Bearer $token" "$BASE_URL$endpoint" 2>&1)
-        else
-            response=$(curl -s "$BASE_URL$endpoint" 2>&1)
-        fi
+        response=$(curl "${curl_opts[@]}" "$BASE_URL$endpoint" 2>&1)
     else
-        if [ ! -z "$token" ]; then
-            response=$(curl -s -X "$method" "$BASE_URL$endpoint" \
+        if [ -n "$data" ]; then
+            response=$(curl "${curl_opts[@]}" -X "$method" "$BASE_URL$endpoint" \
                 -H "Content-Type: application/json" \
-                -H "Authorization: Bearer $token" \
                 -d "$data" 2>&1)
         else
-            response=$(curl -s -X "$method" "$BASE_URL$endpoint" \
-                -H "Content-Type: application/json" \
-                -d "$data" 2>&1)
+            response=$(curl "${curl_opts[@]}" -X "$method" "$BASE_URL$endpoint" 2>&1)
         fi
     fi
-    
+
     if echo "$response" | grep -q "$expected" 2>/dev/null; then
         echo -e "${GREEN}✓ PASS${NC}"
         PASS=$((PASS + 1))
-        # Return response for extraction if needed
         echo "$response" > /tmp/last_response.json
         return 0
     else
@@ -75,11 +70,11 @@ test_header() {
     local endpoint="$2"
     local header="$3"
     local expected="$4"
-    
+
     echo -n "Testing $name... "
-    
+
     response=$(curl -sI "$BASE_URL$endpoint" 2>&1)
-    
+
     if echo "$response" | grep -qi "$header.*$expected" 2>/dev/null; then
         echo -e "${GREEN}✓ PASS${NC}"
         PASS=$((PASS + 1))
@@ -95,7 +90,17 @@ test_header() {
 echo "=== Core Endpoints ==="
 test_endpoint "Health Check" "GET" "/api/health" "" "healthy" || true
 test_endpoint "Ready Check" "GET" "/api/ready" "" "ready" || true
-test_endpoint "Metrics" "GET" "/api/metrics" "" "app_uptime_seconds" || true
+
+# Metrics endpoint is now gated behind METRICS_TOKEN — expect 401 without one.
+echo -n "Testing Metrics (gated)... "
+metrics=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/metrics")
+if [ "$metrics" = "401" ] || [ "$metrics" = "404" ]; then
+    echo -e "${GREEN}✓ PASS${NC} (got $metrics)"
+    PASS=$((PASS + 1))
+else
+    echo -e "${RED}✗ FAIL${NC} (got $metrics, expected 401 or 404)"
+    FAIL=$((FAIL + 1))
+fi
 
 echo ""
 echo "=== Static Files ==="
@@ -106,61 +111,68 @@ test_header "Cache-Control (JS)" "/app.js" "Cache-Control" "max-age=3600" || tru
 echo ""
 echo "=== Security Headers ==="
 test_header "X-Content-Type-Options" "/" "X-Content-Type-Options" "nosniff" || true
-test_header "X-Frame-Options" "/" "X-Frame-Options" "SAMEORIGIN" || true
+test_header "X-Frame-Options" "/" "X-Frame-Options" "DENY" || true
+test_header "Permissions-Policy" "/" "Permissions-Policy" "camera" || true
+test_header "CSP no unsafe-inline" "/" "Content-Security-Policy" "script-src 'self'" || true
 
 echo ""
 echo "=== Auth Flow ==="
-# Generate random email
 RANDOM_ID=$((RANDOM % 10000))
 EMAIL="test${RANDOM_ID}@example.com"
 PASSWORD="Password123!"
 
 echo "Using email: $EMAIL"
 
-# 1. Signup
+# 1. Signup — cookie jar now holds the session cookie.
 test_endpoint "Signup" "POST" "/api/auth/signup" \
-    "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"name\":\"Test User\"}" "token"
-TOKEN=$(cat /tmp/last_response.json | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+    "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"name\":\"Test User\"}" "$EMAIL" || true
 
-if [ -z "$TOKEN" ]; then
-    echo -e "${RED}Failed to get token from signup${NC}"
-else
-    echo -e "${GREEN}Got token: ${TOKEN:0:10}...${NC}"
-fi
+# 2. Me (Profile) — uses cookie from the jar, no Authorization header.
+test_endpoint "Get Profile" "GET" "/api/auth/me" "" "$EMAIL" || true
 
-# 2. Me (Profile)
-test_endpoint "Get Profile" "GET" "/api/auth/me" "" "$EMAIL" "$TOKEN" || true
+# 3. Logout clears the cookie.
+test_endpoint "Logout (1)" "POST" "/api/auth/logout" "" "logged out" || true
 
-# 3. Login
+# 4. Login again.
 test_endpoint "Login" "POST" "/api/auth/login" \
-    "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" "token" || true
-NEW_TOKEN=$(cat /tmp/last_response.json | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+    "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" "$EMAIL" || true
 
-# 4. Tasks
+# 5. Tasks
 echo ""
 echo "=== Task Operations ==="
-test_endpoint "Get Tasks (Empty)" "GET" "/api/tasks" "" "\[\]" "$NEW_TOKEN" || true
+test_endpoint "Get Tasks (Empty)" "GET" "/api/tasks" "" "\[\]" || true
 
 test_endpoint "Create Task" "POST" "/api/tasks" \
-    "{\"title\":\"Smoke Test Task\"}" "Smoke Test Task" "$NEW_TOKEN" || true
+    "{\"title\":\"Smoke Test Task\"}" "Smoke Test Task" || true
 TASK_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
 
-if [ ! -z "$TASK_ID" ]; then
+if [ -n "$TASK_ID" ]; then
     echo "Created Task ID: $TASK_ID"
 
-    test_endpoint "Get Tasks (List)" "GET" "/api/tasks" "" "$TASK_ID" "$NEW_TOKEN" || true
+    test_endpoint "Get Tasks (List)" "GET" "/api/tasks" "" "$TASK_ID" || true
+    test_endpoint "Toggle Task" "PUT" "/api/tasks/$TASK_ID" "" "true" || true
+    test_endpoint "Delete Task" "DELETE" "/api/tasks/$TASK_ID" "" "success" || true
+fi
 
-    test_endpoint "Toggle Task" "PUT" "/api/tasks/$TASK_ID" "" "true" "$NEW_TOKEN" || true
-
-    test_endpoint "Delete Task" "DELETE" "/api/tasks/$TASK_ID" "" "success" "$NEW_TOKEN" || true
+echo ""
+echo "=== Method Enforcement ==="
+# Signup must reject GET.
+echo -n "Testing Signup rejects GET... "
+status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/auth/signup")
+if [ "$status" = "405" ]; then
+    echo -e "${GREEN}✓ PASS${NC}"
+    PASS=$((PASS + 1))
+else
+    echo -e "${RED}✗ FAIL${NC} (got $status, expected 405)"
+    FAIL=$((FAIL + 1))
 fi
 
 echo ""
 echo "=== Logout ==="
-test_endpoint "Logout" "POST" "/api/auth/logout" "" "logged out" "$NEW_TOKEN" || true
-# After logout, the token must no longer authenticate
+test_endpoint "Logout (2)" "POST" "/api/auth/logout" "" "logged out" || true
+# After logout, /me must no longer authenticate.
 echo -n "Testing Session Invalidated After Logout... "
-resp=$(curl -s -H "Authorization: Bearer $NEW_TOKEN" "$BASE_URL/api/auth/me" 2>&1)
+resp=$(curl "${curl_opts[@]}" "$BASE_URL/api/auth/me" 2>&1)
 if echo "$resp" | grep -q "Not authenticated"; then
     echo -e "${GREEN}✓ PASS${NC}"
     PASS=$((PASS + 1))
@@ -172,7 +184,6 @@ fi
 
 echo ""
 echo "=== Path Security ==="
-# Test path traversal protection
 response=$(curl -s "$BASE_URL/../../etc/passwd" 2>&1)
 if echo "$response" | grep -q "403\|404\|Forbidden\|Not Found" 2>/dev/null; then
     echo -e "Testing Path Traversal Block... ${GREEN}✓ PASS${NC}"

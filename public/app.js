@@ -511,66 +511,80 @@ function renderTasks(tasks) {
         }
     }
     
-    // Separate active and completed tasks
+    // SECURITY: build every <li> with createElement + setAttribute so no
+    // task field (id, title, dates) can ever escape its attribute quoting,
+    // regardless of what the DB returns.
+    function renderTaskItem(task, isCompleted) {
+        const li = document.createElement('li');
+        li.className = isCompleted ? 'task-item completed' : 'task-item';
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'task-checkbox';
+        checkbox.dataset.id = task.id;
+        if (isCompleted) checkbox.checked = true;
+
+        const content = document.createElement('div');
+        content.className = 'task-content';
+
+        const titleEl = document.createElement('span');
+        titleEl.className = 'task-title';
+        titleEl.textContent = task.title; // safe against HTML injection
+
+        const meta = document.createElement('div');
+        meta.className = 'task-meta';
+
+        const createdStr = formatDate(task.created_at);
+        if (createdStr) {
+            const createdEl = document.createElement('span');
+            createdEl.className = 'task-created';
+            createdEl.textContent = `🕐 ${createdStr}`;
+            meta.appendChild(createdEl);
+        }
+        const dueStr = task.due_date ? formatDate(task.due_date) : '';
+        if (dueStr) {
+            const dueEl = document.createElement('span');
+            dueEl.className = 'task-due';
+            dueEl.textContent = `📅 ${dueStr}`;
+            meta.appendChild(dueEl);
+        }
+
+        content.appendChild(titleEl);
+        content.appendChild(meta);
+
+        const del = document.createElement('button');
+        del.className = 'btn-delete';
+        del.dataset.id = task.id;
+        del.title = 'Delete task';
+        del.textContent = '🗑️';
+
+        li.appendChild(checkbox);
+        li.appendChild(content);
+        li.appendChild(del);
+        return li;
+    }
+
     const activeTasks = tasks.filter(t => !t.completed);
     const completedTasks = tasks.filter(t => t.completed);
-    
+
     if (activeTasks.length === 0 && completedTasks.length === 0) {
         emptyState.classList.add('visible');
-        completedSection.style.display = 'none';
+        completedSection.classList.add('hidden');
     } else {
         emptyState.classList.remove('visible');
-        
-        // Render active tasks
-        activeTasks.forEach(task => {
-            const li = document.createElement('li');
-            li.className = 'task-item';
-            
-            const createdDate = formatDate(task.created_at);
-            const dueDate = task.due_date ? formatDate(task.due_date) : '';
-            const dueDateHtml = dueDate ? `<span class="task-due">📅 ${dueDate}</span>` : '';
-            const createdHtml = createdDate ? `<span class="task-created">🕐 ${createdDate}</span>` : '';
-            
-            li.innerHTML = `
-                <input type="checkbox" class="task-checkbox" data-id="${task.id}">
-                <div class="task-content">
-                    <span class="task-title">${escapeHtml(task.title)}</span>
-                    <div class="task-meta">${createdHtml}${dueDateHtml}</div>
-                </div>
-                <button class="btn-delete" data-id="${task.id}" title="Delete task">🗑️</button>
-            `;
-            taskList.appendChild(li);
-        });
-        
-        // Render completed tasks
+
+        activeTasks.forEach(task => taskList.appendChild(renderTaskItem(task, false)));
+
         if (completedTasks.length > 0) {
-            completedSection.style.display = 'block';
-            completedTasks.forEach(task => {
-                const li = document.createElement('li');
-                li.className = 'task-item completed';
-                
-                const createdDate = formatDate(task.created_at);
-                const dueDate = task.due_date ? formatDate(task.due_date) : '';
-                const createdHtml = createdDate ? `<span class="task-created">🕐 ${createdDate}</span>` : '';
-                const dueDateHtml = dueDate ? `<span class="task-due">📅 ${dueDate}</span>` : '';
-                
-                li.innerHTML = `
-                    <input type="checkbox" class="task-checkbox" checked data-id="${task.id}">
-                    <div class="task-content">
-                        <span class="task-title">${escapeHtml(task.title)}</span>
-                        <div class="task-meta">${createdHtml}${dueDateHtml}</div>
-                    </div>
-                    <button class="btn-delete" data-id="${task.id}" title="Delete task">🗑️</button>
-                `;
-                completedTaskList.appendChild(li);
-            });
+            completedSection.classList.remove('hidden');
+            completedTasks.forEach(task => completedTaskList.appendChild(renderTaskItem(task, true)));
         } else {
-            completedSection.style.display = 'none';
+            completedSection.classList.add('hidden');
         }
 
         completedCount.textContent = completedTasks.length;
     }
-    
+
     totalCount.textContent = tasks.length;
 }
 

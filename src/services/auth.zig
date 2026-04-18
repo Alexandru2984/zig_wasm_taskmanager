@@ -135,7 +135,12 @@ fn verifyLegacyPassword(allocator: std.mem.Allocator, stored_hash: []const u8, p
     }
     const computed = try std.fmt.allocPrint(allocator, "{x}", .{hash});
     defer allocator.free(computed);
-    return std.mem.eql(u8, stored_hash, computed);
+    // SECURITY: constant-time compare — std.mem.eql short-circuits on mismatch
+    // and would leak how many leading bytes matched via timing.
+    if (stored_hash.len != computed.len) return false;
+    var acc: u8 = 0;
+    for (stored_hash, computed) |x, y| acc |= x ^ y;
+    return acc == 0;
 }
 
 /// Check if a hash is in legacy format (needs migration)

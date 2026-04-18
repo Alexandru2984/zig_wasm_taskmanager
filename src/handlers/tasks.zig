@@ -4,6 +4,20 @@ const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
 const http = @import("../util/http.zig");
 const validation = @import("../util/validation.zig");
+const rate_limiter = @import("../util/rate_limiter.zig");
+
+/// 60 writes/min/user. Applied before DB access so a rogue client can't chew
+/// through SurrealDB with runaway POST/PUT/DELETE.
+fn rateLimitWrite(r: zap.Request, user_id: []const u8) !bool {
+    if (rate_limiter.task_write_limiter) |*limiter| {
+        if (!limiter.isAllowed(user_id)) {
+            r.setHeader("Retry-After", "60") catch {};
+            try http.jsonError(r, 429, "Too many requests. Please wait 1 minute.");
+            return false;
+        }
+    }
+    return true;
+}
 
 pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     const user_id = http.getCurrentUserId(req_alloc, r) orelse {
@@ -48,6 +62,7 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 401, "Login required");
         return;
     };
+    if (!try rateLimitWrite(r, user_id)) return;
 
     const request = http.parseBody(req_alloc, r, models.CreateTaskRequest) catch {
         try http.jsonError(r, 400, "Invalid JSON body");
@@ -57,6 +72,13 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     if (!validation.validateTaskTitle(request.title)) {
         try http.jsonError(r, 400, "Title must be between 1 and 500 characters");
         return;
+    }
+
+    if (request.due_date) |dd| {
+        if (!validation.validateDueDate(dd)) {
+            try http.jsonError(r, 400, "Invalid due_date format");
+            return;
+        }
     }
 
     const db_result = if (request.due_date) |dd|
@@ -90,6 +112,7 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         try http.jsonError(r, 401, "Unauthorized");
         return;
     };
+    if (!try rateLimitWrite(r, user_id)) return;
 
     const is_owner = db.verifyTaskOwnership(req_alloc, task_id, user_id) catch {
         try http.jsonError(r, 500, "Failed to verify ownership");
@@ -134,6 +157,7 @@ pub fn deleteTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         try http.jsonError(r, 401, "Unauthorized");
         return;
     };
+    if (!try rateLimitWrite(r, user_id)) return;
 
     const is_owner = db.verifyTaskOwnership(req_alloc, task_id, user_id) catch {
         try http.jsonError(r, 500, "Failed to verify ownership");

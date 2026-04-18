@@ -9,6 +9,40 @@ const config = @import("../config/config.zig");
 const MAX_RETRIES: u8 = 3;
 const RETRY_DELAYS_MS = [_]u64{ 1000, 2000, 5000 }; // 1s, 2s, 5s backoff
 
+/// Render an email like "alice@example.com" as "a***e@example.com" for logs.
+/// PRIVACY: plain emails in systemd journal are a GDPR concern — anyone with
+/// read access to the journal could enumerate which addresses we send to.
+/// Writes into `buf` and returns the slice used.
+fn maskEmail(buf: []u8, email: []const u8) []const u8 {
+    const at = std.mem.indexOfScalar(u8, email, '@') orelse {
+        // Not an email — mask the whole thing to be safe.
+        const n = @min(buf.len, 3);
+        @memset(buf[0..n], '*');
+        return buf[0..n];
+    };
+    const local = email[0..at];
+    const domain = email[at..];
+
+    var i: usize = 0;
+    if (local.len > 0 and i < buf.len) {
+        buf[i] = local[0];
+        i += 1;
+    }
+    const stars: usize = if (local.len > 2) 3 else 1;
+    var s: usize = 0;
+    while (s < stars and i < buf.len) : (s += 1) {
+        buf[i] = '*';
+        i += 1;
+    }
+    if (local.len > 1 and i < buf.len) {
+        buf[i] = local[local.len - 1];
+        i += 1;
+    }
+    const copy_len = @min(domain.len, buf.len - i);
+    @memcpy(buf[i .. i + copy_len], domain[0..copy_len]);
+    return buf[0 .. i + copy_len];
+}
+
 // API config struct
 const EmailConfig = struct {
     api_key: []const u8,
@@ -182,7 +216,8 @@ pub fn sendPasswordResetEmail(allocator: std.mem.Allocator, to_email: []const u8
 fn sendEmail(allocator: std.mem.Allocator, to_email: []const u8, to_name: []const u8, subject: []const u8, text_content: []const u8) !void {
     const email_cfg = try getEmailConfig();
 
-    std.debug.print("📧 Sending email to: {s} via Brevo API\n", .{to_email});
+    var mask_buf: [128]u8 = undefined;
+    std.debug.print("📧 Sending email to: {s} via Brevo API\n", .{maskEmail(&mask_buf, to_email)});
 
     // Escape special characters in content for JSON
     var escaped_buf: [8192]u8 = undefined;
@@ -232,13 +267,14 @@ fn sendEmail(allocator: std.mem.Allocator, to_email: []const u8, to_name: []cons
 
     // Use retry-enabled request
     try sendEmailRequest(allocator, json_payload, email_cfg.api_key);
-    std.debug.print("✅ Email sent successfully to: {s}\n", .{to_email});
+    std.debug.print("✅ Email sent successfully to: {s}\n", .{maskEmail(&mask_buf, to_email)});
 }
 
 fn sendHtmlEmail(allocator: std.mem.Allocator, to_email: []const u8, to_name: []const u8, subject: []const u8, html_content: []const u8) !void {
     const email_cfg = try getEmailConfig();
 
-    std.debug.print("📧 Sending HTML email to: {s} via Brevo API\n", .{to_email});
+    var mask_buf: [128]u8 = undefined;
+    std.debug.print("📧 Sending HTML email to: {s} via Brevo API\n", .{maskEmail(&mask_buf, to_email)});
 
     // Escape special characters in HTML content for JSON
     var escaped_buf: [16384]u8 = undefined;
@@ -284,5 +320,5 @@ fn sendHtmlEmail(allocator: std.mem.Allocator, to_email: []const u8, to_name: []
 
     // Use retry-enabled request
     try sendEmailRequest(allocator, json_payload, email_cfg.api_key);
-    std.debug.print("✅ HTML Email sent successfully to: {s}\n", .{to_email});
+    std.debug.print("✅ HTML Email sent successfully to: {s}\n", .{maskEmail(&mask_buf, to_email)});
 }

@@ -130,6 +130,7 @@ pub var forgot_password_limiter: ?RateLimiter = null;
 pub var verify_limiter: ?RateLimiter = null;
 pub var reset_password_limiter: ?RateLimiter = null;
 pub var resend_verification_limiter: ?RateLimiter = null;
+pub var task_write_limiter: ?RateLimiter = null;
 
 /// Initialize all rate limiters
 pub fn initAll(allocator: std.mem.Allocator) void {
@@ -151,6 +152,10 @@ pub fn initAll(allocator: std.mem.Allocator) void {
     // Resend verification: 3 per 5 minutes (expensive: triggers Brevo send)
     resend_verification_limiter = RateLimiter.init(allocator, .{ .max_requests = 3, .window_seconds = 300 });
 
+    // Task write operations (create/toggle/delete): 60 per minute per user.
+    // Stops an authenticated user from spamming the DB.
+    task_write_limiter = RateLimiter.init(allocator, .{ .max_requests = 60, .window_seconds = 60 });
+
     std.debug.print("✅ Rate limiters initialized\n", .{});
 }
 
@@ -162,6 +167,7 @@ pub fn cleanupAll() void {
     if (verify_limiter) |*l| l.cleanup();
     if (reset_password_limiter) |*l| l.cleanup();
     if (resend_verification_limiter) |*l| l.cleanup();
+    if (task_write_limiter) |*l| l.cleanup();
 }
 
 var cleanup_thread: ?std.Thread = null;
@@ -209,6 +215,7 @@ pub fn deinitAll() void {
     if (verify_limiter) |*l| l.deinit();
     if (reset_password_limiter) |*l| l.deinit();
     if (resend_verification_limiter) |*l| l.deinit();
+    if (task_write_limiter) |*l| l.deinit();
 
     login_limiter = null;
     signup_limiter = null;
@@ -216,4 +223,5 @@ pub fn deinitAll() void {
     verify_limiter = null;
     reset_password_limiter = null;
     resend_verification_limiter = null;
+    task_write_limiter = null;
 }

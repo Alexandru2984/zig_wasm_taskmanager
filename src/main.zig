@@ -113,6 +113,8 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
     r.setHeader("X-Content-Type-Options", "nosniff") catch {};
     r.setHeader("X-Frame-Options", "DENY") catch {};
     r.setHeader("Referrer-Policy", "strict-origin-when-cross-origin") catch {};
+    // Permissions-Policy: deny every powerful browser feature we don't use.
+    r.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), accelerometer=(), gyroscope=(), magnetometer=(), interest-cohort=()") catch {};
     // HSTS. Opt-in via HSTS_MAX_AGE so it's never enabled during pure-HTTP
     // local dev (setting HSTS on http://localhost would poison the browser
     // cache for future HTTPS work on the same host).
@@ -143,31 +145,31 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         return;
     }
 
-    // Auth routes
-    if (std.mem.eql(u8, path, "/api/auth/signup")) {
-        try auth_handler.handleSignup(r, req_alloc);
-        return;
-    } else if (std.mem.eql(u8, path, "/api/auth/login")) {
-        try auth_handler.handleLogin(r, req_alloc);
-        return;
-    } else if (std.mem.eql(u8, path, "/api/auth/me")) {
-        try auth_handler.handleMe(r, req_alloc);
-        return;
-    } else if (std.mem.eql(u8, path, "/api/auth/logout")) {
-        try auth_handler.handleLogout(r, req_alloc);
-        return;
-    } else if (std.mem.eql(u8, path, "/api/auth/forgot-password")) {
-        try auth_handler.handleForgotPassword(r, req_alloc);
-        return;
-    } else if (std.mem.eql(u8, path, "/api/auth/reset-password")) {
-        try auth_handler.handleResetPassword(r, req_alloc);
-        return;
-    } else if (std.mem.eql(u8, path, "/api/auth/resend-verification")) {
-        try auth_handler.handleResendVerification(r, req_alloc);
-        return;
-    } else if (std.mem.startsWith(u8, path, "/api/auth/verify")) {
-        try auth_handler.handleVerifyEmail(r, req_alloc);
-        return;
+    // Auth routes. Every state-changing endpoint must be POST; /api/auth/me is
+    // a read and allows GET. Reject anything else with 405 Method Not Allowed.
+    const req_method = r.method orelse "";
+    const AuthRoute = struct { path: []const u8, method: []const u8, handler: *const fn (zap.Request, std.mem.Allocator) anyerror!void };
+    const auth_routes = [_]AuthRoute{
+        .{ .path = "/api/auth/signup",              .method = "POST", .handler = auth_handler.handleSignup },
+        .{ .path = "/api/auth/login",               .method = "POST", .handler = auth_handler.handleLogin },
+        .{ .path = "/api/auth/me",                  .method = "GET",  .handler = auth_handler.handleMe },
+        .{ .path = "/api/auth/logout",              .method = "POST", .handler = auth_handler.handleLogout },
+        .{ .path = "/api/auth/forgot-password",     .method = "POST", .handler = auth_handler.handleForgotPassword },
+        .{ .path = "/api/auth/reset-password",      .method = "POST", .handler = auth_handler.handleResetPassword },
+        .{ .path = "/api/auth/resend-verification", .method = "POST", .handler = auth_handler.handleResendVerification },
+        .{ .path = "/api/auth/verify",              .method = "POST", .handler = auth_handler.handleVerifyEmail },
+    };
+    for (auth_routes) |route| {
+        if (std.mem.eql(u8, path, route.path)) {
+            if (!std.mem.eql(u8, req_method, route.method)) {
+                r.setHeader("Allow", route.method) catch {};
+                r.setStatus(.method_not_allowed);
+                try r.sendBody("{\"error\": \"Method not allowed\"}");
+                return;
+            }
+            try route.handler(r, req_alloc);
+            return;
+        }
     }
 
     // Profile routes
@@ -286,19 +288,19 @@ fn serveStatic(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !
     
     // SECURITY: Add security headers for static files
     r.setHeader("X-Content-Type-Options", "nosniff") catch {};
-    r.setHeader("X-Frame-Options", "SAMEORIGIN") catch {};
+    r.setHeader("X-Frame-Options", "DENY") catch {};
     r.setHeader("Referrer-Policy", "strict-origin-when-cross-origin") catch {};
+    r.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), accelerometer=(), gyroscope=(), magnetometer=(), interest-cohort=()") catch {};
     if (config.get("HSTS_MAX_AGE")) |max_age| {
         const hsts_value = std.fmt.allocPrint(req_alloc, "max-age={s}; includeSubDomains", .{max_age}) catch "max-age=31536000; includeSubDomains";
         r.setHeader("Strict-Transport-Security", hsts_value) catch {};
     }
     
-    // Add CSP for HTML pages only. SECURITY: scripts have no 'unsafe-inline' —
-    // all handlers are wired in app.js via addEventListener. 'unsafe-inline' is
-    // still allowed for style (reset-password.html uses a <style> block); a
-    // later pass can move that to an external stylesheet and drop it.
+    // SECURITY: strict CSP. No inline scripts, no inline styles — every HTML
+    // file points at style.css / reset-password.js / app.js, so the browser
+    // will refuse any injected <script> or style= attribute.
     if (std.mem.eql(u8, ext, ".html")) {
-        r.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'") catch {};
+        r.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'") catch {};
     }
 
     const file = cwd.openFile(file_path, .{}) catch {

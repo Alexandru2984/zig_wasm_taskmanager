@@ -52,7 +52,6 @@ pub const SignupRequest = struct {
 };
 
 pub const AuthResponse = struct {
-    token: []const u8,
     user: UserProfile,
 };
 

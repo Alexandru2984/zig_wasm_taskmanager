@@ -117,12 +117,12 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     };
 
-    // SECURITY: Set HttpOnly cookie (prevents XSS token theft)
+    // SECURITY: session is carried ONLY via the HttpOnly cookie — the token is
+    // NOT echoed in the response body, so an XSS that reads fetch responses
+    // can't exfiltrate it.
     http.setAuthCookie(r, token);
 
-    // Return response (still includes token for backwards compatibility)
     const response = models.AuthResponse{
-        .token = token,
         .user = .{
             .id = user.id,
             .email = user.email,
@@ -182,12 +182,10 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     };
 
-    // SECURITY: Set HttpOnly cookie (prevents XSS token theft)
+    // SECURITY: session lives in the HttpOnly cookie only (see signup note).
     http.setAuthCookie(r, token);
 
-    // Return response (still includes token for backwards compatibility)
     const response = models.AuthResponse{
-        .token = token,
         .user = .{
             .id = user.id,
             .email = user.email,
@@ -323,11 +321,10 @@ pub fn handleForgotPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void 
 
         _ = db.setResetToken(req_alloc, user.id, token, expires) catch {};
 
-        // SECURITY: Never log the token itself. Anyone with read access to
-        // systemd journal would otherwise be able to trigger forgot-password
-        // on any email and then lift the reset token from the logs.
+        // SECURITY: never log the token (journal readers could lift it) and
+        // never log the full email (GDPR / user enumeration via systemd logs).
         email.sendPasswordResetEmail(req_alloc, user.email, token) catch |err| {
-            std.debug.print("Failed to send reset email to {s}: {}\n", .{ user.email, err });
+            std.debug.print("Failed to send reset email: {}\n", .{err});
         };
     }
 

@@ -88,6 +88,65 @@ pub fn validateTaskTitle(title: []const u8) bool {
     return true;
 }
 
+/// Validate an ISO-8601-ish datetime string the frontend is allowed to send.
+/// Accepts "YYYY-MM-DDTHH:MM", "YYYY-MM-DDTHH:MM:SS" and their Z-terminated
+/// forms. Rejects anything else so arbitrary user strings can't reach the DB.
+pub fn validateDueDate(value: []const u8) bool {
+    // Minimum: "YYYY-MM-DDTHH:MM" = 16 chars. Maximum with :SSZ = 20 chars.
+    if (value.len < 16 or value.len > 20) return false;
+
+    const digit = std.ascii.isDigit;
+    // Positional check: YYYY-MM-DDTHH:MM
+    if (!digit(value[0]) or !digit(value[1]) or !digit(value[2]) or !digit(value[3])) return false;
+    if (value[4] != '-') return false;
+    if (!digit(value[5]) or !digit(value[6])) return false;
+    if (value[7] != '-') return false;
+    if (!digit(value[8]) or !digit(value[9])) return false;
+    if (value[10] != 'T') return false;
+    if (!digit(value[11]) or !digit(value[12])) return false;
+    if (value[13] != ':') return false;
+    if (!digit(value[14]) or !digit(value[15])) return false;
+
+    // Optional :SS (positions 16,17,18 if present)
+    var idx: usize = 16;
+    if (idx < value.len and value[idx] == ':') {
+        if (idx + 2 >= value.len) return false;
+        if (!digit(value[idx + 1]) or !digit(value[idx + 2])) return false;
+        idx += 3;
+    }
+
+    // Optional trailing Z
+    if (idx < value.len) {
+        if (value[idx] != 'Z' or idx + 1 != value.len) return false;
+    }
+
+    // Basic range sanity. Parses are guaranteed to succeed because of the
+    // digit checks above.
+    const month = std.fmt.parseInt(u8, value[5..7], 10) catch return false;
+    const day = std.fmt.parseInt(u8, value[8..10], 10) catch return false;
+    const hour = std.fmt.parseInt(u8, value[11..13], 10) catch return false;
+    const minute = std.fmt.parseInt(u8, value[14..16], 10) catch return false;
+    if (month < 1 or month > 12) return false;
+    if (day < 1 or day > 31) return false;
+    if (hour > 23) return false;
+    if (minute > 59) return false;
+
+    return true;
+}
+
+test "validateDueDate" {
+    try std.testing.expect(validateDueDate("2025-12-25T12:00"));
+    try std.testing.expect(validateDueDate("2025-12-25T12:00:30"));
+    try std.testing.expect(validateDueDate("2025-12-25T12:00:30Z"));
+    try std.testing.expect(validateDueDate("2025-12-25T12:00Z"));
+    try std.testing.expect(!validateDueDate("2025-13-25T12:00"));
+    try std.testing.expect(!validateDueDate("not-a-date"));
+    try std.testing.expect(!validateDueDate(""));
+    try std.testing.expect(!validateDueDate("2025-12-25T25:00"));
+    try std.testing.expect(!validateDueDate("2025-12-25T12:60"));
+    try std.testing.expect(!validateDueDate("2025/12/25T12:00"));
+}
+
 // Tests
 test "validateEmail" {
     try std.testing.expect(validateEmail("test@example.com"));
