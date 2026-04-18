@@ -50,6 +50,8 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD avatar ON users TYPE option<string>;
         \\DEFINE FIELD email_verified ON users TYPE bool DEFAULT false;
         \\DEFINE FIELD verification_token ON users TYPE option<string>;
+        \\DEFINE FIELD verification_expires ON users TYPE option<int>;
+        \\DEFINE FIELD verification_attempts ON users TYPE int DEFAULT 0;
         \\DEFINE FIELD reset_token ON users TYPE option<string>;
         \\DEFINE FIELD reset_expires ON users TYPE option<int>;
         \\DEFINE INDEX email_idx ON users COLUMNS email UNIQUE;
@@ -91,7 +93,7 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
 
 pub fn createUser(allocator: std.mem.Allocator, email: []const u8, password_hash: []const u8, name: []const u8, verification_token: []const u8, verification_expires: i64) ![]u8 {
     return queryWithVars(allocator,
-        \\CREATE users SET email = $email, password_hash = $password_hash, name = $name, email_verified = false, verification_token = $verification_tkn, verification_expires = $expires;
+        \\CREATE users SET email = $email, password_hash = $password_hash, name = $name, email_verified = false, verification_token = $verification_tkn, verification_expires = $expires, verification_attempts = 0;
     , .{
         .email = email,
         .password_hash = password_hash,
@@ -114,12 +116,6 @@ pub fn getUserById(allocator: std.mem.Allocator, id: []const u8) ![]u8 {
     , .{ .record_id = id });
 }
 
-pub fn updateUserVerified(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
-    return queryWithVars(allocator,
-        \\UPDATE type::record($record_id) SET email_verified = true, verification_token = NONE;
-    , .{ .record_id = user_id });
-}
-
 pub fn updateUserName(allocator: std.mem.Allocator, user_id: []const u8, name: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\UPDATE type::record($record_id) SET name = $name;
@@ -129,6 +125,18 @@ pub fn updateUserName(allocator: std.mem.Allocator, user_id: []const u8, name: [
 pub fn updateUserPassword(allocator: std.mem.Allocator, user_id: []const u8, password_hash: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\UPDATE type::record($record_id) SET password_hash = $password_hash;
+    , .{ .record_id = user_id, .password_hash = password_hash });
+}
+
+/// Atomic reset: set new password hash AND clear reset_token/expires in one
+/// UPDATE, so the token can never survive a partial failure and be replayed.
+pub fn resetUserPasswordAndClearToken(
+    allocator: std.mem.Allocator,
+    user_id: []const u8,
+    password_hash: []const u8,
+) ![]u8 {
+    return queryWithVars(allocator,
+        \\UPDATE type::record($record_id) SET password_hash = $password_hash, reset_token = NONE, reset_expires = NONE;
     , .{ .record_id = user_id, .password_hash = password_hash });
 }
 
@@ -146,8 +154,9 @@ pub fn clearResetToken(allocator: std.mem.Allocator, user_id: []const u8) !void 
 }
 
 pub fn setVerificationToken(allocator: std.mem.Allocator, user_id: []const u8, token: []const u8, expires: i64) ![]u8 {
+    // SECURITY: reset the attempt counter so a fresh code gets a fresh budget.
     return queryWithVars(allocator,
-        \\UPDATE type::record($record_id) SET verification_token = $verification_tkn, verification_expires = $expires;
+        \\UPDATE type::record($record_id) SET verification_token = $verification_tkn, verification_expires = $expires, verification_attempts = 0;
     , .{ .record_id = user_id, .verification_tkn = token, .expires = expires });
 }
 
@@ -157,10 +166,51 @@ pub fn getUserByResetToken(allocator: std.mem.Allocator, token: []const u8) ![]u
     , .{ .reset_tkn = token });
 }
 
-pub fn getUserByVerificationToken(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
-    return queryWithVars(allocator,
-        \\SELECT * FROM users WHERE verification_token = $verification_tkn;
-    , .{ .verification_tkn = token });
+/// Atomic verify: marks email as verified ONLY if user_id + code + not-expired match.
+/// Returns true if verified, false if code was wrong or expired.
+/// Also clears the verification token on success so it can't be replayed.
+pub fn verifyUserEmailAtomic(
+    allocator: std.mem.Allocator,
+    user_id: []const u8,
+    code: []const u8,
+    now_ts: i64,
+) !bool {
+    const result = try queryWithVars(allocator,
+        \\UPDATE type::record($record_id) SET email_verified = true, verification_token = NONE, verification_expires = NONE, verification_attempts = 0 WHERE verification_token = $code AND (verification_expires = NONE OR verification_expires >= $now_ts) RETURN AFTER;
+    , .{ .record_id = user_id, .code = code, .now_ts = now_ts });
+    defer allocator.free(result);
+
+    // If no row updated, UPDATE returns []. Parse and check.
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.User), allocator, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    if (parsed.value.len == 0 or parsed.value[0].result.len == 0) return false;
+    return true;
+}
+
+/// Increment failed-attempts counter and invalidate token if threshold reached.
+/// Returns the number of attempts AFTER increment (so caller can decide messaging).
+pub fn bumpVerificationAttempts(
+    allocator: std.mem.Allocator,
+    user_id: []const u8,
+    max_attempts: u32,
+) !u32 {
+    const result = try queryWithVars(allocator,
+        \\UPDATE type::record($record_id) SET verification_attempts = (verification_attempts OR 0) + 1, verification_token = IF (verification_attempts OR 0) + 1 >= $max THEN NONE ELSE verification_token END, verification_expires = IF (verification_attempts OR 0) + 1 >= $max THEN NONE ELSE verification_expires END RETURN AFTER;
+    , .{ .record_id = user_id, .max = @as(i64, @intCast(max_attempts)) });
+    defer allocator.free(result);
+
+    const parsed = std.json.parseFromSlice(
+        []models.SurrealResponse(struct { verification_attempts: ?i64 = null }),
+        allocator,
+        result,
+        .{ .ignore_unknown_fields = true },
+    ) catch return 0;
+    defer parsed.deinit();
+
+    if (parsed.value.len == 0 or parsed.value[0].result.len == 0) return 0;
+    const attempts = parsed.value[0].result[0].verification_attempts orelse 0;
+    return @intCast(@max(attempts, 0));
 }
 
 // ============== TASK OPERATIONS ==============
@@ -332,4 +382,44 @@ pub fn cleanupExpiredSessions(allocator: std.mem.Allocator) !void {
         \\DELETE FROM sessions WHERE expires_at < time::from::millis($current_ms);
     , .{ .current_ms = current_ms });
     allocator.free(result);
+}
+
+// ============== BACKGROUND SESSION CLEANUP ==============
+
+var session_cleanup_thread: ?std.Thread = null;
+var session_cleanup_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+fn sessionCleanupLoop(allocator: std.mem.Allocator) void {
+    // Run once on startup to drop stale rows left over from a previous process.
+    cleanupExpiredSessions(allocator) catch |err| {
+        std.debug.print("⚠️ Initial session cleanup failed: {}\n", .{err});
+    };
+
+    // Then every hour. Sleep in 1s chunks so shutdown stays responsive.
+    while (session_cleanup_running.load(.acquire)) {
+        var i: usize = 0;
+        while (i < 3600 and session_cleanup_running.load(.acquire)) : (i += 1) {
+            std.Thread.sleep(1 * std.time.ns_per_s);
+        }
+        if (!session_cleanup_running.load(.acquire)) break;
+        cleanupExpiredSessions(allocator) catch |err| {
+            std.debug.print("⚠️ Session cleanup failed: {}\n", .{err});
+        };
+    }
+}
+
+pub fn startSessionCleanupThread(allocator: std.mem.Allocator) !void {
+    if (session_cleanup_thread != null) return;
+    session_cleanup_running.store(true, .release);
+    session_cleanup_thread = try std.Thread.spawn(.{}, sessionCleanupLoop, .{allocator});
+    std.debug.print("✅ Session cleanup thread started\n", .{});
+}
+
+pub fn stopSessionCleanupThread() void {
+    if (session_cleanup_thread) |thread| {
+        session_cleanup_running.store(false, .release);
+        thread.join();
+        session_cleanup_thread = null;
+        std.debug.print("🛑 Session cleanup thread stopped\n", .{});
+    }
 }

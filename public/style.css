@@ -911,3 +911,9 @@ body {
 .btn-delete:hover {
     opacity: 1;
 }
+
+.verify-now-link {
+    font-size: 0.8rem;
+    margin-left: 0.5rem;
+    color: var(--accent-primary);
+}

@@ -127,18 +127,30 @@ pub const RateLimiter = struct {
 pub var login_limiter: ?RateLimiter = null;
 pub var signup_limiter: ?RateLimiter = null;
 pub var forgot_password_limiter: ?RateLimiter = null;
+pub var verify_limiter: ?RateLimiter = null;
+pub var reset_password_limiter: ?RateLimiter = null;
+pub var resend_verification_limiter: ?RateLimiter = null;
 
 /// Initialize all rate limiters
 pub fn initAll(allocator: std.mem.Allocator) void {
     // Login: 5 attempts per minute
     login_limiter = RateLimiter.init(allocator, .{ .max_requests = 5, .window_seconds = 60 });
-    
+
     // Signup: 3 per minute (prevent account enumeration)
     signup_limiter = RateLimiter.init(allocator, .{ .max_requests = 3, .window_seconds = 60 });
-    
+
     // Forgot password: 3 per minute
     forgot_password_limiter = RateLimiter.init(allocator, .{ .max_requests = 3, .window_seconds = 60 });
-    
+
+    // Email verify: 10 per minute per IP (brute-force protection; per-user check also kicks in)
+    verify_limiter = RateLimiter.init(allocator, .{ .max_requests = 10, .window_seconds = 60 });
+
+    // Reset password submission: 5 per minute per IP
+    reset_password_limiter = RateLimiter.init(allocator, .{ .max_requests = 5, .window_seconds = 60 });
+
+    // Resend verification: 3 per 5 minutes (expensive: triggers Brevo send)
+    resend_verification_limiter = RateLimiter.init(allocator, .{ .max_requests = 3, .window_seconds = 300 });
+
     std.debug.print("✅ Rate limiters initialized\n", .{});
 }
 
@@ -147,6 +159,9 @@ pub fn cleanupAll() void {
     if (login_limiter) |*l| l.cleanup();
     if (signup_limiter) |*l| l.cleanup();
     if (forgot_password_limiter) |*l| l.cleanup();
+    if (verify_limiter) |*l| l.cleanup();
+    if (reset_password_limiter) |*l| l.cleanup();
+    if (resend_verification_limiter) |*l| l.cleanup();
 }
 
 var cleanup_thread: ?std.Thread = null;
@@ -191,8 +206,14 @@ pub fn deinitAll() void {
     if (login_limiter) |*l| l.deinit();
     if (signup_limiter) |*l| l.deinit();
     if (forgot_password_limiter) |*l| l.deinit();
-    
+    if (verify_limiter) |*l| l.deinit();
+    if (reset_password_limiter) |*l| l.deinit();
+    if (resend_verification_limiter) |*l| l.deinit();
+
     login_limiter = null;
     signup_limiter = null;
     forgot_password_limiter = null;
+    verify_limiter = null;
+    reset_password_limiter = null;
+    resend_verification_limiter = null;
 }

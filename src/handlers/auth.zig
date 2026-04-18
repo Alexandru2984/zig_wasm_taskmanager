@@ -72,8 +72,25 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     const verification_code = try auth.generateVerificationCode(req_alloc);
     const verification_expires = std.time.timestamp() + 600; // 10 minutes
 
-    // Create user in DB
+    // Create user in DB. SECURITY: the pre-check above has a TOCTOU — two
+    // parallel signups for the same email can both pass and then race at the
+    // UNIQUE index. When that happens, surface it as 400 "Email already exists"
+    // instead of a generic 500.
     const db_result = db.createUser(req_alloc, request.email, password_hash, name, verification_code, verification_expires) catch {
+        const dup_check = db.getUserByEmail(req_alloc, request.email) catch {
+            try http.jsonError(r, 500, "Failed to create user");
+            return;
+        };
+        defer req_alloc.free(dup_check);
+        const dup_parsed = std.json.parseFromSlice([]models.SurrealResponse(models.User), req_alloc, dup_check, .{ .ignore_unknown_fields = true }) catch {
+            try http.jsonError(r, 500, "Failed to create user");
+            return;
+        };
+        defer dup_parsed.deinit();
+        if (dup_parsed.value.len > 0 and dup_parsed.value[0].result.len > 0) {
+            try http.jsonError(r, 400, "Email already exists");
+            return;
+        }
         try http.jsonError(r, 500, "Failed to create user");
         return;
     };
@@ -144,6 +161,9 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     defer parsed.deinit();
 
     if (parsed.value.len == 0 or parsed.value[0].result.len == 0) {
+        // SECURITY: equalize timing with the real-user path so attackers can't
+        // probe which emails are registered by measuring response latency.
+        auth.burnTime(req_alloc, request.password);
         try http.jsonError(r, 401, "Invalid credentials");
         return;
     }
@@ -211,47 +231,61 @@ pub fn handleMe(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 }
 
 pub fn handleVerifyEmail(r: zap.Request, req_alloc: std.mem.Allocator) !void {
-    // Accept POST with JSON body containing { "code": "123456" }
+    // SECURITY: IP-level brute-force protection (10/min/IP). A global lookup by
+    // code is no longer possible — we bind the code to the authenticated user —
+    // so 6-digit entropy only needs to resist per-user brute-force.
+    const client_ip = http.getClientIp(r);
+    if (rate_limiter.verify_limiter) |*limiter| {
+        if (!limiter.isAllowed(client_ip)) {
+            r.setHeader("Retry-After", "60") catch {};
+            try http.jsonError(r, 429, "Too many verification attempts. Please wait 1 minute.");
+            return;
+        }
+    }
+
+    // SECURITY: require the logged-in session. Without this, any anonymous
+    // actor could iterate 6-digit codes and verify another user's mailbox.
+    const user_id = http.getCurrentUserId(req_alloc, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+
     const request = http.parseBody(req_alloc, r, struct { code: []const u8 }) catch {
         try http.jsonError(r, 400, "Invalid JSON body");
         return;
     };
 
     const code = request.code;
-    if (code.len == 0) {
-        try http.jsonError(r, 400, "Missing verification code");
+    if (code.len != 6) {
+        try http.jsonError(r, 400, "Invalid verification code");
         return;
     }
-
-    // Verify code in DB
-    const db_result = db.getUserByVerificationToken(req_alloc, code) catch {
-        try http.jsonError(r, 500, "Database error");
-        return;
-    };
-    defer req_alloc.free(db_result);
-
-    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.User), req_alloc, db_result, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-
-    if (parsed.value.len == 0 or parsed.value[0].result.len == 0) {
-        try http.jsonError(r, 400, "Invalid or expired code");
-        return;
-    }
-    const user = parsed.value[0].result[0];
-
-    // Check expiration
-    if (user.verification_expires) |expires| {
-        if (expires < std.time.timestamp()) {
-            try http.jsonError(r, 400, "Verification code expired");
+    for (code) |c| {
+        if (!std.ascii.isDigit(c)) {
+            try http.jsonError(r, 400, "Invalid verification code");
             return;
         }
     }
 
-    // Mark verified
-    _ = db.updateUserVerified(req_alloc, user.id) catch {
-        try http.jsonError(r, 500, "Failed to update user");
+    const now_ts = std.time.timestamp();
+    const verified = db.verifyUserEmailAtomic(req_alloc, user_id, code, now_ts) catch {
+        try http.jsonError(r, 500, "Database error");
         return;
     };
+
+    if (!verified) {
+        // SECURITY: 5 wrong attempts per user invalidates the current code; the
+        // user must resend. This caps per-user brute-force at 5/code regardless
+        // of how many IPs the attacker rotates.
+        const MAX_ATTEMPTS: u32 = 5;
+        const attempts = db.bumpVerificationAttempts(req_alloc, user_id, MAX_ATTEMPTS) catch 0;
+        if (attempts >= MAX_ATTEMPTS) {
+            try http.jsonError(r, 400, "Too many wrong attempts. Please resend the verification code.");
+            return;
+        }
+        try http.jsonError(r, 400, "Invalid or expired code");
+        return;
+    }
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "Email verified successfully" });
 }
@@ -302,11 +336,22 @@ pub fn handleForgotPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void 
 }
 
 pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
+    // SECURITY: rate-limit token guesses. Even though the token is 64 hex chars
+    // (256-bit entropy), a per-IP cap defends against pathological cases.
+    const client_ip = http.getClientIp(r);
+    if (rate_limiter.reset_password_limiter) |*limiter| {
+        if (!limiter.isAllowed(client_ip)) {
+            r.setHeader("Retry-After", "60") catch {};
+            try http.jsonError(r, 429, "Too many reset attempts. Please wait 1 minute.");
+            return;
+        }
+    }
+
     const Request = struct {
         token: []const u8,
         new_password: []const u8,
     };
-    
+
     const request = http.parseBody(req_alloc, r, Request) catch {
         try http.jsonError(r, 400, "Invalid JSON body");
         return;
@@ -349,19 +394,16 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         }
     }
 
-    // Update password
+    // SECURITY: update password AND invalidate the reset token in a single
+    // UPDATE so a partial failure can't leave the token reusable.
     const password_hash = try auth.hashPassword(req_alloc, request.new_password);
-    _ = db.updateUserPassword(req_alloc, user.id, password_hash) catch {
+    const upd = db.resetUserPasswordAndClearToken(req_alloc, user.id, password_hash) catch {
         try http.jsonError(r, 500, "Failed to update password");
         return;
     };
+    req_alloc.free(upd);
 
-    // SECURITY: Invalidate the reset token so it can't be replayed, and
-    // kill every existing session for this user — on password reset all
-    // devices should be forced to re-authenticate.
-    db.clearResetToken(req_alloc, user.id) catch |err| {
-        std.debug.print("Failed to clear reset token for {s}: {}\n", .{ user.id, err });
-    };
+    // SECURITY: force re-login on all devices after a password reset.
     db.deleteUserSessions(req_alloc, user.id) catch |err| {
         std.debug.print("Failed to invalidate sessions for {s}: {}\n", .{ user.id, err });
     };
@@ -397,6 +439,17 @@ pub fn handleLogout(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 }
 
 pub fn handleResendVerification(r: zap.Request, req_alloc: std.mem.Allocator) !void {
+    // SECURITY: resend triggers a Brevo API call and sends an email — expensive
+    // and abusable to spam a user's inbox. Cap at 3 per 5 minutes per IP.
+    const client_ip = http.getClientIp(r);
+    if (rate_limiter.resend_verification_limiter) |*limiter| {
+        if (!limiter.isAllowed(client_ip)) {
+            r.setHeader("Retry-After", "300") catch {};
+            try http.jsonError(r, 429, "Too many resend requests. Please wait 5 minutes.");
+            return;
+        }
+    }
+
     // Require authentication
     const user_id = http.getCurrentUserId(req_alloc, r) orelse {
         try http.jsonError(r, 401, "Not authenticated");

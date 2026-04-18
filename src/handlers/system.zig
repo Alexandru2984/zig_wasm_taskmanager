@@ -4,6 +4,7 @@ const db = @import("../db/db.zig");
 const app = @import("../app.zig");
 const models = @import("../domain/models.zig");
 const http = @import("../util/http.zig");
+const config = @import("../config/config.zig");
 
 pub fn handleHealth(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     _ = req_alloc;
@@ -32,32 +33,51 @@ pub fn handleReady(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     
     if (ready) {
         try http.jsonSuccess(r, response);
-    } else {
-        // Use jsonError or jsonSuccess with 503?
-        // jsonError takes a message string, but we want to return the structured response.
-        // So we use jsonSuccess but set status manually before?
-        // http.jsonSuccess sets status to .ok.
-        // Let's manually send it or add a helper.
-        // Or just use jsonSuccess and let the client check the status field.
-        // But standard practice is 503.
-        
-        r.setStatus(.service_unavailable);
-        r.setHeader("Content-Type", "application/json") catch {};
-        
-        var list = std.ArrayListUnmanaged(u8){};
-        defer list.deinit(req_alloc);
-        
-        var w = list.writer(req_alloc);
-        var buf: [128]u8 = undefined;
-        var adapter = w.adaptToNewApi(&buf);
-        try std.json.Stringify.value(response, .{}, &adapter.new_interface);
-        try r.sendBody(list.items);
+        return;
     }
+
+    r.setStatus(.service_unavailable);
+    r.setHeader("Content-Type", "application/json") catch {};
+    var list = std.ArrayListUnmanaged(u8){};
+    defer list.deinit(req_alloc);
+    var w = list.writer(req_alloc);
+    var buf: [128]u8 = undefined;
+    var adapter = w.adaptToNewApi(&buf);
+    try std.json.Stringify.value(response, .{}, &adapter.new_interface);
+    try r.sendBody(list.items);
+}
+
+/// Constant-time slice compare. We can't use std.crypto.timing_safe.eql here
+/// because it only accepts fixed-size arrays.
+fn constantTimeEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var acc: u8 = 0;
+    for (a, b) |x, y| acc |= x ^ y;
+    return acc == 0;
 }
 
 pub fn handleMetrics(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     _ = req_alloc;
-    
+
+    // SECURITY: /api/metrics leaks app internals (uptime, version). Gate it
+    // behind METRICS_TOKEN: if set, require Authorization: Bearer <token>.
+    // If METRICS_TOKEN is unset, the endpoint is disabled entirely.
+    const expected = config.get("METRICS_TOKEN") orelse {
+        r.setStatus(.not_found);
+        try r.sendBody("404 Not Found");
+        return;
+    };
+    const auth_hdr = r.getHeader("authorization") orelse {
+        r.setStatus(.unauthorized);
+        try r.sendBody("401 Unauthorized");
+        return;
+    };
+    if (!std.mem.startsWith(u8, auth_hdr, "Bearer ") or !constantTimeEql(auth_hdr[7..], expected)) {
+        r.setStatus(.unauthorized);
+        try r.sendBody("401 Unauthorized");
+        return;
+    }
+
     const uptime = std.time.timestamp() - app.start_time;
     
     var metrics_buf: [1024]u8 = undefined;

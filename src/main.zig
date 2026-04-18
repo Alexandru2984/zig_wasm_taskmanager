@@ -36,10 +36,23 @@ pub fn main() !void {
         log.warn("Failed to start rate limiter cleanup thread: {}", .{err});
     };
 
+    // Start session cleanup thread (deletes expired rows from `sessions` hourly)
+    db.startSessionCleanupThread(allocator) catch |err| {
+        log.warn("Failed to start session cleanup thread: {}", .{err});
+    };
+    defer db.stopSessionCleanupThread();
+
     // Read server config from .env (with defaults)
     const port_str = config.get("PORT") orelse "9000";
     const port: u16 = std.fmt.parseInt(u16, port_str, 10) catch 9000;
     const interface = config.get("INTERFACE") orelse "127.0.0.1";
+
+    // SECURITY: warn if CORS_ORIGIN is missing so operators don't accidentally
+    // deploy without cross-origin protection (and because our frontend needs
+    // the cookie + origin match to work through nginx).
+    if (config.get("CORS_ORIGIN") == null) {
+        log.warn("CORS_ORIGIN is not set in .env — cross-origin requests will have no ACAO header", .{});
+    }
     
     var listener = zap.HttpListener.init(.{
         .port = port,
@@ -85,19 +98,28 @@ fn handleRequest(r: zap.Request) anyerror!void {
 
 fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !void {
     r.setHeader("Content-Type", "application/json") catch {};
-    
-    // SECURITY: CORS origin from .env config (defaults to * for development)
-    const cors_origin = config.getOrDefault("CORS_ORIGIN", "*");
-    r.setHeader("Access-Control-Allow-Origin", cors_origin) catch {};
+
+    // SECURITY: CORS_ORIGIN must be explicitly set in .env. We refuse to send
+    // "*" combined with Allow-Credentials (browsers reject it anyway, but
+    // leaving a wildcard would silently disable CORS for our own frontend).
+    if (config.get("CORS_ORIGIN")) |cors_origin| {
+        r.setHeader("Access-Control-Allow-Origin", cors_origin) catch {};
+        r.setHeader("Access-Control-Allow-Credentials", "true") catch {};
+    }
     r.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS") catch {};
     r.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization") catch {};
-    r.setHeader("Access-Control-Allow-Credentials", "true") catch {};
     
     // SECURITY: Additional security headers
     r.setHeader("X-Content-Type-Options", "nosniff") catch {};
     r.setHeader("X-Frame-Options", "DENY") catch {};
     r.setHeader("Referrer-Policy", "strict-origin-when-cross-origin") catch {};
-    r.setHeader("X-XSS-Protection", "1; mode=block") catch {};
+    // HSTS. Opt-in via HSTS_MAX_AGE so it's never enabled during pure-HTTP
+    // local dev (setting HSTS on http://localhost would poison the browser
+    // cache for future HTTPS work on the same host).
+    if (config.get("HSTS_MAX_AGE")) |max_age| {
+        const hsts_value = std.fmt.allocPrint(req_alloc, "max-age={s}; includeSubDomains", .{max_age}) catch "max-age=31536000; includeSubDomains";
+        r.setHeader("Strict-Transport-Security", hsts_value) catch {};
+    }
 
     if (r.method) |method| {
         if (std.mem.eql(u8, method, "OPTIONS")) {
@@ -196,18 +218,18 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
 fn serveStatic(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !void {
     // SECURITY: Block path traversal attacks
     if (std.mem.indexOf(u8, path, "..") != null) {
-        std.debug.print("🚫 Path traversal blocked: {s}\n", .{path});
+        log.warn("Path traversal blocked: {s}", .{path});
         r.setStatus(.forbidden);
         try r.sendBody("403 Forbidden");
         return;
     }
-    
+
     // SECURITY: Block hidden files and sensitive paths
-    if (std.mem.startsWith(u8, path, "/.") or 
+    if (std.mem.startsWith(u8, path, "/.") or
         std.mem.indexOf(u8, path, "/.") != null or
         std.mem.eql(u8, path, "/db_settings.txt") or
-        std.mem.eql(u8, path, "/mail_settings.txt")) {
-        std.debug.print("🚫 Hidden/sensitive file blocked: {s}\n", .{path});
+        std.mem.eql(u8, path, "/mail_settings.txt"))
+    {
         r.setStatus(.not_found);
         try r.sendBody("404 Not Found");
         return;
@@ -215,11 +237,8 @@ fn serveStatic(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !
 
     const file_path = if (std.mem.eql(u8, path, "/"))
         "public/index.html"
-    else blk: {
-        var buf: [256]u8 = undefined;
-        const p = std.fmt.bufPrint(&buf, "public{s}", .{path}) catch "public/index.html";
-        break :blk p;
-    };
+    else
+        try std.fmt.allocPrint(req_alloc, "public{s}", .{path});
     
     // SECURITY: Verify resolved path stays within public directory
     const cwd = std.fs.cwd();
@@ -237,7 +256,7 @@ fn serveStatic(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !
     
     // Ensure file is within public directory
     if (!std.mem.startsWith(u8, real_path, public_base)) {
-        std.debug.print("🚫 Path escape blocked: {s} not in {s}\n", .{real_path, public_base});
+        log.warn("Path escape blocked: {s} not in {s}", .{ real_path, public_base });
         r.setStatus(.forbidden);
         try r.sendBody("403 Forbidden");
         return;
@@ -269,10 +288,17 @@ fn serveStatic(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !
     r.setHeader("X-Content-Type-Options", "nosniff") catch {};
     r.setHeader("X-Frame-Options", "SAMEORIGIN") catch {};
     r.setHeader("Referrer-Policy", "strict-origin-when-cross-origin") catch {};
+    if (config.get("HSTS_MAX_AGE")) |max_age| {
+        const hsts_value = std.fmt.allocPrint(req_alloc, "max-age={s}; includeSubDomains", .{max_age}) catch "max-age=31536000; includeSubDomains";
+        r.setHeader("Strict-Transport-Security", hsts_value) catch {};
+    }
     
-    // Add CSP for HTML pages only
+    // Add CSP for HTML pages only. SECURITY: scripts have no 'unsafe-inline' —
+    // all handlers are wired in app.js via addEventListener. 'unsafe-inline' is
+    // still allowed for style (reset-password.html uses a <style> block); a
+    // later pass can move that to an external stylesheet and drop it.
     if (std.mem.eql(u8, ext, ".html")) {
-        r.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://task.micutu.com") catch {};
+        r.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'") catch {};
     }
 
     const file = cwd.openFile(file_path, .{}) catch {
@@ -283,7 +309,14 @@ fn serveStatic(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !
     defer file.close();
 
     const stat = try file.stat();
-    // Use req_alloc (Arena) instead of global allocator to avoid leaks
+    // SECURITY: cap static file size so an accidentally-huge file in public/
+    // can't blow RAM per request. 10 MiB is plenty for HTML/CSS/JS/WASM.
+    const MAX_STATIC: u64 = 10 * 1024 * 1024;
+    if (stat.size > MAX_STATIC) {
+        r.setStatus(.content_too_large);
+        try r.sendBody("413 Content Too Large");
+        return;
+    }
     const content = try req_alloc.alloc(u8, stat.size);
 
     _ = try file.readAll(content);

@@ -54,14 +54,15 @@ pub const initSchema = impl.initSchema;
 pub const createUser = impl.createUser;
 pub const getUserByEmail = impl.getUserByEmail;
 pub const getUserById = impl.getUserById;
-pub const updateUserVerified = impl.updateUserVerified;
 pub const updateUserName = impl.updateUserName;
 pub const updateUserPassword = impl.updateUserPassword;
+pub const resetUserPasswordAndClearToken = impl.resetUserPasswordAndClearToken;
 pub const setResetToken = impl.setResetToken;
 pub const clearResetToken = impl.clearResetToken;
 pub const setVerificationToken = impl.setVerificationToken;
 pub const getUserByResetToken = impl.getUserByResetToken;
-pub const getUserByVerificationToken = impl.getUserByVerificationToken;
+pub const verifyUserEmailAtomic = impl.verifyUserEmailAtomic;
+pub const bumpVerificationAttempts = impl.bumpVerificationAttempts;
 
 // Task operations
 pub const createTask = impl.createTask;
@@ -79,3 +80,5 @@ pub const validateSession = impl.validateSession;
 pub const deleteSession = impl.deleteSession;
 pub const deleteUserSessions = impl.deleteUserSessions;
 pub const cleanupExpiredSessions = impl.cleanupExpiredSessions;
+pub const startSessionCleanupThread = impl.startSessionCleanupThread;
+pub const stopSessionCleanupThread = impl.stopSessionCleanupThread;

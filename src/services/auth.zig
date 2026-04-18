@@ -8,6 +8,13 @@ const ARGON2_T_COST = 3;          // Time cost (iterations)
 const ARGON2_M_COST = 65536;      // Memory cost (64 MB)
 const ARGON2_PARALLELISM = 4;     // Parallelism
 
+// SECURITY: fixed decoy hash used by login when the email is unknown, so that
+// response time matches the real-user path and timing can't be used to probe
+// which accounts exist. Salt is all zeros / hash value doesn't matter — we only
+// care that verifyPassword does the full Argon2 derivation.
+const DUMMY_ARGON2_HASH: []const u8 =
+    "$argon2id$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000";
+
 /// Hash a password using Argon2id with random salt
 /// Returns format: "$argon2id$salt_hex$hash_hex"
 pub fn hashPassword(allocator: std.mem.Allocator, password: []const u8) ![]u8 {
@@ -108,22 +115,15 @@ fn verifyArgon2Password(allocator: std.mem.Allocator, stored_hash: []const u8, p
 }
 
 fn verifyLegacyPassword(allocator: std.mem.Allocator, stored_hash: []const u8, password: []const u8) !bool {
-    // Legacy FNV-1a hash (for migration only)
-    // SECURITY: In production, LEGACY_SECRET MUST be set in .env
-    const SECRET = blk: {
-        if (config.get("LEGACY_SECRET")) |secret| {
-            break :blk secret;
-        }
-        // Check if we're in debug/development mode
-        if (std.debug.runtime_safety) {
-            // Dev mode: warn but use fallback
-            std.debug.print("⚠️ WARNING: LEGACY_SECRET not set! Using default (DEV ONLY)\n", .{});
-            break :blk "zig-task-manager-secret-2024";
-        }
-        // Production mode: fail fast
-        @panic("LEGACY_SECRET environment variable is REQUIRED in production. Set it in your .env file.");
+    // Legacy FNV-1a hash kept only for users migrating from pre-Argon2 installs.
+    // SECURITY: LEGACY_SECRET has no default. If it is not set, any legacy hash
+    // that might still exist simply fails to verify — the user must reset their
+    // password. This is safer than silently falling back to a well-known secret.
+    const SECRET = config.get("LEGACY_SECRET") orelse {
+        std.debug.print("⚠️ LEGACY_SECRET not set — legacy hash verification disabled\n", .{});
+        return false;
     };
-    
+
     var hash: u64 = 14695981039346656037;
     for (password) |byte| {
         hash ^= byte;
@@ -170,4 +170,11 @@ pub fn createToken(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
 pub fn generateVerificationCode(allocator: std.mem.Allocator) ![]u8 {
     const code = std.crypto.random.intRangeAtMost(u32, 100000, 999999);
     return try std.fmt.allocPrint(allocator, "{d}", .{code});
+}
+
+/// Equalize login response time when the user doesn't exist. Runs Argon2 over a
+/// fixed decoy hash so timing leaks don't distinguish "no such user" from
+/// "wrong password". Return value is ignored; only the elapsed time matters.
+pub fn burnTime(allocator: std.mem.Allocator, password: []const u8) void {
+    _ = verifyPassword(allocator, DUMMY_ARGON2_HASH, password) catch {};
 }

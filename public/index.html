@@ -16,8 +16,8 @@
         <div class="nav-menu" id="navMenu">
             <!-- Logged out state -->
             <div class="nav-auth" id="authButtons">
-                <button class="btn-nav" onclick="showModal('loginModal')">Login</button>
-                <button class="btn-nav btn-primary" onclick="showModal('signupModal')">Sign Up</button>
+                <button class="btn-nav" data-action="show-modal" data-target="loginModal">Login</button>
+                <button class="btn-nav btn-primary" data-action="show-modal" data-target="signupModal">Sign Up</button>
             </div>
             <!-- Logged in state -->
             <div class="nav-user hidden" id="userMenu">
@@ -32,10 +32,10 @@
                             <span class="user-email" id="userEmail">user@example.com</span>
                         </div>
                         <hr>
-                        <button class="dropdown-item" onclick="showModal('profileModal')">
+                        <button class="dropdown-item" data-action="show-modal" data-target="profileModal">
                             👤 Profile
                         </button>
-                        <button class="dropdown-item" onclick="logout()">
+                        <button class="dropdown-item" data-action="logout">
                             🚪 Logout
                         </button>
                     </div>
@@ -113,11 +113,11 @@
 
     <!-- Login Modal -->
     <div class="modal" id="loginModal">
-        <div class="modal-overlay" onclick="hideModal('loginModal')"></div>
+        <div class="modal-overlay" data-action="hide-modal" data-target="loginModal"></div>
         <div class="modal-content">
-            <button class="modal-close" onclick="hideModal('loginModal')">×</button>
+            <button class="modal-close" data-action="hide-modal" data-target="loginModal">×</button>
             <h2>Welcome Back</h2>
-            <form id="loginForm" onsubmit="handleLogin(event)">
+            <form id="loginForm">
                 <div class="form-group">
                     <label for="loginEmail">Email</label>
                     <input type="email" id="loginEmail" required placeholder="you@example.com">
@@ -130,21 +130,21 @@
                 <button type="submit" class="btn-submit">Login</button>
             </form>
             <p class="modal-footer">
-                <a href="#" onclick="switchModal('loginModal', 'forgotModal')">Forgot password?</a>
+                <a href="#" data-action="switch-modal" data-from="loginModal" data-to="forgotModal">Forgot password?</a>
             </p>
             <p class="modal-footer">
-                Don't have an account? <a href="#" onclick="switchModal('loginModal', 'signupModal')">Sign up</a>
+                Don't have an account? <a href="#" data-action="switch-modal" data-from="loginModal" data-to="signupModal">Sign up</a>
             </p>
         </div>
     </div>
 
     <!-- Signup Modal -->
     <div class="modal" id="signupModal">
-        <div class="modal-overlay" onclick="hideModal('signupModal')"></div>
+        <div class="modal-overlay" data-action="hide-modal" data-target="signupModal"></div>
         <div class="modal-content">
-            <button class="modal-close" onclick="hideModal('signupModal')">×</button>
+            <button class="modal-close" data-action="hide-modal" data-target="signupModal">×</button>
             <h2>Create Account</h2>
-            <form id="signupForm" onsubmit="handleSignup(event)">
+            <form id="signupForm">
                 <div class="form-group">
                     <label for="signupName">Name</label>
                     <input type="text" id="signupName" required placeholder="John Doe">
@@ -161,34 +161,34 @@
                 <button type="submit" class="btn-submit">Create Account</button>
             </form>
             <p class="modal-footer">
-                Already have an account? <a href="#" onclick="switchModal('signupModal', 'loginModal')">Login</a>
+                Already have an account? <a href="#" data-action="switch-modal" data-from="signupModal" data-to="loginModal">Login</a>
             </p>
         </div>
     </div>
 
     <!-- Verify Email Modal -->
     <div class="modal" id="verifyModal">
-        <div class="modal-overlay" onclick="hideModal('verifyModal')"></div>
+        <div class="modal-overlay" data-action="hide-modal" data-target="verifyModal"></div>
         <div class="modal-content">
-            <button class="modal-close" onclick="hideModal('verifyModal')">×</button>
+            <button class="modal-close" data-action="hide-modal" data-target="verifyModal">×</button>
             <h2>Verify Email</h2>
             <p class="modal-desc">Enter the 6-digit code sent to your email.</p>
-            <form id="verifyForm" onsubmit="handleVerifyEmail(event)">
+            <form id="verifyForm">
                 <div class="code-input-group">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 0)">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 1)">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 2)">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 3)">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 4)">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required onkeyup="handleCodeInput(this, 5)">
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="0">
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="1">
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="2">
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="3">
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="4">
+                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="5">
                 </div>
                 <div class="form-error" id="verifyError"></div>
                 <div class="form-success hidden" id="verifySuccess">✅ Email verified successfully!</div>
                 <button type="submit" class="btn-submit">Verify Account</button>
             </form>
             <p class="modal-footer" id="resendSection">
-                Didn't receive it? 
-                <a href="#" id="resendLink" onclick="handleResendCode(event)">Resend Code</a>
+                Didn't receive it?
+                <a href="#" id="resendLink" data-action="resend-code">Resend Code</a>
                 <span id="resendTimer" class="resend-timer hidden"></span>
             </p>
         </div>
@@ -196,12 +196,12 @@
 
     <!-- Forgot Password Modal -->
     <div class="modal" id="forgotModal">
-        <div class="modal-overlay" onclick="hideModal('forgotModal')"></div>
+        <div class="modal-overlay" data-action="hide-modal" data-target="forgotModal"></div>
         <div class="modal-content">
-            <button class="modal-close" onclick="hideModal('forgotModal')">×</button>
+            <button class="modal-close" data-action="hide-modal" data-target="forgotModal">×</button>
             <h2>Reset Password</h2>
             <p class="modal-desc">Enter your email and we'll send you a reset link.</p>
-            <form id="forgotForm" onsubmit="handleForgotPassword(event)">
+            <form id="forgotForm">
                 <div class="form-group">
                     <label for="forgotEmail">Email</label>
                     <input type="email" id="forgotEmail" required placeholder="you@example.com">
@@ -213,16 +213,16 @@
                 <button type="submit" class="btn-submit">Send Reset Link</button>
             </form>
             <p class="modal-footer">
-                <a href="#" onclick="switchModal('forgotModal', 'loginModal')">← Back to login</a>
+                <a href="#" data-action="switch-modal" data-from="forgotModal" data-to="loginModal">← Back to login</a>
             </p>
         </div>
     </div>
 
     <!-- Profile Modal -->
     <div class="modal" id="profileModal">
-        <div class="modal-overlay" onclick="hideModal('profileModal')"></div>
+        <div class="modal-overlay" data-action="hide-modal" data-target="profileModal"></div>
         <div class="modal-content modal-lg">
-            <button class="modal-close" onclick="hideModal('profileModal')">×</button>
+            <button class="modal-close" data-action="hide-modal" data-target="profileModal">×</button>
             <h2>Your Profile</h2>
             
             <div class="profile-header">
@@ -237,13 +237,13 @@
             </div>
 
             <div class="profile-tabs">
-                <button class="tab-btn active" onclick="switchProfileTab('edit')">Edit Profile</button>
-                <button class="tab-btn" onclick="switchProfileTab('password')">Change Password</button>
+                <button class="tab-btn active" data-action="switch-tab" data-tab="edit">Edit Profile</button>
+                <button class="tab-btn" data-action="switch-tab" data-tab="password">Change Password</button>
             </div>
 
             <!-- Edit Profile Tab -->
             <div class="tab-content active" id="tabEdit">
-                <form id="profileForm" onsubmit="handleUpdateProfile(event)">
+                <form id="profileForm">
                     <div class="form-group">
                         <label for="profileNameInput">Name</label>
                         <input type="text" id="profileNameInput" required placeholder="Your name">
@@ -256,7 +256,7 @@
 
             <!-- Change Password Tab -->
             <div class="tab-content" id="tabPassword">
-                <form id="passwordForm" onsubmit="handleChangePassword(event)">
+                <form id="passwordForm">
                     <div class="form-group">
                         <label for="currentPassword">Current Password</label>
                         <input type="password" id="currentPassword" required placeholder="••••••••">

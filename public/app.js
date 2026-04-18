@@ -40,39 +40,20 @@ function getFormButton(form) {
     return form.querySelector('button[type="submit"]');
 }
 
-function getToken() {
-    return localStorage.getItem('token');
-}
-
-function setToken(token) {
-    localStorage.setItem('token', token);
-}
-
-function removeToken() {
-    localStorage.removeItem('token');
-}
-
 function isLoggedIn() {
     return currentUser !== null;
 }
 
+// SECURITY: auth is carried by the HttpOnly session cookie set by the server.
+// We deliberately do not read or store the token in JS; otherwise any XSS
+// would exfiltrate it. All fetches that need auth must use credentials:'include'.
 async function checkAuth() {
-    const token = getToken();
-    if (!token) {
-        showLoggedOut();
-        return;
-    }
-
     try {
-        const response = await fetch('/api/auth/me', {
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-
+        const response = await fetch('/api/auth/me', { credentials: 'include' });
         if (response.ok) {
             currentUser = await response.json();
             showLoggedIn(currentUser);
         } else {
-            removeToken();
             showLoggedOut();
         }
     } catch (error) {
@@ -100,7 +81,7 @@ function showLoggedIn(user) {
     } else {
         badge.innerHTML = `
             <span class="badge badge-warning">⚠️ Not Verified</span>
-            <a href="#" onclick="showModal('verifyModal'); hideModal('profileModal')" style="font-size: 0.8rem; margin-left: 0.5rem; color: var(--accent-primary)">Verify Now</a>
+            <a href="#" class="verify-now-link" data-action="verify-now">Verify Now</a>
         `;
     }
 }
@@ -187,40 +168,31 @@ async function handleSignup(e) {
 
     setButtonLoading(btn, true);
     try {
-        console.log('📤 Sending signup request...');
         const response = await fetch('/api/auth/signup', {
             method: 'POST',
+            credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, email, password })
         });
 
-        console.log('📥 Response status:', response.status);
-        const text = await response.text();
-        console.log('📥 Response text:', text);
-        
         let data;
         try {
-            data = JSON.parse(text);
+            data = await response.json();
         } catch (parseError) {
-            console.error('❌ JSON parse error:', parseError);
             errorEl.textContent = 'Server returned invalid response';
             return;
         }
 
         if (response.ok) {
-            setToken(data.token);
             currentUser = data.user;
             showLoggedIn(currentUser);
             hideModal('signupModal');
             loadTasks();
-            
-            // Show verify modal
             showModal('verifyModal');
         } else {
             errorEl.textContent = data.error || 'Signup failed';
         }
     } catch (error) {
-        console.error('❌ Signup error:', error);
         errorEl.textContent = 'Connection error: ' + error.message;
     } finally {
         setButtonLoading(btn, false);
@@ -239,6 +211,7 @@ async function handleLogin(e) {
     try {
         const response = await fetch('/api/auth/login', {
             method: 'POST',
+            credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password })
         });
@@ -246,7 +219,6 @@ async function handleLogin(e) {
         const data = await response.json();
 
         if (response.ok) {
-            setToken(data.token);
             currentUser = data.user;
             showLoggedIn(currentUser);
             hideModal('loginModal');
@@ -271,19 +243,16 @@ async function logout() {
     } catch (err) {
         console.warn('Server logout failed, clearing client state anyway:', err);
     }
-    removeToken();
     showLoggedOut();
-    loadTasks(); // Will now load from localStorage
+    loadTasks();
 }
 
 // ============ PROFILE & VERIFICATION HANDLERS ============
 
-function switchProfileTab(tabName) {
-    // Buttons
+function switchProfileTab(tabName, clickedBtn) {
     document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-    event.target.classList.add('active');
-    
-    // Content
+    if (clickedBtn) clickedBtn.classList.add('active');
+
     document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
     if (tabName === 'edit') {
         document.getElementById('tabEdit').classList.add('active');
@@ -301,10 +270,8 @@ async function handleUpdateProfile(e) {
     try {
         const response = await fetch('/api/profile', {
             method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${getToken()}`
-            },
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name })
         });
         
@@ -339,10 +306,8 @@ async function handleChangePassword(e) {
     try {
         const response = await fetch('/api/profile/password', {
             method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${getToken()}`
-            },
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ old_password: currentPassword, new_password: newPassword })
         });
         
@@ -387,9 +352,7 @@ async function handleForgotPassword(e) {
     }
 }
 
-// Verification Code Logic
-function handleCodeInput(input, index) {
-    // Auto-focus next input
+function handleCodeKeyup(input, index) {
     if (input.value.length === 1) {
         input.classList.add('filled');
         const next = document.querySelectorAll('.code-input')[index + 1];
@@ -397,18 +360,17 @@ function handleCodeInput(input, index) {
     } else {
         input.classList.remove('filled');
     }
-    
-    // Handle backspace
-    input.addEventListener('keydown', (e) => {
-        if (e.key === 'Backspace' && input.value.length === 0) {
-            const prev = document.querySelectorAll('.code-input')[index - 1];
-            if (prev) {
-                prev.focus();
-                prev.value = '';
-                prev.classList.remove('filled');
-            }
+}
+
+function handleCodeKeydown(e, input, index) {
+    if (e.key === 'Backspace' && input.value.length === 0) {
+        const prev = document.querySelectorAll('.code-input')[index - 1];
+        if (prev) {
+            prev.focus();
+            prev.value = '';
+            prev.classList.remove('filled');
         }
-    });
+    }
 }
 
 async function handleVerifyEmail(e) {
@@ -474,7 +436,7 @@ async function handleResendCode(e) {
     try {
         const response = await fetch('/api/auth/resend-verification', {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${getToken()}` }
+            credentials: 'include'
         });
         
         if (response.ok) {
@@ -510,7 +472,7 @@ async function loadTasks() {
         // Logged in: get from API
         try {
             const response = await fetch('/api/tasks', {
-                headers: { 'Authorization': `Bearer ${getToken()}` }
+                credentials: 'include'
             });
             tasks = await response.json();
         } catch (error) {
@@ -629,10 +591,8 @@ async function addTask(title, dueDate = null) {
             
             const response = await fetch('/api/tasks', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${getToken()}`
-                },
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(taskData)
             });
 
@@ -654,7 +614,7 @@ async function toggleTask(id) {
         try {
             await fetch(`/api/tasks/${id}`, {
                 method: 'PUT',
-                headers: { 'Authorization': `Bearer ${getToken()}` }
+                credentials: 'include'
             });
             loadTasks();
         } catch (error) {
@@ -671,7 +631,7 @@ async function deleteTask(id) {
         try {
             await fetch(`/api/tasks/${id}`, {
                 method: 'DELETE',
-                headers: { 'Authorization': `Bearer ${getToken()}` }
+                credentials: 'include'
             });
             loadTasks();
         } catch (error) {
@@ -814,9 +774,69 @@ document.getElementById('completedTaskList').addEventListener('click', (e) => {
     }
 });
 
+// ============ DATA-ACTION BINDINGS (CSP: no inline handlers) ============
+
+function bindDataActions() {
+    // Click delegation for all data-action buttons/links anywhere in the page.
+    document.body.addEventListener('click', (e) => {
+        const el = e.target.closest('[data-action]');
+        if (!el) return;
+
+        const action = el.dataset.action;
+        switch (action) {
+            case 'show-modal':
+                showModal(el.dataset.target);
+                break;
+            case 'hide-modal':
+                hideModal(el.dataset.target);
+                break;
+            case 'switch-modal':
+                e.preventDefault();
+                switchModal(el.dataset.from, el.dataset.to);
+                break;
+            case 'logout':
+                logout();
+                break;
+            case 'switch-tab':
+                switchProfileTab(el.dataset.tab, el);
+                break;
+            case 'verify-now':
+                e.preventDefault();
+                showModal('verifyModal');
+                hideModal('profileModal');
+                break;
+            case 'resend-code':
+                handleResendCode(e);
+                break;
+        }
+    });
+
+    // Form submit bindings.
+    const forms = {
+        loginForm: handleLogin,
+        signupForm: handleSignup,
+        verifyForm: handleVerifyEmail,
+        forgotForm: handleForgotPassword,
+        profileForm: handleUpdateProfile,
+        passwordForm: handleChangePassword,
+    };
+    for (const [id, handler] of Object.entries(forms)) {
+        const form = document.getElementById(id);
+        if (form) form.addEventListener('submit', handler);
+    }
+
+    // Verification-code input handlers.
+    document.querySelectorAll('.code-input').forEach((input) => {
+        const index = parseInt(input.dataset.codeIndex || '0', 10);
+        input.addEventListener('keyup', () => handleCodeKeyup(input, index));
+        input.addEventListener('keydown', (e) => handleCodeKeydown(e, input, index));
+    });
+}
+
 // ============ INIT ============
 
 document.addEventListener('DOMContentLoaded', async () => {
+    bindDataActions();
     await initWasm();
     await checkAuth();
     loadTasks();

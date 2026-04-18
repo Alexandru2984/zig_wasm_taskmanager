@@ -10,40 +10,68 @@ const config = @import("../config/config.zig");
 // REQUEST HELPERS
 // ==========================================
 
-/// Get client IP for rate limiting (supports X-Real-IP from Nginx)
-pub fn getClientIp(r: zap.Request) []const u8 {
-    // Check for Nginx forwarded IP first
-    if (r.getHeader("x-real-ip")) |ip| return ip;
-    if (r.getHeader("x-forwarded-for")) |forwarded| {
-        // X-Forwarded-For can have multiple IPs, take the first one
-        if (std.mem.indexOf(u8, forwarded, ",")) |comma| {
-            return forwarded[0..comma];
-        }
-        return forwarded;
+/// Remote socket peer address, as reported by facil.io (never user-controlled).
+fn getPeerIp(r: zap.Request) []const u8 {
+    const info = zap.fio.http_peer_addr(r.h);
+    if (info.data) |ptr| {
+        if (info.len > 0) return ptr[0..info.len];
     }
-    // Fallback to default
-    return "127.0.0.1";
+    return "";
 }
 
-/// Get current user ID from session cookie or Authorization header
-/// Priority: Cookie (more secure) > Authorization header (backwards compatible)
+/// Returns true if the immediate TCP peer is in the TRUST_PROXY whitelist
+/// (comma-separated list of IPs in .env). Only then do we trust client-supplied
+/// X-Real-IP / X-Forwarded-For headers.
+fn peerIsTrustedProxy(peer: []const u8) bool {
+    const trust = config.get("TRUST_PROXY") orelse return false;
+    if (trust.len == 0 or peer.len == 0) return false;
+    var it = std.mem.splitScalar(u8, trust, ',');
+    while (it.next()) |raw| {
+        const entry = std.mem.trim(u8, raw, " \t");
+        if (entry.len == 0) continue;
+        if (std.mem.eql(u8, entry, peer)) return true;
+    }
+    return false;
+}
+
+/// Get client IP for rate limiting.
+/// SECURITY: X-Real-IP / X-Forwarded-For are only honored when the TCP peer is
+/// in TRUST_PROXY. Otherwise anyone could spoof these headers and bypass
+/// per-IP rate limits. Falls back to the socket peer IP, or "unknown" if the
+/// peer address is unavailable (all unknowns share one rate-limit bucket).
+pub fn getClientIp(r: zap.Request) []const u8 {
+    const peer = getPeerIp(r);
+
+    if (peerIsTrustedProxy(peer)) {
+        if (r.getHeader("x-real-ip")) |ip| return ip;
+        if (r.getHeader("x-forwarded-for")) |forwarded| {
+            if (std.mem.indexOf(u8, forwarded, ",")) |comma| {
+                return std.mem.trim(u8, forwarded[0..comma], " \t");
+            }
+            return std.mem.trim(u8, forwarded, " \t");
+        }
+    }
+
+    if (peer.len > 0) return peer;
+    return "unknown";
+}
+
+/// Get current user ID from session cookie or Authorization header.
+/// Priority: Cookie (more secure) > Authorization header (backwards compatible).
+/// Falls through to Bearer if the cookie is present but its session is invalid —
+/// previously a stale cookie would cause the Bearer path to never be tried.
 pub fn getCurrentUserId(allocator: std.mem.Allocator, r: zap.Request) ?[]const u8 {
-    // First try HttpOnly cookie (preferred, more secure)
     r.parseCookies(false);
     if (r.getCookieStr(allocator, "session_token")) |maybe_cookie| {
         if (maybe_cookie) |token| {
-            const user_id = db.validateSession(allocator, token) catch return null;
-            return user_id;
+            if (db.validateSession(allocator, token) catch null) |uid| return uid;
         }
     } else |_| {}
 
-    // Fallback to Authorization header (backwards compatible)
     const auth_header = r.getHeader("authorization") orelse return null;
     if (!std.mem.startsWith(u8, auth_header, "Bearer ")) return null;
     const token = auth_header[7..];
-    
-    const user_id = db.validateSession(allocator, token) catch return null;
-    return user_id;
+    return db.validateSession(allocator, token) catch null;
 }
 
 /// Set HttpOnly session cookie (secure against XSS)
@@ -73,34 +101,19 @@ pub fn clearAuthCookie(r: zap.Request) void {
     }) catch {};
 }
 
-/// Parse JSON body into a struct
+/// Maximum JSON body size accepted by any endpoint.
+/// Our largest legitimate body is a few hundred bytes (signup); 64 KB is a
+/// generous cap that still stops "POST {10 MB of junk}" DoS attempts.
+pub const MAX_BODY_SIZE: usize = 64 * 1024;
+
+/// Parse JSON body into a struct. Caller must pass the request arena as
+/// `allocator` so all unescaped strings live exactly as long as the request.
 pub fn parseBody(allocator: std.mem.Allocator, r: zap.Request, comptime T: type) !T {
     const body = r.body orelse return error.NoBody;
-    
+    if (body.len > MAX_BODY_SIZE) return error.BodyTooLarge;
+
     const parsed = try std.json.parseFromSlice(T, allocator, body, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
-    
-    // We need to duplicate the strings because parsed.value references the body/internal buffer
-    // and we want to return a struct that owns its memory or at least persists if we copy it.
-    // Actually, std.json.parseFromSlice returns a Parsed(T).
-    // If we return T, we lose the arena that holds the strings if they were allocated.
-    // BUT, if we use the request arena (allocator), the strings are allocated there.
-    // The `parsed` object holds the arena if it created one, but here we pass the allocator.
-    // So `parsed.value` contains slices pointing into `body` (if source is slice) or allocated in `allocator`.
-    // Since `body` is owned by `zap.Request` (which might be transient?), we should be careful.
-    // Zap request body is valid until the request handler returns.
-    // So if we use the data within the handler, it's fine.
-    // However, `std.json.parseFromSlice` might allocate for unescaping strings.
-    
-    // To be safe and simple: We return the Parsed(T) and let the caller deinit it?
-    // Or we just return T and assume caller uses it within request scope.
-    // `parsed.deinit()` frees the internal arena if it used one.
-    // If we passed an allocator, it uses that.
-    
-    // Let's return T, but we can't `defer parsed.deinit()` if T depends on it.
-    // Actually `std.json.parseFromSlice` with an allocator uses that allocator.
-    // If we use the Arena allocator of the request, we don't need to deinit `parsed`.
-    
     return parsed.value;
 }
 

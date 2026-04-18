@@ -174,7 +174,10 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
         
         // Handle different types
         if (FieldType == []const u8 or FieldType == []u8) {
-            // String: escape and quote
+            // String: escape and quote. SECURITY: cover NUL + all control bytes,
+            // and reject lone surrogates/bytes >0x7F we can't safely pass
+            // through. Anything that slips past escape becomes injection, so we
+            // prefer to fail closed on control characters.
             try writer.writeByte('"');
             for (value) |c| {
                 switch (c) {
@@ -183,6 +186,10 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
                     '\n' => try writer.writeAll("\\n"),
                     '\r' => try writer.writeAll("\\r"),
                     '\t' => try writer.writeAll("\\t"),
+                    0x00 => return error.InvalidInput,
+                    0x01...0x08, 0x0B, 0x0C, 0x0E...0x1F, 0x7F => {
+                        try writer.print("\\u{x:0>4}", .{c});
+                    },
                     else => try writer.writeByte(c),
                 }
             }
@@ -194,14 +201,20 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
             // Boolean
             try writer.print("{s};\n", .{if (value) "true" else "false"});
         } else if (@typeInfo(FieldType) == .optional) {
-            // Optional: write NONE if null, otherwise unwrap
+            // Optional: write NONE if null, otherwise escape as string.
             if (value) |v| {
-                // Recursively handle the inner type - for now assume string
                 try writer.writeByte('"');
                 for (v) |c| {
                     switch (c) {
                         '"' => try writer.writeAll("\\\""),
                         '\\' => try writer.writeAll("\\\\"),
+                        '\n' => try writer.writeAll("\\n"),
+                        '\r' => try writer.writeAll("\\r"),
+                        '\t' => try writer.writeAll("\\t"),
+                        0x00 => return error.InvalidInput,
+                        0x01...0x08, 0x0B, 0x0C, 0x0E...0x1F, 0x7F => {
+                            try writer.print("\\u{x:0>4}", .{c});
+                        },
                         else => try writer.writeByte(c),
                     }
                 }
@@ -210,7 +223,12 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
                 try writer.writeAll("NONE;\n");
             }
         } else if (FieldType == [64]u8) {
-            // Fixed-size array (token) - treat as string
+            // Fixed-size array (session token) — hex only by construction, but
+            // validate defensively: if anything non-hex shows up, refuse.
+            for (&value) |c| {
+                const is_hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+                if (!is_hex) return error.InvalidInput;
+            }
             try writer.writeByte('"');
             try writer.writeAll(&value);
             try writer.writeAll("\";\n");

@@ -146,7 +146,16 @@ pub fn sendConfirmationEmail(allocator: std.mem.Allocator, to_email: []const u8,
 }
 
 pub fn sendPasswordResetEmail(allocator: std.mem.Allocator, to_email: []const u8, token: []const u8) !void {
-    const reset_link = try std.fmt.allocPrint(allocator, "http://localhost:9000/reset-password.html?token={s}", .{token});
+    // SECURITY: The reset link must point at the deployed app, not localhost.
+    // APP_BASE_URL is required in .env (e.g. https://task.example.com). Without
+    // it the email would ship a dead localhost link and users would paste the
+    // token elsewhere to try to make it work.
+    const base_url = config.get("APP_BASE_URL") orelse {
+        std.debug.print("❌ APP_BASE_URL not set; refusing to send reset email with broken link\n", .{});
+        return error.MissingAppBaseUrl;
+    };
+    const trimmed = std.mem.trimRight(u8, base_url, "/");
+    const reset_link = try std.fmt.allocPrint(allocator, "{s}/reset-password.html?token={s}", .{ trimmed, token });
     defer allocator.free(reset_link);
 
     const subject = "Reset your password - Zig Task Manager";

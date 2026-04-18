@@ -3,6 +3,7 @@ const zap = @import("zap");
 const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
 const http = @import("../util/http.zig");
+const validation = @import("../util/validation.zig");
 
 pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     const user_id = http.getCurrentUserId(req_alloc, r) orelse {
@@ -26,10 +27,9 @@ pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     }
 
-    // Map to TaskResponse
     var tasks = std.ArrayListUnmanaged(models.TaskResponse){};
-    defer tasks.deinit(req_alloc); // We pass tasks.items to jsonSuccess, which copies it to output buffer.
-    
+    defer tasks.deinit(req_alloc);
+
     for (parsed.value[0].result) |task| {
         try tasks.append(req_alloc, .{
             .id = task.id,
@@ -45,13 +45,7 @@ pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 
 pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     const user_id = http.getCurrentUserId(req_alloc, r) orelse {
-        // Original logic sent "useLocal": true
-        r.setStatus(.unauthorized);
-        // We can't easily add extra fields to standard error response without a custom struct
-        // But let's stick to standard error for now, or just send the custom JSON manually if needed.
-        // "{\"error\": \"Login required\", \"useLocal\": true}"
-        // Let's use a custom anonymous struct
-        try http.jsonError(r, 401, "Login required"); // Simplify for now
+        try http.jsonError(r, 401, "Login required");
         return;
     };
 
@@ -60,8 +54,8 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     };
 
-    if (request.title.len == 0) {
-        try http.jsonError(r, 400, "Missing title");
+    if (!validation.validateTaskTitle(request.title)) {
+        try http.jsonError(r, 400, "Title must be between 1 and 500 characters");
         return;
     }
 
