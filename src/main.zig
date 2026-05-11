@@ -3,6 +3,7 @@ const zap = @import("zap");
 const app = @import("app.zig");
 const db = @import("db/db.zig");
 const config = @import("config/config.zig");
+const http = @import("util/http.zig");
 const log = @import("util/log.zig");
 const rate_limiter = @import("util/rate_limiter.zig");
 
@@ -11,6 +12,8 @@ const auth_handler = @import("handlers/auth.zig");
 const tasks_handler = @import("handlers/tasks.zig");
 const profile_handler = @import("handlers/profile.zig");
 const system_handler = @import("handlers/system.zig");
+const activity_handler = @import("handlers/activity.zig");
+const reminders = @import("services/reminders.zig");
 
 // Global allocator (will use GPA from app module)
 var allocator: std.mem.Allocator = undefined;
@@ -41,6 +44,11 @@ pub fn main() !void {
         log.warn("Failed to start session cleanup thread: {}", .{err});
     };
     defer db.stopSessionCleanupThread();
+
+    reminders.startReminderThread(allocator) catch |err| {
+        log.warn("Failed to start reminder thread: {}", .{err});
+    };
+    defer reminders.stopReminderThread();
 
     // Read server config from .env (with defaults)
     const port_str = config.get("PORT") orelse "9000";
@@ -107,7 +115,7 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         r.setHeader("Access-Control-Allow-Credentials", "true") catch {};
     }
     r.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS") catch {};
-    r.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization") catch {};
+    r.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token") catch {};
 
     // SECURITY: Additional security headers
     r.setHeader("X-Content-Type-Options", "nosniff") catch {};
@@ -145,9 +153,14 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         return;
     }
 
+    const req_method = r.method orelse "";
+    if (requiresCsrf(req_method, path) and !http.verifyCsrfToken(req_alloc, r)) {
+        try http.jsonError(r, 403, "Invalid CSRF token");
+        return;
+    }
+
     // Auth routes. Every state-changing endpoint must be POST; /api/auth/me is
     // a read and allows GET. Reject anything else with 405 Method Not Allowed.
-    const req_method = r.method orelse "";
     const AuthRoute = struct { path: []const u8, method: []const u8, handler: *const fn (zap.Request, std.mem.Allocator) anyerror!void };
     const auth_routes = [_]AuthRoute{
         .{ .path = "/api/auth/signup", .method = "POST", .handler = auth_handler.handleSignup },
@@ -201,6 +214,17 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         return;
     }
 
+    if (std.mem.eql(u8, path, "/api/activity")) {
+        if (!std.mem.eql(u8, req_method, "GET")) {
+            r.setHeader("Allow", "GET") catch {};
+            r.setStatus(.method_not_allowed);
+            try r.sendBody("{\"error\": \"Method not allowed\"}");
+            return;
+        }
+        try activity_handler.getActivity(r, req_alloc);
+        return;
+    }
+
     // Task routes
     if (std.mem.eql(u8, path, "/api/tasks")) {
         if (r.method) |method| {
@@ -245,6 +269,22 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         r.setStatus(.not_found);
         try r.sendBody("{\"error\": \"Not found\"}");
     }
+}
+
+fn requiresCsrf(method: []const u8, path: []const u8) bool {
+    if (std.mem.eql(u8, method, "GET") or
+        std.mem.eql(u8, method, "HEAD") or
+        std.mem.eql(u8, method, "OPTIONS"))
+    {
+        return false;
+    }
+
+    // These endpoints either create an authenticated browser session or are
+    // started from an email link, so no CSRF cookie is guaranteed to exist yet.
+    return !(std.mem.eql(u8, path, "/api/auth/signup") or
+        std.mem.eql(u8, path, "/api/auth/login") or
+        std.mem.eql(u8, path, "/api/auth/forgot-password") or
+        std.mem.eql(u8, path, "/api/auth/reset-password"));
 }
 
 fn serveStatic(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !void {

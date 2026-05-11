@@ -52,6 +52,7 @@ pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
             .created_at = task.created_at,
             .due_date = task.due_date,
             .priority = task.priority,
+            .reminder_sent = task.reminder_sent,
         });
     }
 
@@ -102,6 +103,9 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     }
     const task = parsed.value[0].result[0];
+    db.logActivity(req_alloc, user_id, "create_task", "task", task.id) catch |err| {
+        std.debug.print("Failed to log create task activity: {}\n", .{err});
+    };
 
     const response = models.TaskResponse{
         .id = task.id,
@@ -110,6 +114,7 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         .created_at = task.created_at,
         .due_date = task.due_date,
         .priority = task.priority,
+        .reminder_sent = task.reminder_sent,
     };
 
     try http.jsonCreated(r, response);
@@ -148,6 +153,9 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         return;
     }
     const task = parsed.value[0].result[0];
+    db.logActivity(req_alloc, user_id, "toggle_task", "task", task.id) catch |err| {
+        std.debug.print("Failed to log toggle task activity: {}\n", .{err});
+    };
 
     const response = models.TaskResponse{
         .id = task.id,
@@ -156,6 +164,7 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         .created_at = task.created_at,
         .due_date = task.due_date,
         .priority = task.priority,
+        .reminder_sent = task.reminder_sent,
     };
 
     try http.jsonSuccess(r, response);
@@ -181,6 +190,9 @@ pub fn deleteTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
     _ = db.deleteTask(req_alloc, task_id) catch {
         try http.jsonError(r, 500, "Failed to delete task");
         return;
+    };
+    db.logActivity(req_alloc, user_id, "delete_task", "task", task_id) catch |err| {
+        std.debug.print("Failed to log delete task activity: {}\n", .{err});
     };
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "success" });

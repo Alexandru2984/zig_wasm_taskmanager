@@ -15,17 +15,19 @@ systemd-sandboxed VPS deployment.
 - Argon2id password hashing and server-side sessions carried by HttpOnly
   cookies.
 - Email verification and password reset through SMTP.
+- Optional email reminders for overdue incomplete tasks.
+- Activity log API for account and task actions.
 - Per-route rate limiting, strict CORS, CSP, HSTS, safe static-file serving,
-  and protected metrics.
+  CSRF protection, and protected metrics.
 - Production deployment behind nginx/TLS with a hardened systemd service.
 
 ## Portfolio Summary
 
 Built and deployed a production-style task manager in Zig with Zap, SurrealDB,
 WASM frontend, Argon2id authentication, HttpOnly session cookies, email
-verification/password reset via self-hosted SMTP, rate limiting, CSP/HSTS
-security headers, systemd sandboxing, health/readiness endpoints, and protected
-metrics.
+verification/password reset via self-hosted SMTP, optional task reminders,
+activity logging, CSRF protection, rate limiting, CSP/HSTS security headers,
+systemd sandboxing, health/readiness endpoints, and protected metrics.
 
 More: [docs/PORTFOLIO.md](docs/PORTFOLIO.md)
 
@@ -107,6 +109,7 @@ Main endpoint groups:
 - `/api/auth/*`: signup, login, logout, verification, password reset
 - `/api/profile*`: profile and password changes
 - `/api/tasks*`: task CRUD with priority and due-date metadata
+- `/api/activity`: authenticated activity log
 - `/api/health`, `/api/ready`, `/api/metrics`: operational endpoints
 
 ## Security
@@ -117,6 +120,7 @@ Current controls include:
 
 - Argon2id password hashing
 - server-side sessions with HttpOnly cookies
+- double-submit CSRF protection for cookie-authenticated writes
 - reset-token invalidation and session invalidation after password reset
 - authenticated email verification with per-user attempt caps
 - route-specific rate limiting
@@ -147,13 +151,11 @@ docs/                   deployment, architecture, roadmap, OpenAPI, portfolio
 The current roadmap focuses on making the app more useful while keeping the
 engineering work visible:
 
-- explicit CSRF protection
 - isolated integration test database
-- CI with secret scanning
+- secret scanning
 - task labels
-- email reminders
 - recurring tasks
-- activity log and export
+- activity export
 
 More: [docs/ROADMAP.md](docs/ROADMAP.md)
 

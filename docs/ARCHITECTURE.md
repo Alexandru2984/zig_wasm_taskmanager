@@ -32,6 +32,7 @@ SurrealDB HTTP API on localhost
 - `src/services/auth.zig` handles password hashing, verification, reset tokens,
   and verification codes.
 - `src/services/email.zig` builds MIME messages and sends them through SMTP.
+- `src/services/reminders.zig` runs the optional due-task reminder worker.
 - `src/db/surreal.zig` exposes repository-style functions for users, tasks, and
   sessions.
 - `src/db/http_client.zig` performs SurrealDB HTTP requests and binds variables
@@ -53,14 +54,13 @@ Core tables:
   fields.
 - `sessions`: opaque session token, `users` record reference, expiry timestamp.
 - `tasks`: `users` record reference, title, priority, completion state,
-  creation time, optional due date.
+  creation time, optional due date, reminder marker.
+- `activity_events`: account and task audit history for the current user.
 
 Planned task extensions:
 
 - labels
-- reminder timestamp and sent marker
 - recurrence rule
-- activity log events
 
 ## Operational Model
 
@@ -76,3 +76,4 @@ The service exposes:
 - `/api/health`: process liveness
 - `/api/ready`: database/config readiness
 - `/api/metrics`: protected metrics, enabled only with `METRICS_TOKEN`
+- `/api/activity`: authenticated user activity history

@@ -45,6 +45,20 @@ function isLoggedIn() {
     return currentUser !== null;
 }
 
+function getCookie(name) {
+    const prefix = `${name}=`;
+    return document.cookie
+        .split(';')
+        .map(part => part.trim())
+        .find(part => part.startsWith(prefix))
+        ?.slice(prefix.length) || '';
+}
+
+function csrfHeaders(headers = {}) {
+    const token = getCookie('csrf_token');
+    return token ? { ...headers, 'X-CSRF-Token': token } : headers;
+}
+
 // SECURITY: auth is carried by the HttpOnly session cookie set by the server.
 // We deliberately do not read or store the token in JS; otherwise any XSS
 // would exfiltrate it. All fetches that need auth must use credentials:'include'.
@@ -241,7 +255,8 @@ async function logout() {
     try {
         await fetch('/api/auth/logout', {
             method: 'POST',
-            credentials: 'include'
+            credentials: 'include',
+            headers: csrfHeaders()
         });
     } catch (err) {
         console.warn('Server logout failed, clearing client state anyway:', err);
@@ -274,7 +289,7 @@ async function handleUpdateProfile(e) {
         const response = await fetch('/api/profile', {
             method: 'PUT',
             credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
+            headers: csrfHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ name })
         });
         
@@ -310,7 +325,7 @@ async function handleChangePassword(e) {
         const response = await fetch('/api/profile/password', {
             method: 'PUT',
             credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
+            headers: csrfHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ old_password: currentPassword, new_password: newPassword })
         });
         
@@ -396,7 +411,8 @@ async function handleVerifyEmail(e) {
     try {
         const response = await fetch('/api/auth/verify', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            headers: csrfHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ code })
         });
         
@@ -439,7 +455,8 @@ async function handleResendCode(e) {
     try {
         const response = await fetch('/api/auth/resend-verification', {
             method: 'POST',
-            credentials: 'include'
+            credentials: 'include',
+            headers: csrfHeaders()
         });
         
         if (response.ok) {
@@ -617,7 +634,7 @@ async function addTask(title, dueDate = null, priority = 'normal') {
             const response = await fetch('/api/tasks', {
                 method: 'POST',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                headers: csrfHeaders({ 'Content-Type': 'application/json' }),
                 body: JSON.stringify(taskData)
             });
 
@@ -639,7 +656,8 @@ async function toggleTask(id) {
         try {
             await fetch(`/api/tasks/${id}`, {
                 method: 'PUT',
-                credentials: 'include'
+                credentials: 'include',
+                headers: csrfHeaders()
             });
             loadTasks();
         } catch (error) {
@@ -656,7 +674,8 @@ async function deleteTask(id) {
         try {
             await fetch(`/api/tasks/${id}`, {
                 method: 'DELETE',
-                credentials: 'include'
+                credentials: 'include',
+                headers: csrfHeaders()
             });
             loadTasks();
         } catch (error) {

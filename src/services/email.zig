@@ -349,6 +349,31 @@ pub fn sendPasswordResetEmail(allocator: std.mem.Allocator, to_email: []const u8
     try sendEmail(allocator, to_email, "", subject, body);
 }
 
+pub fn sendTaskReminderEmail(
+    allocator: std.mem.Allocator,
+    to_email: []const u8,
+    to_name: []const u8,
+    task_title: []const u8,
+    due_date: []const u8,
+) !void {
+    const subject = "Task reminder - Task Manager";
+    const body = try std.fmt.allocPrint(allocator,
+        \\Hello {s},
+        \\
+        \\This is a reminder for your task:
+        \\{s}
+        \\
+        \\Due date:
+        \\{s}
+        \\
+        \\Best regards,
+        \\Task Manager
+    , .{ to_name, task_title, due_date });
+    defer allocator.free(body);
+
+    try sendEmail(allocator, to_email, to_name, subject, body);
+}
+
 fn sendEmail(allocator: std.mem.Allocator, to_email: []const u8, to_name: []const u8, subject: []const u8, text_content: []const u8) !void {
     const email_cfg = try getEmailConfig();
 

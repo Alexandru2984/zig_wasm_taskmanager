@@ -72,6 +72,12 @@ pub const toggleTask = impl.toggleTask;
 pub const deleteTask = impl.deleteTask;
 pub const getTaskOwner = impl.getTaskOwner;
 pub const verifyTaskOwnership = impl.verifyTaskOwnership;
+pub const getDueTasksForReminders = impl.getDueTasksForReminders;
+pub const markTaskReminderSent = impl.markTaskReminderSent;
+
+// Activity operations
+pub const logActivity = impl.logActivity;
+pub const getActivityByUser = impl.getActivityByUser;
 
 // Session operations
 pub const generateSecureToken = impl.generateSecureToken;

@@ -235,6 +235,20 @@ paths:
           description: Task deleted
         "403":
           description: Task does not belong to current user
+  /api/activity:
+    get:
+      summary: List recent activity for the current user
+      responses:
+        "200":
+          description: Activity list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActivityEvent"
+        "401":
+          description: Not authenticated
 components:
   securitySchemes:
     bearerAuth:
@@ -283,6 +297,32 @@ components:
         priority:
           type: string
           enum: [low, normal, high]
+        reminder_sent:
+          type: boolean
+    ActivityEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        action:
+          type: string
+          enum:
+            - signup
+            - login
+            - logout
+            - verify_email
+            - resend_verification
+            - update_profile
+            - change_password
+            - create_task
+            - toggle_task
+            - delete_task
+        entity_type:
+          type: string
+        entity_id:
+          type: string
+        created_at:
+          type: string
     Task:
       type: object
       properties:

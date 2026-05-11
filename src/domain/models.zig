@@ -25,6 +25,7 @@ pub const Task = struct {
     created_at: []const u8, // SurrealDB returns datetime as string in JSON
     due_date: ?[]const u8 = null,
     priority: []const u8 = "normal",
+    reminder_sent: bool = false,
 };
 
 pub const Session = struct {
@@ -86,6 +87,24 @@ pub const TaskResponse = struct {
     created_at: []const u8,
     due_date: ?[]const u8 = null,
     priority: []const u8 = "normal",
+    reminder_sent: bool = false,
+};
+
+pub const ActivityEvent = struct {
+    id: []const u8,
+    user_id: []const u8,
+    action: []const u8,
+    entity_type: []const u8,
+    entity_id: []const u8 = "",
+    created_at: []const u8,
+};
+
+pub const ActivityResponse = struct {
+    id: []const u8,
+    action: []const u8,
+    entity_type: []const u8,
+    entity_id: []const u8 = "",
+    created_at: []const u8,
 };
 
 // --- Common ---

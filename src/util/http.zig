@@ -4,6 +4,13 @@ const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
 const config = @import("../config/config.zig");
 
+const SESSION_COOKIE = "session_token";
+const CSRF_COOKIE = "csrf_token";
+
+fn cookieSecure() bool {
+    return !std.mem.eql(u8, config.getOrDefault("COOKIE_INSECURE", "0"), "1");
+}
+
 // ==========================================
 // REQUEST HELPERS
 // ==========================================
@@ -59,12 +66,9 @@ pub fn getClientIp(r: zap.Request) []const u8 {
 /// Falls through to Bearer if the cookie is present but its session is invalid —
 /// previously a stale cookie would cause the Bearer path to never be tried.
 pub fn getCurrentUserId(allocator: std.mem.Allocator, r: zap.Request) ?[]const u8 {
-    r.parseCookies(false);
-    if (r.getCookieStr(allocator, "session_token")) |maybe_cookie| {
-        if (maybe_cookie) |token| {
-            if (db.validateSession(allocator, token) catch null) |uid| return uid;
-        }
-    } else |_| {}
+    if (getSessionTokenFromCookie(r)) |token| {
+        if (db.validateSession(allocator, token) catch null) |uid| return uid;
+    }
 
     const auth_header = r.getHeader("authorization") orelse return null;
     if (!std.mem.startsWith(u8, auth_header, "Bearer ")) return null;
@@ -75,15 +79,26 @@ pub fn getCurrentUserId(allocator: std.mem.Allocator, r: zap.Request) ?[]const u
 /// Set HttpOnly session cookie (secure against XSS)
 pub fn setAuthCookie(r: zap.Request, token: []const u8) void {
     r.setCookie(.{
-        .name = "session_token",
+        .name = SESSION_COOKIE,
         .value = token,
         .http_only = true,
         // SECURITY: Mark Secure so the cookie is only sent over HTTPS.
         // All production deployments sit behind nginx+TLS; for pure-local
         // http://127.0.0.1 testing, set COOKIE_INSECURE=1 in .env.
-        .secure = !std.mem.eql(u8, config.getOrDefault("COOKIE_INSECURE", "0"), "1"),
+        .secure = cookieSecure(),
         .same_site = .Strict,
         .max_age_s = 7 * 24 * 60 * 60, // 7 days in seconds
+        .path = "/",
+    }) catch {};
+
+    const csrf_token = db.generateSecureToken();
+    r.setCookie(.{
+        .name = CSRF_COOKIE,
+        .value = csrf_token[0..],
+        .http_only = false,
+        .secure = cookieSecure(),
+        .same_site = .Strict,
+        .max_age_s = 7 * 24 * 60 * 60,
         .path = "/",
     }) catch {};
 }
@@ -91,12 +106,52 @@ pub fn setAuthCookie(r: zap.Request, token: []const u8) void {
 /// Clear session cookie (for logout)
 pub fn clearAuthCookie(r: zap.Request) void {
     r.setCookie(.{
-        .name = "session_token",
+        .name = SESSION_COOKIE,
         .value = "",
         .http_only = true,
         .max_age_s = 0, // Expire immediately
         .path = "/",
     }) catch {};
+    r.setCookie(.{
+        .name = CSRF_COOKIE,
+        .value = "",
+        .http_only = false,
+        .max_age_s = 0,
+        .path = "/",
+    }) catch {};
+}
+
+/// Validate double-submit CSRF protection for cookie-authenticated unsafe
+/// requests. Bearer clients do not send browser cookies and are not CSRFable.
+fn findCookieValue(cookie_header: []const u8, name: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, cookie_header, ';');
+    while (it.next()) |raw| {
+        const cookie = std.mem.trim(u8, raw, " \t");
+        if (cookie.len <= name.len or cookie[name.len] != '=') continue;
+        if (std.mem.eql(u8, cookie[0..name.len], name)) return cookie[name.len + 1 ..];
+    }
+    return null;
+}
+
+pub fn getSessionTokenFromCookie(r: zap.Request) ?[]const u8 {
+    const cookie_header = r.getHeader("cookie") orelse return null;
+    return findCookieValue(cookie_header, SESSION_COOKIE);
+}
+
+pub fn verifyCsrfToken(_: std.mem.Allocator, r: zap.Request) bool {
+    if (r.getHeader("authorization")) |auth_header| {
+        if (std.mem.startsWith(u8, auth_header, "Bearer ")) return true;
+    }
+
+    const cookie_header = r.getHeader("cookie") orelse return true;
+    const session_cookie = findCookieValue(cookie_header, SESSION_COOKIE) orelse return true;
+    if (session_cookie.len == 0) return true;
+
+    const csrf_cookie = findCookieValue(cookie_header, CSRF_COOKIE) orelse return false;
+    const csrf_header = r.getHeader("x-csrf-token") orelse r.getHeader("X-CSRF-Token") orelse return false;
+
+    if (csrf_cookie.len == 0 or csrf_header.len == 0) return false;
+    return std.mem.eql(u8, csrf_cookie, csrf_header);
 }
 
 /// Maximum JSON body size accepted by any endpoint.

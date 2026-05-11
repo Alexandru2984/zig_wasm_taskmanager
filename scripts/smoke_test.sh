@@ -33,6 +33,10 @@ echo ""
 
 curl_opts=( "${extra_curl_opts[@]}" -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" )
 
+csrf_token() {
+    awk '$6 == "csrf_token" { token = $7 } END { print token }' "$COOKIE_JAR" 2>/dev/null
+}
+
 # Helper function
 test_endpoint() {
     local name="$1"
@@ -46,12 +50,21 @@ test_endpoint() {
     if [ "$method" = "GET" ]; then
         response=$(curl "${curl_opts[@]}" "$BASE_URL$endpoint" 2>&1)
     else
+        local csrf
+        csrf="$(csrf_token)"
+        local csrf_args=()
+        if [ -n "$csrf" ]; then
+            csrf_args=( -H "X-CSRF-Token: $csrf" )
+        fi
+
         if [ -n "$data" ]; then
             response=$(curl "${curl_opts[@]}" -X "$method" "$BASE_URL$endpoint" \
                 -H "Content-Type: application/json" \
+                "${csrf_args[@]}" \
                 -d "$data" 2>&1)
         else
-            response=$(curl "${curl_opts[@]}" -X "$method" "$BASE_URL$endpoint" 2>&1)
+            response=$(curl "${curl_opts[@]}" -X "$method" "$BASE_URL$endpoint" \
+                "${csrf_args[@]}" 2>&1)
         fi
     fi
 
@@ -147,6 +160,18 @@ echo ""
 echo "=== Task Operations ==="
 test_endpoint "Get Tasks (Empty)" "GET" "/api/tasks" "" "\[\]" || true
 
+echo -n "Testing CSRF required for task writes... "
+csrf_status=$(curl "${curl_opts[@]}" -s -o /dev/null -w "%{http_code}" -X POST "$BASE_URL/api/tasks" \
+    -H "Content-Type: application/json" \
+    -d "{\"title\":\"Missing CSRF\"}")
+if [ "$csrf_status" = "403" ]; then
+    echo -e "${GREEN}✓ PASS${NC}"
+    PASS=$((PASS + 1))
+else
+    echo -e "${RED}✗ FAIL${NC} (got $csrf_status, expected 403)"
+    FAIL=$((FAIL + 1))
+fi
+
 test_endpoint "Create Task" "POST" "/api/tasks" \
     "{\"title\":\"Smoke Test Task\",\"priority\":\"high\"}" "Smoke Test Task" || true
 TASK_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
@@ -158,6 +183,7 @@ if [ -n "$TASK_ID" ]; then
     test_endpoint "Get Tasks (List)" "GET" "/api/tasks" "" "$TASK_ID" || true
     test_endpoint "Toggle Task" "PUT" "/api/tasks/$TASK_ID" "" "true" || true
     test_endpoint "Delete Task" "DELETE" "/api/tasks/$TASK_ID" "" "success" || true
+    test_endpoint "Activity Log" "GET" "/api/activity" "" "create_task" || true
 fi
 
 echo ""

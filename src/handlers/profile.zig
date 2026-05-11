@@ -57,6 +57,9 @@ pub fn updateProfile(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 500, "Failed to update profile");
         return;
     };
+    db.logActivity(req_alloc, user_id, "update_profile", "user", user_id) catch |err| {
+        std.debug.print("Failed to log profile activity: {}\n", .{err});
+    };
 
     // Return updated profile
     // We could fetch it again, or just construct it if we trust the update
@@ -144,6 +147,9 @@ pub fn changePassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     _ = db.updateUserPassword(req_alloc, user_id, new_hash) catch {
         try http.jsonError(r, 500, "Failed to update password");
         return;
+    };
+    db.logActivity(req_alloc, user_id, "change_password", "user", user_id) catch |err| {
+        std.debug.print("Failed to log password activity: {}\n", .{err});
     };
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "Password updated successfully" });

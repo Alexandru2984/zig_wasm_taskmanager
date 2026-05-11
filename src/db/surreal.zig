@@ -69,6 +69,8 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD created_at ON tasks TYPE datetime DEFAULT time::now();
         \\DEFINE FIELD due_date ON tasks TYPE option<datetime> ASSERT $value == NONE OR $value >= created_at;
         \\DEFINE FIELD priority ON tasks TYPE string DEFAULT "normal";
+        \\DEFINE FIELD reminder_sent ON tasks TYPE bool DEFAULT false;
+        \\DEFINE FIELD reminder_sent_at ON tasks TYPE option<datetime>;
     ;
 
     const tasks_result = try query(allocator, tasks_schema);
@@ -86,6 +88,18 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
 
     const sessions_result = try query(allocator, sessions_schema);
     defer allocator.free(sessions_result);
+
+    const activity_schema =
+        \\DEFINE TABLE activity_events SCHEMAFULL;
+        \\DEFINE FIELD user_id ON activity_events TYPE record<users>;
+        \\DEFINE FIELD action ON activity_events TYPE string;
+        \\DEFINE FIELD entity_type ON activity_events TYPE string;
+        \\DEFINE FIELD entity_id ON activity_events TYPE string DEFAULT "";
+        \\DEFINE FIELD created_at ON activity_events TYPE datetime DEFAULT time::now();
+    ;
+
+    const activity_result = try query(allocator, activity_schema);
+    defer allocator.free(activity_result);
 
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
 }
@@ -218,7 +232,7 @@ pub fn bumpVerificationAttempts(
 
 pub fn createTask(allocator: std.mem.Allocator, user_id: []const u8, title: []const u8, priority: []const u8) ![]u8 {
     return queryWithVars(allocator,
-        \\CREATE tasks SET user_id = $user_id, title = $title, priority = $priority, completed = false, created_at = time::now();
+        \\CREATE tasks SET user_id = $user_id, title = $title, priority = $priority, completed = false, reminder_sent = false, created_at = time::now();
     , .{ .user_id = user_id, .title = title, .priority = priority });
 }
 
@@ -240,7 +254,7 @@ pub fn createTaskWithDueDate(allocator: std.mem.Allocator, user_id: []const u8, 
     defer if (needs_free) allocator.free(formatted_date);
 
     return queryWithVars(allocator,
-        \\CREATE tasks SET user_id = $user_id, title = $title, priority = $priority, completed = false, created_at = time::now(), due_date = <datetime>$due_date;
+        \\CREATE tasks SET user_id = $user_id, title = $title, priority = $priority, completed = false, reminder_sent = false, created_at = time::now(), due_date = <datetime>$due_date;
     , .{ .user_id = user_id, .title = title, .priority = priority, .due_date = formatted_date });
 }
 
@@ -260,6 +274,40 @@ pub fn deleteTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\DELETE $record_id;
     , .{ .record_id = task_id });
+}
+
+pub fn getDueTasksForReminders(allocator: std.mem.Allocator) ![]u8 {
+    return query(allocator,
+        \\SELECT * FROM tasks WHERE completed = false AND due_date != NONE AND due_date <= time::now() AND (reminder_sent = false OR reminder_sent = NONE) LIMIT 25;
+    );
+}
+
+pub fn markTaskReminderSent(allocator: std.mem.Allocator, task_id: []const u8) !void {
+    const result = try queryWithVars(allocator,
+        \\UPDATE $record_id SET reminder_sent = true, reminder_sent_at = time::now();
+    , .{ .record_id = task_id });
+    allocator.free(result);
+}
+
+// ============== ACTIVITY LOG ==============
+
+pub fn logActivity(
+    allocator: std.mem.Allocator,
+    user_id: []const u8,
+    action: []const u8,
+    entity_type: []const u8,
+    entity_id: []const u8,
+) !void {
+    const result = try queryWithVars(allocator,
+        \\CREATE activity_events SET user_id = $user_id, action = $action, entity_type = $entity_type, entity_id = <string>$entity_id, created_at = time::now();
+    , .{ .user_id = user_id, .action = action, .entity_type = entity_type, .entity_id = entity_id });
+    allocator.free(result);
+}
+
+pub fn getActivityByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\SELECT * FROM activity_events WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 50;
+    , .{ .user_id = user_id });
 }
 
 // ============== TASK OWNERSHIP ==============

@@ -121,6 +121,9 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     // NOT echoed in the response body, so an XSS that reads fetch responses
     // can't exfiltrate it.
     http.setAuthCookie(r, token);
+    db.logActivity(req_alloc, user.id, "signup", "user", user.id) catch |err| {
+        std.debug.print("Failed to log signup activity: {}\n", .{err});
+    };
 
     const response = models.AuthResponse{
         .user = .{
@@ -184,6 +187,9 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 
     // SECURITY: session lives in the HttpOnly cookie only (see signup note).
     http.setAuthCookie(r, token);
+    db.logActivity(req_alloc, user.id, "login", "session", "") catch |err| {
+        std.debug.print("Failed to log login activity: {}\n", .{err});
+    };
 
     const response = models.AuthResponse{
         .user = .{
@@ -284,6 +290,10 @@ pub fn handleVerifyEmail(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 400, "Invalid or expired code");
         return;
     }
+
+    db.logActivity(req_alloc, user_id, "verify_email", "user", user_id) catch |err| {
+        std.debug.print("Failed to log email verification activity: {}\n", .{err});
+    };
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "Email verified successfully" });
 }
@@ -409,13 +419,12 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 }
 
 pub fn handleLogout(r: zap.Request, req_alloc: std.mem.Allocator) !void {
+    const user_id_opt = http.getCurrentUserId(req_alloc, r);
+
     // Try session_token cookie first (preferred), fall back to Authorization: Bearer
     var token_opt: ?[]const u8 = null;
 
-    r.parseCookies(false);
-    if (r.getCookieStr(req_alloc, "session_token")) |maybe_cookie| {
-        if (maybe_cookie) |t| token_opt = t;
-    } else |_| {}
+    token_opt = http.getSessionTokenFromCookie(r);
 
     if (token_opt == null) {
         if (r.getHeader("authorization")) |auth_header| {
@@ -428,6 +437,12 @@ pub fn handleLogout(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     if (token_opt) |token| {
         db.deleteSession(req_alloc, token) catch |err| {
             std.debug.print("Failed to delete session: {}\n", .{err});
+        };
+    }
+
+    if (user_id_opt) |user_id| {
+        db.logActivity(req_alloc, user_id, "logout", "session", "") catch |err| {
+            std.debug.print("Failed to log logout activity: {}\n", .{err});
         };
     }
 
@@ -488,6 +503,10 @@ pub fn handleResendVerification(r: zap.Request, req_alloc: std.mem.Allocator) !v
     // Send email
     email.sendConfirmationEmail(req_alloc, user.email, user.name, verification_code) catch |err| {
         std.debug.print("Failed to send verification email: {}\n", .{err});
+    };
+
+    db.logActivity(req_alloc, user_id, "resend_verification", "user", user_id) catch |err| {
+        std.debug.print("Failed to log resend verification activity: {}\n", .{err});
     };
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "Verification code sent" });
