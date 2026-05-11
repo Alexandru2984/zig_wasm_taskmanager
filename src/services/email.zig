@@ -1,21 +1,24 @@
-// Email module for Task Manager - Native Zig HTTP Implementation
-// Uses std.http.Client to send emails via Brevo HTTP API
-// RESILIENCE: Includes retry with exponential backoff
+// Email module for Task Manager.
+// Sends mail through the local mailcow SMTP server with curl.
 
 const std = @import("std");
 const config = @import("../config/config.zig");
 
-// Retry configuration
 const MAX_RETRIES: u8 = 3;
-const RETRY_DELAYS_MS = [_]u64{ 1000, 2000, 5000 }; // 1s, 2s, 5s backoff
+const RETRY_DELAYS_MS = [_]u64{ 1000, 2000, 5000 };
+
+const EmailConfig = struct {
+    smtp_host: []const u8,
+    smtp_port: []const u8,
+    smtp_user: []const u8,
+    smtp_pass: []const u8,
+    from_email: []const u8,
+    from_name: []const u8,
+};
 
 /// Render an email like "alice@example.com" as "a***e@example.com" for logs.
-/// PRIVACY: plain emails in systemd journal are a GDPR concern — anyone with
-/// read access to the journal could enumerate which addresses we send to.
-/// Writes into `buf` and returns the slice used.
 fn maskEmail(buf: []u8, email: []const u8) []const u8 {
     const at = std.mem.indexOfScalar(u8, email, '@') orelse {
-        // Not an email — mask the whole thing to be safe.
         const n = @min(buf.len, 3);
         @memset(buf[0..n], '*');
         return buf[0..n];
@@ -43,94 +46,240 @@ fn maskEmail(buf: []u8, email: []const u8) []const u8 {
     return buf[0 .. i + copy_len];
 }
 
-// API config struct
-const EmailConfig = struct {
-    api_key: []const u8,
-    from_email: []const u8,
-    from_name: []const u8,
-};
-
-// Get email config from unified .env config
-// Supports both old names (API_KEY, SEND_FROM) and new names (BREVO_API_KEY, FROM_EMAIL)
 fn getEmailConfig() !EmailConfig {
-    // Try new names first, then fall back to old names
-    const api_key = config.get("BREVO_API_KEY") orelse config.get("API_KEY") orelse {
-        std.debug.print("❌ Missing BREVO_API_KEY or API_KEY in .env\n", .{});
+    const smtp_user = config.get("SMTP_USER") orelse {
+        std.debug.print("Missing SMTP_USER in .env\n", .{});
         return error.MissingEmailConfig;
     };
-    
-    const from_email = config.get("FROM_EMAIL") orelse config.get("SEND_FROM") orelse {
-        std.debug.print("❌ Missing FROM_EMAIL or SEND_FROM in .env\n", .{});
+    const smtp_pass = config.get("SMTP_PASS") orelse {
+        std.debug.print("Missing SMTP_PASS in .env\n", .{});
         return error.MissingEmailConfig;
     };
-    
-    return EmailConfig{
-        .api_key = api_key,
-        .from_email = from_email,
-        .from_name = config.getOrDefault("FROM_NAME", "Zig Task Manager"),
+
+    return .{
+        .smtp_host = config.getOrDefault("SMTP_HOST", "mail.micutu.com"),
+        .smtp_port = config.getOrDefault("SMTP_PORT", "587"),
+        .smtp_user = smtp_user,
+        .smtp_pass = smtp_pass,
+        .from_email = config.get("SMTP_FROM") orelse config.get("FROM_EMAIL") orelse smtp_user,
+        .from_name = config.get("SMTP_FROM_NAME") orelse config.getOrDefault("FROM_NAME", "Task Manager"),
     };
 }
 
-/// Send HTTP request with retry and exponential backoff
-/// Returns true on success (2xx status), false on failure after all retries
-fn sendEmailRequest(allocator: std.mem.Allocator, json_payload: []const u8, api_key: []const u8) !void {
+fn rejectHeaderValue(value: []const u8) !void {
+    for (value) |c| {
+        switch (c) {
+            '\r', '\n', 0 => return error.InvalidEmailHeader,
+            else => {},
+        }
+    }
+}
+
+fn rejectAddress(value: []const u8) !void {
+    try rejectHeaderValue(value);
+    if (value.len < 5 or value.len > 254) return error.InvalidEmailAddress;
+    if (std.mem.indexOfScalar(u8, value, '@') == null) return error.InvalidEmailAddress;
+    for (value) |c| {
+        switch (c) {
+            ' ', '\t', '<', '>', '"', '\'', '\\', ',', ';' => return error.InvalidEmailAddress,
+            else => {},
+        }
+    }
+}
+
+fn appendQuotedHeaderValue(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    try out.append(allocator, '"');
+    for (value) |c| {
+        switch (c) {
+            '\r', '\n', 0 => return error.InvalidEmailHeader,
+            '"', '\\' => {
+                try out.append(allocator, '\\');
+                try out.append(allocator, c);
+            },
+            0x01...0x08, 0x0B, 0x0C, 0x0E...0x1F, 0x7F => {},
+            else => try out.append(allocator, c),
+        }
+    }
+    try out.append(allocator, '"');
+}
+
+fn appendAddressHeader(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    email: []const u8,
+) !void {
+    try rejectAddress(email);
+    if (name.len > 0) {
+        try appendQuotedHeaderValue(out, allocator, name);
+        try out.appendSlice(allocator, " ");
+    }
+    try out.append(allocator, '<');
+    try out.appendSlice(allocator, email);
+    try out.append(allocator, '>');
+}
+
+fn buildMimeMessage(
+    allocator: std.mem.Allocator,
+    email_cfg: EmailConfig,
+    to_email: []const u8,
+    to_name: []const u8,
+    subject: []const u8,
+    content_type: []const u8,
+    body: []const u8,
+) ![]u8 {
+    try rejectHeaderValue(subject);
+    try rejectHeaderValue(content_type);
+
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, "From: ");
+    try appendAddressHeader(&out, allocator, email_cfg.from_name, email_cfg.from_email);
+    try out.appendSlice(allocator, "\r\nTo: ");
+    try appendAddressHeader(&out, allocator, to_name, to_email);
+    try out.appendSlice(allocator, "\r\nSubject: ");
+    try out.appendSlice(allocator, subject);
+    try out.appendSlice(allocator, "\r\nMIME-Version: 1.0\r\nContent-Type: ");
+    try out.appendSlice(allocator, content_type);
+    try out.appendSlice(allocator, "; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n");
+    try out.appendSlice(allocator, body);
+    try out.appendSlice(allocator, "\r\n");
+
+    return try out.toOwnedSlice(allocator);
+}
+
+fn randomHex(buf: []u8) void {
+    var bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&bytes);
+    const hex = "0123456789abcdef";
+    for (bytes, 0..) |b, i| {
+        buf[i * 2] = hex[b >> 4];
+        buf[i * 2 + 1] = hex[b & 0x0F];
+    }
+}
+
+fn makeTempPath(allocator: std.mem.Allocator, suffix: []const u8) ![]u8 {
+    var hex: [32]u8 = undefined;
+    randomHex(&hex);
+    return try std.fmt.allocPrint(allocator, "/tmp/taskmanager-email-{s}.{s}", .{ hex[0..], suffix });
+}
+
+fn writePrivateFile(path: []const u8, content: []const u8) !void {
+    const file = try std.fs.createFileAbsolute(path, .{ .exclusive = true, .mode = 0o600 });
+    defer file.close();
+    try file.writeAll(content);
+}
+
+fn appendCurlConfigLine(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    key: []const u8,
+    value: []const u8,
+) !void {
+    try out.appendSlice(allocator, key);
+    try out.appendSlice(allocator, " = \"");
+    for (value) |c| {
+        switch (c) {
+            '\r', '\n', 0 => return error.InvalidCurlConfig,
+            '"', '\\' => {
+                try out.append(allocator, '\\');
+                try out.append(allocator, c);
+            },
+            else => try out.append(allocator, c),
+        }
+    }
+    try out.appendSlice(allocator, "\"\n");
+}
+
+fn buildCurlConfig(
+    allocator: std.mem.Allocator,
+    email_cfg: EmailConfig,
+    payload_path: []const u8,
+    to_email: []const u8,
+) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+
+    const smtp_url = try std.fmt.allocPrint(allocator, "smtp://{s}:{s}", .{ email_cfg.smtp_host, email_cfg.smtp_port });
+    defer allocator.free(smtp_url);
+    const smtp_auth = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ email_cfg.smtp_user, email_cfg.smtp_pass });
+    defer allocator.free(smtp_auth);
+
+    try appendCurlConfigLine(&out, allocator, "url", smtp_url);
+    try out.appendSlice(allocator, "ssl-reqd\n");
+    try appendCurlConfigLine(&out, allocator, "user", smtp_auth);
+    try appendCurlConfigLine(&out, allocator, "mail-from", email_cfg.from_email);
+    try appendCurlConfigLine(&out, allocator, "mail-rcpt", to_email);
+    try appendCurlConfigLine(&out, allocator, "upload-file", payload_path);
+    try out.appendSlice(allocator, "silent\nshow-error\nfail\n");
+    try out.appendSlice(allocator, "max-time = 30\n");
+
+    return try out.toOwnedSlice(allocator);
+}
+
+fn runCurlSend(allocator: std.mem.Allocator, curl_config_path: []const u8) !void {
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "/usr/bin/curl", "--config", curl_config_path },
+        .max_output_bytes = 4096,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| {
+            if (code == 0) return;
+            const preview_len = @min(result.stderr.len, 300);
+            std.debug.print("SMTP curl failed with exit {d}: {s}\n", .{ code, result.stderr[0..preview_len] });
+            return error.EmailSendFailed;
+        },
+        else => {
+            std.debug.print("SMTP curl terminated unexpectedly\n", .{});
+            return error.EmailSendFailed;
+        },
+    }
+}
+
+fn sendEmailRequest(
+    allocator: std.mem.Allocator,
+    email_cfg: EmailConfig,
+    to_email: []const u8,
+    payload: []const u8,
+) !void {
+    const payload_path = try makeTempPath(allocator, "eml");
+    defer allocator.free(payload_path);
+    defer std.fs.deleteFileAbsolute(payload_path) catch {};
+
+    const config_path = try makeTempPath(allocator, "curlrc");
+    defer allocator.free(config_path);
+    defer std.fs.deleteFileAbsolute(config_path) catch {};
+
+    try writePrivateFile(payload_path, payload);
+    const curl_cfg = try buildCurlConfig(allocator, email_cfg, payload_path, to_email);
+    defer allocator.free(curl_cfg);
+    try writePrivateFile(config_path, curl_cfg);
+
     var last_error: ?anyerror = null;
-    
     var attempt: u8 = 0;
     while (attempt < MAX_RETRIES) : (attempt += 1) {
-        // Create fresh client for each attempt
-        var client = std.http.Client{ .allocator = allocator };
-        defer client.deinit();
-        
-        const result = client.fetch(.{
-            .location = .{ .url = "https://api.brevo.com/v3/smtp/email" },
-            .method = .POST,
-            .payload = json_payload,
-            .extra_headers = &[_]std.http.Header{
-                .{ .name = "api-key", .value = api_key },
-                .{ .name = "accept", .value = "application/json" },
-                .{ .name = "content-type", .value = "application/json" },
-            },
-        }) catch |err| {
+        runCurlSend(allocator, config_path) catch |err| {
             last_error = err;
-            std.debug.print("⚠️ Email attempt {d}/{d} failed: {}\n", .{ attempt + 1, MAX_RETRIES, err });
-            
+            std.debug.print("Email attempt {d}/{d} failed: {}\n", .{ attempt + 1, MAX_RETRIES, err });
             if (attempt < MAX_RETRIES - 1) {
-                const delay = RETRY_DELAYS_MS[attempt];
-                std.debug.print("   Retrying in {d}ms...\n", .{delay});
-                std.Thread.sleep(delay * std.time.ns_per_ms);
+                std.Thread.sleep(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms);
             }
             continue;
         };
-        
-        // Check status
-        switch (result.status) {
-            .ok, .created, .accepted => {
-                return; // Success!
-            },
-            else => {
-                std.debug.print("⚠️ Email attempt {d}/{d}: HTTP {d}\n", .{ attempt + 1, MAX_RETRIES, @intFromEnum(result.status) });
-                last_error = error.EmailSendFailed;
-                
-                if (attempt < MAX_RETRIES - 1) {
-                    const delay = RETRY_DELAYS_MS[attempt];
-                    std.debug.print("   Retrying in {d}ms...\n", .{delay});
-                    std.Thread.sleep(delay * std.time.ns_per_ms);
-                }
-            },
-        }
+        return;
     }
-    
-    // All retries exhausted
-    std.debug.print("❌ Email failed after {d} attempts\n", .{MAX_RETRIES});
+
     return last_error orelse error.EmailSendFailed;
 }
 
-
 pub fn sendConfirmationEmail(allocator: std.mem.Allocator, to_email: []const u8, name: []const u8, code: []const u8) !void {
-    const subject = "Your Verification Code - Zig Task Manager";
-    
-    // Beautiful HTML email template
+    const subject = "Your Verification Code - Task Manager";
+
     const html_body = try std.fmt.allocPrint(allocator,
         \\<!DOCTYPE html>
         \\<html>
@@ -142,29 +291,20 @@ pub fn sendConfirmationEmail(allocator: std.mem.Allocator, to_email: []const u8,
         \\  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#1a1a2e;padding:40px 20px;">
         \\    <tr>
         \\      <td align="center">
-        \\        <table width="100%" max-width="500" cellpadding="0" cellspacing="0" style="background:linear-gradient(135deg,#16213e 0%,#1a1a2e 100%);border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.3);">
-        \\          <!-- Header -->
+        \\        <table width="100%" cellpadding="0" cellspacing="0" style="max-width:500px;background:#16213e;border-radius:16px;overflow:hidden;">
         \\          <tr>
-        \\            <td style="background:linear-gradient(135deg,#f7931a 0%,#f5a623 100%);padding:30px;text-align:center;">
-        \\              <h1 style="margin:0;color:#fff;font-size:24px;font-weight:700;">🦎 Zig Task Manager</h1>
+        \\            <td style="background:#f7931a;padding:30px;text-align:center;">
+        \\              <h1 style="margin:0;color:#fff;font-size:24px;font-weight:700;">Task Manager</h1>
         \\            </td>
         \\          </tr>
-        \\          <!-- Content -->
         \\          <tr>
         \\            <td style="padding:40px 30px;">
-        \\              <h2 style="margin:0 0 20px;color:#fff;font-size:20px;">Hello {s}! 👋</h2>
-        \\              <p style="margin:0 0 25px;color:#a0aec0;font-size:16px;line-height:1.6;">Welcome to Zig Task Manager! Please use the verification code below to activate your account:</p>
-        \\              <!-- Code Box -->
+        \\              <h2 style="margin:0 0 20px;color:#fff;font-size:20px;">Hello {s}</h2>
+        \\              <p style="margin:0 0 25px;color:#a0aec0;font-size:16px;line-height:1.6;">Please use the verification code below to activate your account:</p>
         \\              <div style="background:#0d1117;border:2px solid #f7931a;border-radius:12px;padding:25px;text-align:center;margin:25px 0;">
         \\                <span style="font-family:monospace;font-size:32px;font-weight:700;color:#f7931a;letter-spacing:8px;">{s}</span>
         \\              </div>
-        \\              <p style="margin:25px 0 0;color:#718096;font-size:14px;line-height:1.5;">This code will expire in 10 minutes. If you didn't create an account, you can safely ignore this email.</p>
-        \\            </td>
-        \\          </tr>
-        \\          <!-- Footer -->
-        \\          <tr>
-        \\            <td style="padding:20px 30px;border-top:1px solid rgba(255,255,255,0.1);text-align:center;">
-        \\              <p style="margin:0;color:#4a5568;font-size:12px;">Built with ❤️ using Zig + WASM + SurrealDB</p>
+        \\              <p style="margin:25px 0 0;color:#718096;font-size:14px;line-height:1.5;">This code will expire in 10 minutes. If you did not create an account, you can safely ignore this email.</p>
         \\            </td>
         \\          </tr>
         \\        </table>
@@ -180,33 +320,29 @@ pub fn sendConfirmationEmail(allocator: std.mem.Allocator, to_email: []const u8,
 }
 
 pub fn sendPasswordResetEmail(allocator: std.mem.Allocator, to_email: []const u8, token: []const u8) !void {
-    // SECURITY: The reset link must point at the deployed app, not localhost.
-    // APP_BASE_URL is required in .env (e.g. https://task.example.com). Without
-    // it the email would ship a dead localhost link and users would paste the
-    // token elsewhere to try to make it work.
     const base_url = config.get("APP_BASE_URL") orelse {
-        std.debug.print("❌ APP_BASE_URL not set; refusing to send reset email with broken link\n", .{});
+        std.debug.print("APP_BASE_URL not set; refusing to send reset email with broken link\n", .{});
         return error.MissingAppBaseUrl;
     };
     const trimmed = std.mem.trimRight(u8, base_url, "/");
     const reset_link = try std.fmt.allocPrint(allocator, "{s}/reset-password.html?token={s}", .{ trimmed, token });
     defer allocator.free(reset_link);
 
-    const subject = "Reset your password - Zig Task Manager";
+    const subject = "Reset your password - Task Manager";
     const body = try std.fmt.allocPrint(allocator,
         \\Hello,
         \\
-        \\You requested a password reset for your Zig Task Manager account.
+        \\You requested a password reset for your Task Manager account.
         \\
         \\Click the link below to reset your password:
         \\{s}
         \\
         \\This link will expire in 1 hour.
         \\
-        \\If you didn't request this, please ignore this email.
+        \\If you did not request this, please ignore this email.
         \\
         \\Best regards,
-        \\Zig Task Manager Team
+        \\Task Manager
     , .{reset_link});
     defer allocator.free(body);
 
@@ -217,108 +353,24 @@ fn sendEmail(allocator: std.mem.Allocator, to_email: []const u8, to_name: []cons
     const email_cfg = try getEmailConfig();
 
     var mask_buf: [128]u8 = undefined;
-    std.debug.print("📧 Sending email to: {s} via Brevo API\n", .{maskEmail(&mask_buf, to_email)});
+    std.debug.print("Sending email to: {s} via SMTP\n", .{maskEmail(&mask_buf, to_email)});
 
-    // Escape special characters in content for JSON
-    var escaped_buf: [8192]u8 = undefined;
-    var escaped_len: usize = 0;
-    
-    for (text_content) |c| {
-        if (escaped_len >= escaped_buf.len - 4) break;
-        switch (c) {
-            '"' => {
-                escaped_buf[escaped_len] = '\\';
-                escaped_buf[escaped_len + 1] = '"';
-                escaped_len += 2;
-            },
-            '\\' => {
-                escaped_buf[escaped_len] = '\\';
-                escaped_buf[escaped_len + 1] = '\\';
-                escaped_len += 2;
-            },
-            '\n' => {
-                escaped_buf[escaped_len] = '\\';
-                escaped_buf[escaped_len + 1] = 'n';
-                escaped_len += 2;
-            },
-            '\r' => {
-                escaped_buf[escaped_len] = '\\';
-                escaped_buf[escaped_len + 1] = 'r';
-                escaped_len += 2;
-            },
-            '\t' => {
-                escaped_buf[escaped_len] = '\\';
-                escaped_buf[escaped_len + 1] = 't';
-                escaped_len += 2;
-            },
-            else => {
-                escaped_buf[escaped_len] = c;
-                escaped_len += 1;
-            },
-        }
-    }
+    const payload = try buildMimeMessage(allocator, email_cfg, to_email, to_name, subject, "text/plain", text_content);
+    defer allocator.free(payload);
 
-    const to_name_str = if (to_name.len > 0) to_name else "User";
-    
-    const json_payload = try std.fmt.allocPrint(allocator,
-        \\{{"sender":{{"name":"{s}","email":"{s}"}},"to":[{{"email":"{s}","name":"{s}"}}],"subject":"{s}","textContent":"{s}"}}
-    , .{ email_cfg.from_name, email_cfg.from_email, to_email, to_name_str, subject, escaped_buf[0..escaped_len] });
-    defer allocator.free(json_payload);
-
-    // Use retry-enabled request
-    try sendEmailRequest(allocator, json_payload, email_cfg.api_key);
-    std.debug.print("✅ Email sent successfully to: {s}\n", .{maskEmail(&mask_buf, to_email)});
+    try sendEmailRequest(allocator, email_cfg, to_email, payload);
+    std.debug.print("Email sent successfully to: {s}\n", .{maskEmail(&mask_buf, to_email)});
 }
 
 fn sendHtmlEmail(allocator: std.mem.Allocator, to_email: []const u8, to_name: []const u8, subject: []const u8, html_content: []const u8) !void {
     const email_cfg = try getEmailConfig();
 
     var mask_buf: [128]u8 = undefined;
-    std.debug.print("📧 Sending HTML email to: {s} via Brevo API\n", .{maskEmail(&mask_buf, to_email)});
+    std.debug.print("Sending HTML email to: {s} via SMTP\n", .{maskEmail(&mask_buf, to_email)});
 
-    // Escape special characters in HTML content for JSON
-    var escaped_buf: [16384]u8 = undefined;
-    var escaped_len: usize = 0;
-    
-    for (html_content) |c| {
-        if (escaped_len >= escaped_buf.len - 4) break;
-        switch (c) {
-            '"' => {
-                escaped_buf[escaped_len] = '\\';
-                escaped_buf[escaped_len + 1] = '"';
-                escaped_len += 2;
-            },
-            '\\' => {
-                escaped_buf[escaped_len] = '\\';
-                escaped_buf[escaped_len + 1] = '\\';
-                escaped_len += 2;
-            },
-            '\n' => {
-                // Skip newlines in HTML (they're not needed)
-                escaped_len += 0;
-            },
-            '\r' => {
-                escaped_len += 0;
-            },
-            '\t' => {
-                escaped_buf[escaped_len] = ' ';
-                escaped_len += 1;
-            },
-            else => {
-                escaped_buf[escaped_len] = c;
-                escaped_len += 1;
-            },
-        }
-    }
+    const payload = try buildMimeMessage(allocator, email_cfg, to_email, to_name, subject, "text/html", html_content);
+    defer allocator.free(payload);
 
-    const to_name_str = if (to_name.len > 0) to_name else "User";
-    
-    const json_payload = try std.fmt.allocPrint(allocator,
-        \\{{"sender":{{"name":"{s}","email":"{s}"}},"to":[{{"email":"{s}","name":"{s}"}}],"subject":"{s}","htmlContent":"{s}"}}
-    , .{ email_cfg.from_name, email_cfg.from_email, to_email, to_name_str, subject, escaped_buf[0..escaped_len] });
-    defer allocator.free(json_payload);
-
-    // Use retry-enabled request
-    try sendEmailRequest(allocator, json_payload, email_cfg.api_key);
-    std.debug.print("✅ HTML Email sent successfully to: {s}\n", .{maskEmail(&mask_buf, to_email)});
+    try sendEmailRequest(allocator, email_cfg, to_email, payload);
+    std.debug.print("HTML email sent successfully to: {s}\n", .{maskEmail(&mask_buf, to_email)});
 }

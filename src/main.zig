@@ -19,18 +19,18 @@ pub fn main() !void {
     // Initialize app with GPA allocator
     try app.init();
     defer app.deinit(); // Clean shutdown with leak detection
-    
+
     allocator = app.allocator();
 
     // Initialize SurrealDB schema
     db.initSchema(allocator) catch |err| {
         log.warn("Could not initialize DB schema: {} (continuing anyway)", .{err});
     };
-    
+
     // Initialize rate limiters
     rate_limiter.initAll(allocator);
     defer rate_limiter.deinitAll();
-    
+
     // Start cleanup thread
     rate_limiter.startCleanupThread() catch |err| {
         log.warn("Failed to start rate limiter cleanup thread: {}", .{err});
@@ -53,7 +53,7 @@ pub fn main() !void {
     if (config.get("CORS_ORIGIN") == null) {
         log.warn("CORS_ORIGIN is not set in .env — cross-origin requests will have no ACAO header", .{});
     }
-    
+
     var listener = zap.HttpListener.init(.{
         .port = port,
         .interface = interface.ptr, // Convert slice to C pointer
@@ -75,7 +75,7 @@ fn handleRequest(r: zap.Request) anyerror!void {
     var arena = app.createRequestArena();
     defer arena.deinit();
     const req_alloc = arena.allocator();
-    
+
     // Generate unique request ID for tracing
     var request_id_buf: [16]u8 = undefined;
     std.crypto.random.bytes(&request_id_buf);
@@ -86,7 +86,7 @@ fn handleRequest(r: zap.Request) anyerror!void {
         request_id[i * 2 + 1] = hex_chars[byte & 0x0F];
     }
     r.setHeader("X-Request-ID", &request_id) catch {};
-    
+
     const path = r.path orelse "/";
 
     if (std.mem.startsWith(u8, path, "/api/")) {
@@ -108,7 +108,7 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
     }
     r.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS") catch {};
     r.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization") catch {};
-    
+
     // SECURITY: Additional security headers
     r.setHeader("X-Content-Type-Options", "nosniff") catch {};
     r.setHeader("X-Frame-Options", "DENY") catch {};
@@ -150,14 +150,14 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
     const req_method = r.method orelse "";
     const AuthRoute = struct { path: []const u8, method: []const u8, handler: *const fn (zap.Request, std.mem.Allocator) anyerror!void };
     const auth_routes = [_]AuthRoute{
-        .{ .path = "/api/auth/signup",              .method = "POST", .handler = auth_handler.handleSignup },
-        .{ .path = "/api/auth/login",               .method = "POST", .handler = auth_handler.handleLogin },
-        .{ .path = "/api/auth/me",                  .method = "GET",  .handler = auth_handler.handleMe },
-        .{ .path = "/api/auth/logout",              .method = "POST", .handler = auth_handler.handleLogout },
-        .{ .path = "/api/auth/forgot-password",     .method = "POST", .handler = auth_handler.handleForgotPassword },
-        .{ .path = "/api/auth/reset-password",      .method = "POST", .handler = auth_handler.handleResetPassword },
+        .{ .path = "/api/auth/signup", .method = "POST", .handler = auth_handler.handleSignup },
+        .{ .path = "/api/auth/login", .method = "POST", .handler = auth_handler.handleLogin },
+        .{ .path = "/api/auth/me", .method = "GET", .handler = auth_handler.handleMe },
+        .{ .path = "/api/auth/logout", .method = "POST", .handler = auth_handler.handleLogout },
+        .{ .path = "/api/auth/forgot-password", .method = "POST", .handler = auth_handler.handleForgotPassword },
+        .{ .path = "/api/auth/reset-password", .method = "POST", .handler = auth_handler.handleResetPassword },
         .{ .path = "/api/auth/resend-verification", .method = "POST", .handler = auth_handler.handleResendVerification },
-        .{ .path = "/api/auth/verify",              .method = "POST", .handler = auth_handler.handleVerifyEmail },
+        .{ .path = "/api/auth/verify", .method = "POST", .handler = auth_handler.handleVerifyEmail },
     };
     for (auth_routes) |route| {
         if (std.mem.eql(u8, path, route.path)) {
@@ -179,10 +179,24 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
                 try profile_handler.getProfile(r, req_alloc);
             } else if (std.mem.eql(u8, method, "PUT")) {
                 try profile_handler.updateProfile(r, req_alloc);
+            } else {
+                r.setHeader("Allow", "GET, PUT") catch {};
+                r.setStatus(.method_not_allowed);
+                try r.sendBody("{\"error\": \"Method not allowed\"}");
             }
+        } else {
+            r.setHeader("Allow", "GET, PUT") catch {};
+            r.setStatus(.method_not_allowed);
+            try r.sendBody("{\"error\": \"Method not allowed\"}");
         }
         return;
     } else if (std.mem.eql(u8, path, "/api/profile/password")) {
+        if (!std.mem.eql(u8, req_method, "PUT")) {
+            r.setHeader("Allow", "PUT") catch {};
+            r.setStatus(.method_not_allowed);
+            try r.sendBody("{\"error\": \"Method not allowed\"}");
+            return;
+        }
         try profile_handler.changePassword(r, req_alloc);
         return;
     }
@@ -194,7 +208,15 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
                 try tasks_handler.getTasks(r, req_alloc);
             } else if (std.mem.eql(u8, method, "POST")) {
                 try tasks_handler.createTask(r, req_alloc);
+            } else {
+                r.setHeader("Allow", "GET, POST") catch {};
+                r.setStatus(.method_not_allowed);
+                try r.sendBody("{\"error\": \"Method not allowed\"}");
             }
+        } else {
+            r.setHeader("Allow", "GET, POST") catch {};
+            r.setStatus(.method_not_allowed);
+            try r.sendBody("{\"error\": \"Method not allowed\"}");
         }
     } else if (std.mem.startsWith(u8, path, "/api/tasks/")) {
         const task_id = path[11..];
@@ -209,7 +231,15 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
                 try tasks_handler.toggleTask(r, task_id, req_alloc);
             } else if (std.mem.eql(u8, method, "DELETE")) {
                 try tasks_handler.deleteTask(r, task_id, req_alloc);
+            } else {
+                r.setHeader("Allow", "PUT, DELETE") catch {};
+                r.setStatus(.method_not_allowed);
+                try r.sendBody("{\"error\": \"Method not allowed\"}");
             }
+        } else {
+            r.setHeader("Allow", "PUT, DELETE") catch {};
+            r.setStatus(.method_not_allowed);
+            try r.sendBody("{\"error\": \"Method not allowed\"}");
         }
     } else {
         r.setStatus(.not_found);
@@ -241,7 +271,7 @@ fn serveStatic(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !
         "public/index.html"
     else
         try std.fmt.allocPrint(req_alloc, "public{s}", .{path});
-    
+
     // SECURITY: Verify resolved path stays within public directory
     const cwd = std.fs.cwd();
     const real_path = cwd.realpathAlloc(req_alloc, file_path) catch {
@@ -249,13 +279,13 @@ fn serveStatic(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !
         try r.sendBody("404 Not Found");
         return;
     };
-    
+
     const public_base = cwd.realpathAlloc(req_alloc, "public") catch {
         r.setStatus(.internal_server_error);
         try r.sendBody("500 Server Error");
         return;
     };
-    
+
     // Ensure file is within public directory
     if (!std.mem.startsWith(u8, real_path, public_base)) {
         log.warn("Path escape blocked: {s} not in {s}", .{ real_path, public_base });
@@ -285,7 +315,7 @@ fn serveStatic(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !
         "application/octet-stream";
 
     r.setHeader("Content-Type", content_type) catch {};
-    
+
     // SECURITY: Add security headers for static files
     r.setHeader("X-Content-Type-Options", "nosniff") catch {};
     r.setHeader("X-Frame-Options", "DENY") catch {};
@@ -295,7 +325,7 @@ fn serveStatic(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !
         const hsts_value = std.fmt.allocPrint(req_alloc, "max-age={s}; includeSubDomains", .{max_age}) catch "max-age=31536000; includeSubDomains";
         r.setHeader("Strict-Transport-Security", hsts_value) catch {};
     }
-    
+
     // SECURITY: strict CSP. No inline scripts, no inline styles — every HTML
     // file points at style.css / reset-password.js / app.js, so the browser
     // will refuse any injected <script> or style= attribute.

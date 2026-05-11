@@ -55,7 +55,7 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     {
         const db_result = try db.getUserByEmail(req_alloc, request.email);
         defer req_alloc.free(db_result);
-        
+
         const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.User), req_alloc, db_result, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
 
@@ -436,7 +436,7 @@ pub fn handleLogout(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 }
 
 pub fn handleResendVerification(r: zap.Request, req_alloc: std.mem.Allocator) !void {
-    // SECURITY: resend triggers a Brevo API call and sends an email — expensive
+    // SECURITY: resend triggers an SMTP send and sends an email — expensive
     // and abusable to spam a user's inbox. Cap at 3 per 5 minutes per IP.
     const client_ip = http.getClientIp(r);
     if (rate_limiter.resend_verification_limiter) |*limiter| {

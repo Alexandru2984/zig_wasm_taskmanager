@@ -111,7 +111,7 @@ zig-task-manager/
 │   │   └── http_client.zig # Optimized HTTP client
 │   ├── services/
 │   │   ├── auth.zig      # Argon2id hashing & token generation
-│   │   └── email.zig     # Email sending (Brevo API)
+│   │   └── email.zig     # Email sending (SMTP)
 │   └── util/
 │       ├── http.zig      # HTTP helpers (cookies, JSON, errors)
 │       ├── json.zig      # JSON helpers

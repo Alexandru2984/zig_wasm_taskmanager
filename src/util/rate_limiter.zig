@@ -6,8 +6,8 @@ const std = @import("std");
 
 /// Rate limit configuration
 pub const RateLimitConfig = struct {
-    max_requests: u32 = 5,        // Max requests per window
-    window_seconds: u64 = 60,     // Window size in seconds
+    max_requests: u32 = 5, // Max requests per window
+    window_seconds: u64 = 60, // Window size in seconds
 };
 
 /// Rate limiter state for a single IP
@@ -149,7 +149,7 @@ pub fn initAll(allocator: std.mem.Allocator) void {
     // Reset password submission: 5 per minute per IP
     reset_password_limiter = RateLimiter.init(allocator, .{ .max_requests = 5, .window_seconds = 60 });
 
-    // Resend verification: 3 per 5 minutes (expensive: triggers Brevo send)
+    // Resend verification: 3 per 5 minutes (expensive: triggers SMTP send)
     resend_verification_limiter = RateLimiter.init(allocator, .{ .max_requests = 3, .window_seconds = 300 });
 
     // Task write operations (create/toggle/delete): 60 per minute per user.
@@ -181,7 +181,7 @@ fn cleanupLoop() void {
         while (i < 60 and cleanup_running.load(.acquire)) : (i += 1) {
             std.Thread.sleep(1 * std.time.ns_per_s);
         }
-        
+
         if (cleanup_running.load(.acquire)) {
             cleanupAll();
         }
@@ -190,7 +190,7 @@ fn cleanupLoop() void {
 
 pub fn startCleanupThread() !void {
     if (cleanup_thread != null) return;
-    
+
     cleanup_running.store(true, .release);
     cleanup_thread = try std.Thread.spawn(.{}, cleanupLoop, .{});
     std.debug.print("✅ Rate limiter cleanup thread started\n", .{});
