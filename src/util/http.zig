@@ -1,5 +1,3 @@
-
-
 const std = @import("std");
 const zap = @import("zap");
 const db = @import("../db/db.zig");
@@ -124,10 +122,10 @@ pub fn parseBody(allocator: std.mem.Allocator, r: zap.Request, comptime T: type)
 pub fn jsonSuccess(r: zap.Request, data: anytype) !void {
     r.setStatus(.ok);
     r.setHeader("Content-Type", "application/json") catch {};
-    
+
     var list = std.ArrayListUnmanaged(u8){};
     defer list.deinit(std.heap.page_allocator);
-    
+
     var w = list.writer(std.heap.page_allocator);
     var buf: [128]u8 = undefined;
     var adapter = w.adaptToNewApi(&buf);
@@ -139,26 +137,26 @@ pub fn jsonSuccess(r: zap.Request, data: anytype) !void {
 pub fn jsonCreated(r: zap.Request, data: anytype) !void {
     r.setStatus(.created);
     r.setHeader("Content-Type", "application/json") catch {};
-    
+
     var list = std.ArrayListUnmanaged(u8){};
     defer list.deinit(std.heap.page_allocator);
-    
+
     var w = list.writer(std.heap.page_allocator);
     var buf: [128]u8 = undefined;
     var adapter = w.adaptToNewApi(&buf);
     try std.json.Stringify.value(data, .{}, &adapter.new_interface);
-    try adapter.new_interface.flush();  // CRITICAL: must flush before sendBody!
+    try adapter.new_interface.flush(); // CRITICAL: must flush before sendBody!
     try r.sendBody(list.items);
 }
 
 pub fn jsonError(r: zap.Request, status: u32, message: []const u8) !void {
     r.setStatus(@enumFromInt(@as(u16, @intCast(status))));
     r.setHeader("Content-Type", "application/json") catch {};
-    
+
     // Manual JSON for error to avoid allocation if possible, or just use stringify
     var list = std.ArrayListUnmanaged(u8){};
     defer list.deinit(std.heap.page_allocator);
-    
+
     const err_obj = models.ApiError{ .@"error" = message };
     var w = list.writer(std.heap.page_allocator);
     var buf: [128]u8 = undefined;

@@ -45,13 +45,13 @@ fn buildAuthHeader(allocator: std.mem.Allocator, user: []const u8, pass: []const
     // Format: "Basic base64(user:pass)"
     const credentials = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ user, pass });
     defer allocator.free(credentials);
-    
+
     // Use standard base64 encoder
     const encoded_len = std.base64.standard.Encoder.calcSize(credentials.len);
     const encoded = try allocator.alloc(u8, encoded_len);
     _ = std.base64.standard.Encoder.encode(encoded, credentials);
     defer allocator.free(encoded);
-    
+
     return try std.fmt.allocPrint(allocator, "Basic {s}", .{encoded});
 }
 
@@ -61,7 +61,7 @@ threadlocal var tl_client: ?std.http.Client = null;
 
 fn getThreadLocalClient() !*std.http.Client {
     if (tl_client) |*c| return c;
-    
+
     // Initialize with global allocator (must persist across requests)
     tl_client = std.http.Client{ .allocator = app.allocator() };
     return &tl_client.?;
@@ -71,17 +71,17 @@ fn getThreadLocalClient() !*std.http.Client {
 /// Returns owned response body (caller must free)
 pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
     const db_cfg = try getDbConfig();
-    
+
     // Build URL
     const url = try std.fmt.allocPrint(allocator, "{s}/sql", .{db_cfg.url});
     defer allocator.free(url);
-    
+
     // Build auth header
     const auth_header = try buildAuthHeader(allocator, db_cfg.user, db_cfg.pass);
     defer allocator.free(auth_header);
-    
+
     var last_error: ?anyerror = null;
-    
+
     // Retry loop
     var attempt: u8 = 0;
     while (attempt < MAX_RETRIES) : (attempt += 1) {
@@ -90,11 +90,11 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
             std.debug.print("❌ Failed to get HTTP client: {}\n", .{err});
             return err;
         };
-        
+
         // Response writer - allocating in request arena (allocator passed in)
         var response_writer = std.Io.Writer.Allocating.init(allocator);
         defer if (response_writer.writer.buffer.len > 0) allocator.free(response_writer.writer.buffer);
-        
+
         // Use fetch API with response_writer
         const result = client.fetch(.{
             .location = .{ .url = url },
@@ -112,17 +112,17 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
         }) catch |err| {
             last_error = err;
             std.debug.print("⚠️ DB attempt {d}/{d} failed: {}\n", .{ attempt + 1, MAX_RETRIES, err });
-            
+
             // If connection failed, maybe we need to reset the client?
             // std.http.Client handles this mostly, but if it's stuck, we might want to deinit and null it.
             // For now, let's assume it recovers or next retry works.
-            
+
             if (attempt < MAX_RETRIES - 1) {
                 std.Thread.sleep(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms);
             }
             continue;
         };
-        
+
         // Check status
         const status = result.status;
         if (status == .ok or status == .created or status == .accepted) {
@@ -132,7 +132,7 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
             // Server error - retry
             std.debug.print("⚠️ DB attempt {d}/{d}: HTTP {d}\n", .{ attempt + 1, MAX_RETRIES, @intFromEnum(status) });
             last_error = HttpError.ServerError;
-            
+
             if (attempt < MAX_RETRIES - 1) {
                 std.Thread.sleep(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms);
             }
@@ -145,7 +145,7 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
             return HttpError.RequestFailed;
         }
     }
-    
+
     // All retries exhausted
     std.debug.print("❌ DB query failed after {d} attempts\n", .{MAX_RETRIES});
     return last_error orelse HttpError.ConnectionFailed;
@@ -158,20 +158,20 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
     // Build the full query with LET statements for each variable
     var query_builder = std.ArrayListUnmanaged(u8){};
     defer query_builder.deinit(allocator);
-    
+
     const writer = query_builder.writer(allocator);
-    
+
     // Iterate over struct fields and create LET statements
     const VarsType = @TypeOf(vars);
     const fields = @typeInfo(VarsType).@"struct".fields;
-    
+
     inline for (fields) |field| {
         const value = @field(vars, field.name);
         const FieldType = @TypeOf(value);
-        
+
         // Write: LET $fieldname = <value>;
         try writer.print("LET ${s} = ", .{field.name});
-        
+
         // Handle different types
         if (FieldType == []const u8 or FieldType == []u8) {
             // String: escape and quote. SECURITY: cover NUL + all control bytes,
@@ -237,29 +237,29 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
             try writer.print("{any};\n", .{value});
         }
     }
-    
+
     // Append the actual query template
     try writer.writeAll(query_template);
-    
+
     // Execute the complete query
     const full_query = try query_builder.toOwnedSlice(allocator);
     defer allocator.free(full_query);
-    
+
     const raw_response = try executeQuery(allocator, full_query);
     defer allocator.free(raw_response);
-    
+
     // Post-process: When using LET statements, SurrealDB returns multiple results.
     // The first N-1 are LET results (with result: null), the last is the actual query result.
     // We need to extract only the last result to maintain compatibility with existing parsers.
     // Raw response looks like: [{...}, {...}, {...last...}]
     // We want to return: [{...last...}]
-    
+
     // Find the last '{' before the final '}]'
     if (raw_response.len < 3 or raw_response[0] != '[') {
         // Not a JSON array, return as-is (shouldn't happen)
         return try allocator.dupe(u8, raw_response);
     }
-    
+
     // Find the last complete object in the array
     var depth: i32 = 0;
     var last_obj_start: ?usize = null;
@@ -281,7 +281,7 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
             }
         }
     }
-    
+
     if (last_obj_start) |start| {
         // Extract just the last object, wrapped in an array
         var result = std.ArrayListUnmanaged(u8){};
@@ -301,7 +301,7 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
                 }
             }
         }
-        
+
         // Build the result properly
         result.deinit(allocator);
         var final_result = try allocator.alloc(u8, end_idx - start + 2); // "[" + object + "]"
@@ -310,7 +310,7 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
         final_result[end_idx - start + 1] = ']';
         return final_result;
     }
-    
+
     // Fallback: return as-is
     return try allocator.dupe(u8, raw_response);
 }

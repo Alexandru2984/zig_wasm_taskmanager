@@ -19,7 +19,7 @@ pub const JsonValue = union(enum) {
 pub fn getString(allocator: std.mem.Allocator, json_str: []const u8, field_name: []const u8) ?[]const u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch return null;
     defer parsed.deinit();
-    
+
     return getStringFromValue(allocator, parsed.value, field_name);
 }
 
@@ -53,7 +53,7 @@ pub fn parseRequestBody(allocator: std.mem.Allocator, body: []const u8, field_na
         return null;
     };
     defer parsed.deinit();
-    
+
     return extractField(allocator, parsed.value, field_name);
 }
 
@@ -74,8 +74,7 @@ fn extractField(allocator: std.mem.Allocator, value: std.json.Value, field_name:
                 return extractField(allocator, arr.items[0], field_name);
             }
         },
-        else => {
-        },
+        else => {},
     }
     return null;
 }
@@ -94,7 +93,7 @@ fn valueToString(allocator: std.mem.Allocator, value: std.json.Value) ?[]const u
 pub fn getBool(allocator: std.mem.Allocator, json_str: []const u8, field_name: []const u8) ?bool {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch return null;
     defer parsed.deinit();
-    
+
     return getBoolFromValue(parsed.value, field_name);
 }
 
@@ -178,4 +177,3 @@ test "invalid JSON returns null" {
     const result = getString(allocator, "not valid json", "field");
     try std.testing.expect(result == null);
 }
-

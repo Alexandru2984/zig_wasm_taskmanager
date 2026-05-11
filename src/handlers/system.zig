@@ -18,19 +18,19 @@ pub fn handleReady(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         req_alloc.free(res);
         break :blk true;
     };
-    
+
     // Check config
     const config_ok = app.isConfigLoaded();
-    
+
     const ready = db_ok and config_ok;
     const db_status = if (db_ok) "connected" else "disconnected";
-    
+
     const response = models.ReadyResponse{
         .status = if (ready) "ready" else "not_ready",
         .database = db_status,
         .config_loaded = config_ok,
     };
-    
+
     if (ready) {
         try http.jsonSuccess(r, response);
         return;
@@ -79,7 +79,7 @@ pub fn handleMetrics(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     }
 
     const uptime = std.time.timestamp() - app.start_time;
-    
+
     var metrics_buf: [1024]u8 = undefined;
     const metrics = std.fmt.bufPrint(&metrics_buf,
         \\# HELP app_uptime_seconds Application uptime in seconds
@@ -94,7 +94,7 @@ pub fn handleMetrics(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try r.sendBody("# Error generating metrics");
         return;
     };
-    
+
     r.setHeader("Content-Type", "text/plain; version=0.0.4") catch {};
     r.setStatus(.ok);
     try r.sendBody(metrics);

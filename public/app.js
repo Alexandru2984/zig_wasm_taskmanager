@@ -8,6 +8,7 @@ let currentUser = null;
 // DOM Elements
 const taskForm = document.getElementById('taskForm');
 const taskInput = document.getElementById('taskInput');
+const taskPriority = document.getElementById('taskPriority');
 const taskList = document.getElementById('taskList');
 const emptyState = document.getElementById('emptyState');
 const totalCount = document.getElementById('totalCount');
@@ -103,12 +104,14 @@ function saveLocalTasks(tasks) {
     localStorage.setItem('localTasks', JSON.stringify(tasks));
 }
 
-function addLocalTask(title) {
+function addLocalTask(title, dueDate = null, priority = 'normal') {
     const tasks = getLocalTasks();
     const newTask = {
         id: Date.now(),
         title: title,
-        completed: false
+        completed: false,
+        due_date: dueDate,
+        priority
     };
     tasks.push(newTask);
     saveLocalTasks(tasks);
@@ -534,6 +537,14 @@ function renderTasks(tasks) {
         const meta = document.createElement('div');
         meta.className = 'task-meta';
 
+        const priority = task.priority || 'normal';
+        if (priority !== 'normal') {
+            const priorityEl = document.createElement('span');
+            priorityEl.className = `task-priority task-priority-${priority}`;
+            priorityEl.textContent = priority === 'high' ? 'High' : 'Low';
+            meta.appendChild(priorityEl);
+        }
+
         const createdStr = formatDate(task.created_at);
         if (createdStr) {
             const createdEl = document.createElement('span');
@@ -594,11 +605,11 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-async function addTask(title, dueDate = null) {
+async function addTask(title, dueDate = null, priority = 'normal') {
     if (isLoggedIn()) {
         // Logged in: save to API
         try {
-            const taskData = { title };
+            const taskData = { title, priority };
             if (dueDate) {
                 taskData.due_date = dueDate;
             }
@@ -618,7 +629,7 @@ async function addTask(title, dueDate = null) {
         }
     } else {
         // Anonymous: save to localStorage
-        addLocalTask(title);
+        addLocalTask(title, dueDate, priority);
         loadTasks();
     }
 }
@@ -754,9 +765,11 @@ taskForm.addEventListener('submit', (e) => {
     
     const dueDateInput = document.getElementById('taskDueDate');
     const dueDate = dueDateInput.value || null;
+    const priority = taskPriority ? taskPriority.value : 'normal';
     
-    addTask(title, dueDate);
+    addTask(title, dueDate, priority);
     taskInput.value = '';
+    if (taskPriority) taskPriority.value = 'normal';
     clearDatePicker();
     taskInput.focus();
 });

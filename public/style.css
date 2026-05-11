@@ -408,6 +408,24 @@ body {
     box-shadow: 0 0 0 4px var(--accent-glow);
 }
 
+.priority-select {
+    flex: 0 0 110px;
+    min-width: 110px;
+    padding: 0.875rem 0.75rem;
+    background: var(--bg-secondary);
+    border: 2px solid transparent;
+    border-radius: var(--border-radius-sm);
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    transition: var(--transition);
+}
+
+.priority-select:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 4px var(--accent-glow);
+}
+
 .btn-add {
     display: flex;
     align-items: center;
@@ -438,6 +456,11 @@ body {
     
     .task-input {
         flex: 1 1 100%;
+    }
+
+    .priority-select {
+        flex: 1 1 100%;
+        width: 100%;
     }
     
     .date-picker-wrapper {
@@ -858,7 +881,7 @@ body {
     flex-wrap: wrap;
 }
 
-.task-created, .task-due {
+.task-created, .task-due, .task-priority {
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
@@ -870,6 +893,22 @@ body {
 .task-due {
     color: var(--accent-primary);
     background: rgba(247, 147, 26, 0.1);
+}
+
+.task-priority {
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.task-priority-high {
+    color: #ffb86b;
+    background: rgba(255, 184, 107, 0.14);
+}
+
+.task-priority-low {
+    color: #8ab4ff;
+    background: rgba(138, 180, 255, 0.14);
 }
 
 /* Task item improvements */

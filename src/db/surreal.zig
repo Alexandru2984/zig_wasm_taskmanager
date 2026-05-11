@@ -63,11 +63,12 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
     // Define tasks table
     const tasks_schema =
         \\DEFINE TABLE tasks SCHEMAFULL;
-        \\DEFINE FIELD user_id ON tasks TYPE string;
+        \\DEFINE FIELD user_id ON tasks TYPE record<users>;
         \\DEFINE FIELD title ON tasks TYPE string;
         \\DEFINE FIELD completed ON tasks TYPE bool DEFAULT false;
         \\DEFINE FIELD created_at ON tasks TYPE datetime DEFAULT time::now();
         \\DEFINE FIELD due_date ON tasks TYPE option<datetime> ASSERT $value == NONE OR $value >= created_at;
+        \\DEFINE FIELD priority ON tasks TYPE string DEFAULT "normal";
     ;
 
     const tasks_result = try query(allocator, tasks_schema);
@@ -77,7 +78,7 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
     const sessions_schema =
         \\DEFINE TABLE sessions SCHEMAFULL;
         \\DEFINE FIELD token ON sessions TYPE string;
-        \\DEFINE FIELD user_id ON sessions TYPE string;
+        \\DEFINE FIELD user_id ON sessions TYPE record<users>;
         \\DEFINE FIELD created_at ON sessions TYPE datetime DEFAULT time::now();
         \\DEFINE FIELD expires_at ON sessions TYPE datetime;
         \\DEFINE INDEX session_token_idx ON sessions COLUMNS token UNIQUE;
@@ -112,19 +113,19 @@ pub fn getUserByEmail(allocator: std.mem.Allocator, email: []const u8) ![]u8 {
 pub fn getUserById(allocator: std.mem.Allocator, id: []const u8) ![]u8 {
     // id is a full SurrealDB record ID like "users:abc123"
     return queryWithVars(allocator,
-        \\SELECT * FROM type::record($record_id);
+        \\SELECT * FROM $record_id;
     , .{ .record_id = id });
 }
 
 pub fn updateUserName(allocator: std.mem.Allocator, user_id: []const u8, name: []const u8) ![]u8 {
     return queryWithVars(allocator,
-        \\UPDATE type::record($record_id) SET name = $name;
+        \\UPDATE $record_id SET name = $name;
     , .{ .record_id = user_id, .name = name });
 }
 
 pub fn updateUserPassword(allocator: std.mem.Allocator, user_id: []const u8, password_hash: []const u8) ![]u8 {
     return queryWithVars(allocator,
-        \\UPDATE type::record($record_id) SET password_hash = $password_hash;
+        \\UPDATE $record_id SET password_hash = $password_hash;
     , .{ .record_id = user_id, .password_hash = password_hash });
 }
 
@@ -136,19 +137,19 @@ pub fn resetUserPasswordAndClearToken(
     password_hash: []const u8,
 ) ![]u8 {
     return queryWithVars(allocator,
-        \\UPDATE type::record($record_id) SET password_hash = $password_hash, reset_token = NONE, reset_expires = NONE;
+        \\UPDATE $record_id SET password_hash = $password_hash, reset_token = NONE, reset_expires = NONE;
     , .{ .record_id = user_id, .password_hash = password_hash });
 }
 
 pub fn setResetToken(allocator: std.mem.Allocator, user_id: []const u8, token: []const u8, expires: i64) ![]u8 {
     return queryWithVars(allocator,
-        \\UPDATE type::record($record_id) SET reset_token = $reset_tkn, reset_expires = $expires;
+        \\UPDATE $record_id SET reset_token = $reset_tkn, reset_expires = $expires;
     , .{ .record_id = user_id, .reset_tkn = token, .expires = expires });
 }
 
 pub fn clearResetToken(allocator: std.mem.Allocator, user_id: []const u8) !void {
     const result = try queryWithVars(allocator,
-        \\UPDATE type::record($record_id) SET reset_token = NONE, reset_expires = NONE;
+        \\UPDATE $record_id SET reset_token = NONE, reset_expires = NONE;
     , .{ .record_id = user_id });
     allocator.free(result);
 }
@@ -156,7 +157,7 @@ pub fn clearResetToken(allocator: std.mem.Allocator, user_id: []const u8) !void 
 pub fn setVerificationToken(allocator: std.mem.Allocator, user_id: []const u8, token: []const u8, expires: i64) ![]u8 {
     // SECURITY: reset the attempt counter so a fresh code gets a fresh budget.
     return queryWithVars(allocator,
-        \\UPDATE type::record($record_id) SET verification_token = $verification_tkn, verification_expires = $expires, verification_attempts = 0;
+        \\UPDATE $record_id SET verification_token = $verification_tkn, verification_expires = $expires, verification_attempts = 0;
     , .{ .record_id = user_id, .verification_tkn = token, .expires = expires });
 }
 
@@ -176,7 +177,7 @@ pub fn verifyUserEmailAtomic(
     now_ts: i64,
 ) !bool {
     const result = try queryWithVars(allocator,
-        \\UPDATE type::record($record_id) SET email_verified = true, verification_token = NONE, verification_expires = NONE, verification_attempts = 0 WHERE verification_token = $code AND (verification_expires = NONE OR verification_expires >= $now_ts) RETURN AFTER;
+        \\UPDATE $record_id SET email_verified = true, verification_token = NONE, verification_expires = NONE, verification_attempts = 0 WHERE verification_token = $code AND (verification_expires = NONE OR verification_expires >= $now_ts) RETURN AFTER;
     , .{ .record_id = user_id, .code = code, .now_ts = now_ts });
     defer allocator.free(result);
 
@@ -196,7 +197,7 @@ pub fn bumpVerificationAttempts(
     max_attempts: u32,
 ) !u32 {
     const result = try queryWithVars(allocator,
-        \\UPDATE type::record($record_id) SET verification_attempts = (verification_attempts OR 0) + 1, verification_token = IF (verification_attempts OR 0) + 1 >= $max THEN NONE ELSE verification_token END, verification_expires = IF (verification_attempts OR 0) + 1 >= $max THEN NONE ELSE verification_expires END RETURN AFTER;
+        \\UPDATE $record_id SET verification_attempts = (verification_attempts OR 0) + 1, verification_token = IF (verification_attempts OR 0) + 1 >= $max THEN NONE ELSE verification_token END, verification_expires = IF (verification_attempts OR 0) + 1 >= $max THEN NONE ELSE verification_expires END RETURN AFTER;
     , .{ .record_id = user_id, .max = @as(i64, @intCast(max_attempts)) });
     defer allocator.free(result);
 
@@ -215,18 +216,18 @@ pub fn bumpVerificationAttempts(
 
 // ============== TASK OPERATIONS ==============
 
-pub fn createTask(allocator: std.mem.Allocator, user_id: []const u8, title: []const u8) ![]u8 {
+pub fn createTask(allocator: std.mem.Allocator, user_id: []const u8, title: []const u8, priority: []const u8) ![]u8 {
     return queryWithVars(allocator,
-        \\CREATE tasks SET user_id = $user_id, title = $title, completed = false, created_at = time::now();
-    , .{ .user_id = user_id, .title = title });
+        \\CREATE tasks SET user_id = $user_id, title = $title, priority = $priority, completed = false, created_at = time::now();
+    , .{ .user_id = user_id, .title = title, .priority = priority });
 }
 
-pub fn createTaskWithDueDate(allocator: std.mem.Allocator, user_id: []const u8, title: []const u8, due_date: []const u8) ![]u8 {
+pub fn createTaskWithDueDate(allocator: std.mem.Allocator, user_id: []const u8, title: []const u8, due_date: []const u8, priority: []const u8) ![]u8 {
     // Ensure due_date has proper format (add :00Z if needed for SurrealDB)
     // HTML datetime-local gives "2025-12-25T12:00" but SurrealDB needs "2025-12-25T12:00:00Z"
     var formatted_date: []const u8 = due_date;
     var needs_free = false;
-    
+
     if (!std.mem.endsWith(u8, due_date, "Z")) {
         if (std.mem.count(u8, due_date, ":") == 1) {
             formatted_date = try std.fmt.allocPrint(allocator, "{s}:00Z", .{due_date});
@@ -237,10 +238,10 @@ pub fn createTaskWithDueDate(allocator: std.mem.Allocator, user_id: []const u8, 
         }
     }
     defer if (needs_free) allocator.free(formatted_date);
-    
+
     return queryWithVars(allocator,
-        \\CREATE tasks SET user_id = $user_id, title = $title, completed = false, created_at = time::now(), due_date = <datetime>$due_date;
-    , .{ .user_id = user_id, .title = title, .due_date = formatted_date });
+        \\CREATE tasks SET user_id = $user_id, title = $title, priority = $priority, completed = false, created_at = time::now(), due_date = <datetime>$due_date;
+    , .{ .user_id = user_id, .title = title, .priority = priority, .due_date = formatted_date });
 }
 
 pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
@@ -251,13 +252,13 @@ pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
 
 pub fn toggleTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
-        \\UPDATE type::record($record_id) SET completed = !completed;
+        \\UPDATE $record_id SET completed = !completed;
     , .{ .record_id = task_id });
 }
 
 pub fn deleteTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
-        \\DELETE type::record($record_id);
+        \\DELETE $record_id;
     , .{ .record_id = task_id });
 }
 
@@ -265,7 +266,7 @@ pub fn deleteTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
 
 pub fn getTaskOwner(allocator: std.mem.Allocator, task_id: []const u8) !?[]const u8 {
     const result = try queryWithVars(allocator,
-        \\SELECT user_id FROM type::record($record_id);
+        \\SELECT user_id FROM $record_id;
     , .{ .record_id = task_id });
     defer allocator.free(result);
 
@@ -299,15 +300,15 @@ pub fn verifyTaskOwnership(allocator: std.mem.Allocator, task_id: []const u8, us
 pub fn generateSecureToken() [64]u8 {
     var random_bytes: [32]u8 = undefined;
     std.crypto.random.bytes(&random_bytes);
-    
+
     const hex_chars = "0123456789abcdef";
     var hex_token: [64]u8 = undefined;
-    
+
     for (random_bytes, 0..) |byte, i| {
         hex_token[i * 2] = hex_chars[byte >> 4];
         hex_token[i * 2 + 1] = hex_chars[byte & 0x0F];
     }
-    
+
     return hex_token;
 }
 
@@ -315,15 +316,15 @@ pub fn generateSecureToken() [64]u8 {
 /// Session expires in 7 days by default
 pub fn createSession(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     const token = generateSecureToken();
-    
+
     // Calculate expiration (7 days from now in milliseconds)
     const expires_ms = std.time.milliTimestamp() + (7 * 24 * 60 * 60 * 1000);
-    
+
     const result = try queryWithVars(allocator,
         \\CREATE sessions SET token = $session_token, user_id = $user_id, expires_at = time::from::millis($expires_ms);
     , .{ .session_token = token, .user_id = user_id, .expires_ms = expires_ms });
     defer allocator.free(result);
-    
+
     // Return a copy of the token
     return try allocator.dupe(u8, &token);
 }

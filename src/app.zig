@@ -18,12 +18,12 @@ pub fn allocator() std.mem.Allocator {
 pub fn init() !void {
     start_time = std.time.timestamp();
     const alloc = allocator();
-    
+
     // Load config
     config.load(alloc) catch |err| {
         std.debug.print("⚠️ Config load failed: {} - using defaults\n", .{err});
     };
-    
+
     std.debug.print("✅ AppState initialized with GPA\n", .{});
 }
 

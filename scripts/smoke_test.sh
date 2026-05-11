@@ -9,6 +9,11 @@ BASE_URL="${1:-http://127.0.0.1:9000}"
 PASS=0
 FAIL=0
 
+extra_curl_opts=()
+if [ -n "${CURL_RESOLVE:-}" ]; then
+    extra_curl_opts+=( --resolve "$CURL_RESOLVE" )
+fi
+
 # Cookie jar: session auth survives between requests WITHOUT leaking tokens
 # via `ps aux` (the previous script embedded the Bearer token directly in
 # every curl argv).
@@ -26,7 +31,7 @@ echo "=================================="
 echo "Base URL: $BASE_URL"
 echo ""
 
-curl_opts=( -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" )
+curl_opts=( "${extra_curl_opts[@]}" -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" )
 
 # Helper function
 test_endpoint() {
@@ -73,7 +78,7 @@ test_header() {
 
     echo -n "Testing $name... "
 
-    response=$(curl -sI "$BASE_URL$endpoint" 2>&1)
+    response=$(curl "${extra_curl_opts[@]}" -sI "$BASE_URL$endpoint" 2>&1)
 
     if echo "$response" | grep -qi "$header.*$expected" 2>/dev/null; then
         echo -e "${GREEN}✓ PASS${NC}"
@@ -93,7 +98,7 @@ test_endpoint "Ready Check" "GET" "/api/ready" "" "ready" || true
 
 # Metrics endpoint is now gated behind METRICS_TOKEN — expect 401 without one.
 echo -n "Testing Metrics (gated)... "
-metrics=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/metrics")
+metrics=$(curl "${extra_curl_opts[@]}" -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/metrics")
 if [ "$metrics" = "401" ] || [ "$metrics" = "404" ]; then
     echo -e "${GREEN}✓ PASS${NC} (got $metrics)"
     PASS=$((PASS + 1))
@@ -143,12 +148,13 @@ echo "=== Task Operations ==="
 test_endpoint "Get Tasks (Empty)" "GET" "/api/tasks" "" "\[\]" || true
 
 test_endpoint "Create Task" "POST" "/api/tasks" \
-    "{\"title\":\"Smoke Test Task\"}" "Smoke Test Task" || true
+    "{\"title\":\"Smoke Test Task\",\"priority\":\"high\"}" "Smoke Test Task" || true
 TASK_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
 
 if [ -n "$TASK_ID" ]; then
     echo "Created Task ID: $TASK_ID"
 
+    test_endpoint "Task Priority" "GET" "/api/tasks" "" '"priority":"high"' || true
     test_endpoint "Get Tasks (List)" "GET" "/api/tasks" "" "$TASK_ID" || true
     test_endpoint "Toggle Task" "PUT" "/api/tasks/$TASK_ID" "" "true" || true
     test_endpoint "Delete Task" "DELETE" "/api/tasks/$TASK_ID" "" "success" || true
@@ -158,7 +164,7 @@ echo ""
 echo "=== Method Enforcement ==="
 # Signup must reject GET.
 echo -n "Testing Signup rejects GET... "
-status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/auth/signup")
+status=$(curl "${extra_curl_opts[@]}" -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/auth/signup")
 if [ "$status" = "405" ]; then
     echo -e "${GREEN}✓ PASS${NC}"
     PASS=$((PASS + 1))
@@ -184,7 +190,7 @@ fi
 
 echo ""
 echo "=== Path Security ==="
-response=$(curl -s "$BASE_URL/../../etc/passwd" 2>&1)
+response=$(curl "${extra_curl_opts[@]}" -s "$BASE_URL/../../etc/passwd" 2>&1)
 if echo "$response" | grep -q "403\|404\|Forbidden\|Not Found" 2>/dev/null; then
     echo -e "Testing Path Traversal Block... ${GREEN}✓ PASS${NC}"
     PASS=$((PASS + 1))

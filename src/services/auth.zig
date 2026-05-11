@@ -4,9 +4,9 @@ const std = @import("std");
 const config = @import("../config/config.zig");
 
 // Argon2id parameters (OWASP recommendations for password hashing)
-const ARGON2_T_COST = 3;          // Time cost (iterations)
-const ARGON2_M_COST = 65536;      // Memory cost (64 MB)
-const ARGON2_PARALLELISM = 4;     // Parallelism
+const ARGON2_T_COST = 3; // Time cost (iterations)
+const ARGON2_M_COST = 65536; // Memory cost (64 MB)
+const ARGON2_PARALLELISM = 4; // Parallelism
 
 // SECURITY: fixed decoy hash used by login when the email is unknown, so that
 // response time matches the real-user path and timing can't be used to probe
@@ -21,7 +21,7 @@ pub fn hashPassword(allocator: std.mem.Allocator, password: []const u8) ![]u8 {
     // Generate random salt
     var salt: [16]u8 = undefined;
     std.crypto.random.bytes(&salt);
-    
+
     // Derive key using Argon2id
     var derived_key: [32]u8 = undefined;
     std.crypto.pwhash.argon2.kdf(
@@ -39,22 +39,22 @@ pub fn hashPassword(allocator: std.mem.Allocator, password: []const u8) ![]u8 {
         std.debug.print("Argon2 KDF error: {}\n", .{err});
         return error.HashingFailed;
     };
-    
+
     // Convert to hex strings
     const hex_chars = "0123456789abcdef";
     var salt_hex: [32]u8 = undefined;
     var hash_hex: [64]u8 = undefined;
-    
+
     for (salt, 0..) |byte, i| {
         salt_hex[i * 2] = hex_chars[byte >> 4];
         salt_hex[i * 2 + 1] = hex_chars[byte & 0x0F];
     }
-    
+
     for (derived_key, 0..) |byte, i| {
         hash_hex[i * 2] = hex_chars[byte >> 4];
         hash_hex[i * 2 + 1] = hex_chars[byte & 0x0F];
     }
-    
+
     // Return PHC-style format: $argon2id$salt$hash
     return try std.fmt.allocPrint(allocator, "$argon2id${s}${s}", .{ salt_hex, hash_hex });
 }
@@ -66,35 +66,35 @@ pub fn verifyPassword(allocator: std.mem.Allocator, stored_hash: []const u8, pas
     if (std.mem.startsWith(u8, stored_hash, "$argon2id$")) {
         return verifyArgon2Password(allocator, stored_hash, password);
     }
-    
+
     // Legacy FNV-1a format (for soft migration)
     return verifyLegacyPassword(allocator, stored_hash, password);
 }
 
 fn verifyArgon2Password(allocator: std.mem.Allocator, stored_hash: []const u8, password: []const u8) !bool {
     _ = allocator;
-    
+
     // Parse: $argon2id$salt_hex$hash_hex
     const after_prefix = stored_hash[10..]; // Skip "$argon2id$"
     const dollar_pos = std.mem.indexOf(u8, after_prefix, "$") orelse return false;
-    
+
     const salt_hex = after_prefix[0..dollar_pos];
     const hash_hex = after_prefix[dollar_pos + 1 ..];
-    
+
     if (salt_hex.len != 32 or hash_hex.len != 64) return false;
-    
+
     // Parse salt from hex
     var salt: [16]u8 = undefined;
     for (0..16) |i| {
         salt[i] = std.fmt.parseInt(u8, salt_hex[i * 2 .. i * 2 + 2], 16) catch return false;
     }
-    
+
     // Parse expected hash from hex
     var expected_hash: [32]u8 = undefined;
     for (0..32) |i| {
         expected_hash[i] = std.fmt.parseInt(u8, hash_hex[i * 2 .. i * 2 + 2], 16) catch return false;
     }
-    
+
     // Recompute hash with same salt (use page_allocator for KDF internal memory)
     var computed_hash: [32]u8 = undefined;
     std.crypto.pwhash.argon2.kdf(
@@ -109,7 +109,7 @@ fn verifyArgon2Password(allocator: std.mem.Allocator, stored_hash: []const u8, p
         },
         .argon2id,
     ) catch return false;
-    
+
     // Constant-time comparison
     return std.crypto.timing_safe.eql([32]u8, computed_hash, expected_hash);
 }
@@ -153,15 +153,15 @@ pub fn isLegacyHash(stored_hash: []const u8) bool {
 pub fn generateResetToken(allocator: std.mem.Allocator) ![]u8 {
     var random_bytes: [32]u8 = undefined;
     std.crypto.random.bytes(&random_bytes);
-    
+
     const hex_chars = "0123456789abcdef";
     var token: [64]u8 = undefined;
-    
+
     for (random_bytes, 0..) |byte, i| {
         token[i * 2] = hex_chars[byte >> 4];
         token[i * 2 + 1] = hex_chars[byte & 0x0F];
     }
-    
+
     return try allocator.dupe(u8, &token);
 }
 

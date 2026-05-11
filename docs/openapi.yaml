@@ -1,0 +1,302 @@
+openapi: 3.0.3
+info:
+  title: Zig Task Manager API
+  version: 1.0.0
+  description: API for the Zig Task Manager backend.
+servers:
+  - url: https://task.micutu.com
+  - url: http://127.0.0.1:9000
+paths:
+  /api/health:
+    get:
+      summary: Liveness check
+      responses:
+        "200":
+          description: Service is alive
+  /api/ready:
+    get:
+      summary: Readiness check
+      responses:
+        "200":
+          description: Service can reach required dependencies
+        "503":
+          description: Service is not ready
+  /api/metrics:
+    get:
+      summary: Protected Prometheus metrics
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Metrics payload
+        "401":
+          description: Missing or invalid metrics token
+        "404":
+          description: Metrics disabled
+  /api/auth/signup:
+    post:
+      summary: Create a user and start an authenticated session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignupRequest"
+      responses:
+        "201":
+          description: Account created
+        "400":
+          description: Invalid input or duplicate email
+        "429":
+          description: Rate limited
+  /api/auth/login:
+    post:
+      summary: Login with email and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authenticated
+        "401":
+          description: Invalid credentials
+        "429":
+          description: Rate limited
+  /api/auth/me:
+    get:
+      summary: Return the current authenticated user
+      responses:
+        "200":
+          description: Current user
+        "401":
+          description: Not authenticated
+  /api/auth/logout:
+    post:
+      summary: Delete the current session
+      responses:
+        "200":
+          description: Logged out
+  /api/auth/forgot-password:
+    post:
+      summary: Send a password reset link if the account exists
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        "200":
+          description: Generic success response
+        "429":
+          description: Rate limited
+  /api/auth/reset-password:
+    post:
+      summary: Reset a password with a reset token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, new_password]
+              properties:
+                token:
+                  type: string
+                new_password:
+                  type: string
+                  minLength: 8
+      responses:
+        "200":
+          description: Password reset
+        "400":
+          description: Invalid token or password
+  /api/auth/verify:
+    post:
+      summary: Verify the current user's email
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  minLength: 6
+                  maxLength: 6
+      responses:
+        "200":
+          description: Email verified
+        "400":
+          description: Invalid or expired code
+        "401":
+          description: Not authenticated
+  /api/auth/resend-verification:
+    post:
+      summary: Send a new verification code to the authenticated user
+      responses:
+        "200":
+          description: Verification code sent
+        "401":
+          description: Not authenticated
+        "429":
+          description: Rate limited
+  /api/profile:
+    get:
+      summary: Return the current user's profile
+      responses:
+        "200":
+          description: Profile
+        "401":
+          description: Not authenticated
+    put:
+      summary: Update the current user's profile name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+      responses:
+        "200":
+          description: Updated profile
+        "401":
+          description: Not authenticated
+  /api/profile/password:
+    put:
+      summary: Change the current user's password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old_password, new_password]
+              properties:
+                old_password:
+                  type: string
+                new_password:
+                  type: string
+                  minLength: 8
+      responses:
+        "200":
+          description: Password changed
+        "403":
+          description: Current password is invalid
+  /api/tasks:
+    get:
+      summary: List tasks for the current user
+      responses:
+        "200":
+          description: Task list
+    post:
+      summary: Create a task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskRequest"
+      responses:
+        "201":
+          description: Created task
+        "401":
+          description: Not authenticated
+  /api/tasks/{id}:
+    put:
+      summary: Toggle task completion
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200":
+          description: Updated task
+        "403":
+          description: Task does not belong to current user
+    delete:
+      summary: Delete a task
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200":
+          description: Task deleted
+        "403":
+          description: Task does not belong to current user
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    TaskId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    SignupRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        name:
+          type: string
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+    CreateTaskRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        due_date:
+          type: string
+          nullable: true
+        priority:
+          type: string
+          enum: [low, normal, high]
+    Task:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        completed:
+          type: boolean
+        created_at:
+          type: string
+        due_date:
+          type: string
+          nullable: true
+        priority:
+          type: string
+          enum: [low, normal, high]

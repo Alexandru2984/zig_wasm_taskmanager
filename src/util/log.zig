@@ -40,7 +40,7 @@ fn levelEmoji(level: Level) []const u8 {
 
 pub fn log(level: Level, comptime fmt: []const u8, args: anytype) void {
     if (!shouldLog(level)) return;
-    
+
     const prefix = levelEmoji(level);
     std.debug.print("{s} " ++ fmt ++ "\n", .{prefix} ++ args);
 }

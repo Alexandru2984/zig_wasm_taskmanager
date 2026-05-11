@@ -1,205 +1,169 @@
-# 🦎 Zig Task Manager
+# Zig Task Manager
 
-A **full-stack Task Manager** built entirely in Zig — backend, frontend logic, and WebAssembly.
+Production-style task manager built in Zig with a Zap backend, SurrealDB,
+WebAssembly frontend, self-hosted SMTP email, hardened authentication, and a
+systemd-sandboxed VPS deployment.
 
 ![Dashboard Preview](docs/screenshot-dashboard.png)
 
-## ✨ Features
+## Highlights
 
-- **Pure Zig Backend** — HTTP server with [Zap](https://github.com/zigzap/zap) framework (facil.io)
-- **Zig → WebAssembly Frontend** — UI logic compiled to WASM
-- **SurrealDB Integration** — Persistent storage for users, tasks, and sessions
-- **Secure Authentication** — Signup, login, server-side logout, password reset, email verification
-- **Security First** — Argon2id hashing, Rate Limiting, Security Headers, Safe JSON parsing
-- **Modern Dark UI** — Glassmorphism, smooth animations, Zig-themed colors
+- Zig backend with [Zap](https://github.com/zigzap/zap) and facil.io.
+- Zig-to-WebAssembly frontend module served with static assets.
+- SurrealDB persistence for users, sessions, verification tokens, reset tokens,
+  and tasks.
+- Argon2id password hashing and server-side sessions carried by HttpOnly
+  cookies.
+- Email verification and password reset through SMTP.
+- Per-route rate limiting, strict CORS, CSP, HSTS, safe static-file serving,
+  and protected metrics.
+- Production deployment behind nginx/TLS with a hardened systemd service.
 
-## 📸 Screenshots
+## Portfolio Summary
 
-| Login Page | Logged In Dashboard |
-|------------|---------------------|
+Built and deployed a production-style task manager in Zig with Zap, SurrealDB,
+WASM frontend, Argon2id authentication, HttpOnly session cookies, email
+verification/password reset via self-hosted SMTP, rate limiting, CSP/HSTS
+security headers, systemd sandboxing, health/readiness endpoints, and protected
+metrics.
+
+More: [docs/PORTFOLIO.md](docs/PORTFOLIO.md)
+
+## Screenshots
+
+| Login Page | Dashboard |
+| --- | --- |
 | ![Login](docs/screenshot-login.png) | ![Dashboard](docs/screenshot-dashboard.png) |
 
-## 🚀 Quick Start
+## Quick Start
 
-### Prerequisites
+Requirements:
 
-- [Zig](https://ziglang.org/download/) 0.15.x or later
-- [SurrealDB](https://surrealdb.com/) running locally (default port 8000)
-
-### Run
+- Zig 0.15.x
+- SurrealDB reachable over HTTP
+- SMTP credentials for verification/reset email
 
 ```bash
-# Clone and run
-git clone <your-repo>
-cd zig-task-manager
-
-# Configure environment
+git clone <repo-url>
+cd taskmanager
 cp .env.example .env
-# Edit .env with your DB credentials and Email API key
-
-# Build and start server
 zig build run
-
-# Open in browser
-open http://localhost:9000
 ```
 
-### Testing
+The app defaults to `http://127.0.0.1:9000`.
 
-Run the comprehensive smoke test suite to verify all endpoints:
+## Verification
 
 ```bash
-./scripts/smoke_test.sh
+./scripts/check.sh
 ```
 
-## 🏗️ Architecture
+This runs formatting checks, `zig build`, and `zig build test`.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Browser                               │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ index.html  │  │  style.css  │  │      app.js         │  │
-│  │             │  │ (dark theme)│  │ (auth + localStorage)│  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-│                          │                                   │
-│                    ┌─────▼─────┐                            │
-│                    │ app.wasm  │ ← Zig compiled to WASM     │
-│                    └───────────┘                            │
-└─────────────────────────────────────────────────────────────┘
-                           │ HTTP
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Zig + Zap Server                          │
-│  ┌──────────────┐  ┌─────────────────────────────────────┐  │
-│  │   main.zig   │  │           Handlers                  │  │
-│  │ (Routing)    │  │ (auth, tasks, profile, system)      │  │
-│  └──────┬───────┘  └──────────────────┬──────────────────┘  │
-│         │                             │                     │
-│         ▼                             ▼                     │
-│  ┌──────────────┐  ┌─────────────────────────────────────┐  │
-│  │  util/http   │  │            Domain Models            │  │
-│  │ (JSON/Resp)  │  │        (User, Task, Session)        │  │
-│  └──────────────┘  └─────────────────────────────────────┘  │
-└─────────────────────────┬───────────────────────────────────┘
-                          │ HTTP (REST)
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     SurrealDB                                │
-│           (Users, Tasks, Sessions, Tokens)                   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## 📁 Project Structure
-
-```
-zig-task-manager/
-├── src/
-│   ├── main.zig          # Server entry point & routing
-│   ├── app.zig           # Application state & lifecycle
-│   ├── handlers/         # Request handlers
-│   │   ├── auth.zig      # Signup, login, logout, verify, reset
-│   │   ├── tasks.zig     # Task CRUD
-│   │   ├── profile.zig   # User profile & password change
-│   │   └── system.zig    # /health, /ready, /metrics
-│   ├── config/
-│   │   └── config.zig    # .env loader
-│   ├── domain/
-│   │   └── models.zig    # Data structures
-│   ├── db/
-│   │   ├── db.zig        # Database interface
-│   │   ├── surreal.zig   # SurrealDB implementation
-│   │   └── http_client.zig # Optimized HTTP client
-│   ├── services/
-│   │   ├── auth.zig      # Argon2id hashing & token generation
-│   │   └── email.zig     # Email sending (SMTP)
-│   └── util/
-│       ├── http.zig      # HTTP helpers (cookies, JSON, errors)
-│       ├── json.zig      # JSON helpers
-│       ├── log.zig       # Structured logging
-│       ├── rate_limiter.zig # Per-IP rate limiting
-│       └── validation.zig   # Input validation
-├── frontend/src/main.zig # WASM frontend source
-├── public/               # Static assets (+ app.wasm after build)
-├── scripts/smoke_test.sh # API smoke tests (19 cases)
-├── docs/DEPLOY.md        # Deployment guide
-├── build.zig             # Build configuration
-├── build.zig.zon         # Zig package manifest (Zap dep)
-└── .env.example          # Config template
-```
-
-## 🔐 Security Features
-
-| Feature | Implementation |
-|---------|----------------|
-| **Password Hashing** | Argon2id (industry standard) |
-| **Session Management** | Server-side sessions in SurrealDB, 7-day expiry, invalidated on logout |
-| **Logout** | `POST /api/auth/logout` — deletes the session server-side for both cookie and `Authorization: Bearer` clients |
-| **Session Cookie** | `HttpOnly`, `SameSite=Strict`, 7-day max-age |
-| **Rate Limiting** | Per-IP limiting for signup (3/min) and login (5/min) |
-| **Headers** | `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `X-XSS-Protection` |
-| **Input Validation** | Strict JSON parsing, email/password/name validators |
-| **CORS** | Single configured origin (no wildcard in prod) |
-| **Secrets** | Loaded from `.env`, never checked into git |
-
-## 🛠️ Development
+Smoke tests create a test user and may send verification email, so they are
+opt-in:
 
 ```bash
-# Debug build (fast compile, slow binary ~36MB)
-zig build
-
-# Release build for production (~9MB)
-zig build -Doptimize=ReleaseFast
-
-# Run directly
-zig build run
-
-# Run smoke tests (19 cases)
-./scripts/smoke_test.sh
+RUN_SMOKE=1 ./scripts/check.sh
 ```
 
-## 🚢 Deployment
+For production-like local testing with Secure cookies, run smoke tests through
+the local nginx HTTPS vhost:
 
-The reference deployment runs the release binary under systemd with nginx
-as TLS-terminating reverse proxy and SurrealDB in Docker on the same host.
-
-`/etc/systemd/system/taskmanager.service`:
-
-```ini
-[Unit]
-Description=Zig Task Manager
-After=network.target docker.service
-Requires=docker.service
-
-[Service]
-Type=simple
-ExecStart=/home/USER/taskmanager/zig-out/bin/taskmanager
-WorkingDirectory=/home/USER/taskmanager
-Restart=always
-RestartSec=5
-User=USER
-Group=USER
-
-[Install]
-WantedBy=multi-user.target
+```bash
+BASE_URL=https://task.micutu.com \
+CURL_RESOLVE=task.micutu.com:443:127.0.0.1 \
+RUN_SMOKE=1 ./scripts/check.sh
 ```
 
-Nginx proxies `https://your.domain/` to `127.0.0.1:$PORT` (default 9000)
-and forwards `X-Real-IP` so rate limiting sees the real client IP.
+## Architecture
 
-See `docs/DEPLOY.md` for the full VPS walkthrough (SurrealDB docker,
-Zig install, nginx config, Let's Encrypt).
+```text
+Browser
+  |
+  | HTTPS
+  v
+Cloudflare / nginx
+  |
+  | HTTP on 127.0.0.1:9000
+  v
+Zig + Zap server
+  |        \
+  |         \ SMTP 587
+  |          v
+  |       mailcow / SMTP provider
+  v
+SurrealDB HTTP API
+```
 
-## 📦 Dependencies
+More: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
-- **[Zap](https://github.com/zigzap/zap)** — Blazingly fast Zig HTTP server
-- **SurrealDB** — Multi-model cloud database
+## API
 
-## 📄 License
+The OpenAPI document is in [docs/openapi.yaml](docs/openapi.yaml).
+
+Main endpoint groups:
+
+- `/api/auth/*`: signup, login, logout, verification, password reset
+- `/api/profile*`: profile and password changes
+- `/api/tasks*`: task CRUD with priority and due-date metadata
+- `/api/health`, `/api/ready`, `/api/metrics`: operational endpoints
+
+## Security
+
+Security controls are documented in [SECURITY.md](SECURITY.md).
+
+Current controls include:
+
+- Argon2id password hashing
+- server-side sessions with HttpOnly cookies
+- reset-token invalidation and session invalidation after password reset
+- authenticated email verification with per-user attempt caps
+- route-specific rate limiting
+- strict CSP/HSTS/security headers
+- SurrealQL variable binding for user input
+- path traversal protection for static assets
+- SMTP credentials stored only in `.env`
+- systemd sandboxing for the deployed process
+
+## Project Structure
+
+```text
+src/
+  main.zig              routing, CORS, security headers, static serving
+  handlers/             auth, profile, task, and system endpoints
+  services/             auth and email services
+  db/                   SurrealDB repository and HTTP client
+  util/                 HTTP helpers, validation, rate limiting, logging
+frontend/src/main.zig   WASM frontend module
+public/                 HTML, CSS, JS, generated WASM
+scripts/check.sh        local verification entry point
+scripts/smoke_test.sh   optional API smoke tests
+docs/                   deployment, architecture, roadmap, OpenAPI, portfolio
+```
+
+## Roadmap
+
+The current roadmap focuses on making the app more useful while keeping the
+engineering work visible:
+
+- explicit CSRF protection
+- isolated integration test database
+- CI with secret scanning
+- task labels
+- email reminders
+- recurring tasks
+- activity log and export
+
+More: [docs/ROADMAP.md](docs/ROADMAP.md)
+
+## Deployment
+
+The reference deployment runs the release binary under systemd with nginx as
+TLS-terminating reverse proxy, SurrealDB on localhost, and SMTP via mailcow.
+
+More: [docs/DEPLOY.md](docs/DEPLOY.md)
+
+## License
 
 MIT
-
----
-
-<div align="center">
-  Built with 🧡 in <b>Zig</b>
-</div>

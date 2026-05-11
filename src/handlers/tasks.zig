@@ -51,6 +51,7 @@ pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
             .completed = task.completed,
             .created_at = task.created_at,
             .due_date = task.due_date,
+            .priority = task.priority,
         });
     }
 
@@ -81,10 +82,16 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         }
     }
 
+    const priority = request.priority orelse "normal";
+    if (!validation.validateTaskPriority(priority)) {
+        try http.jsonError(r, 400, "Invalid priority");
+        return;
+    }
+
     const db_result = if (request.due_date) |dd|
-        try db.createTaskWithDueDate(req_alloc, user_id, request.title, dd)
+        try db.createTaskWithDueDate(req_alloc, user_id, request.title, dd, priority)
     else
-        try db.createTask(req_alloc, user_id, request.title);
+        try db.createTask(req_alloc, user_id, request.title, priority);
     defer req_alloc.free(db_result);
 
     const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Task), req_alloc, db_result, .{ .ignore_unknown_fields = true });
@@ -102,6 +109,7 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         .completed = task.completed,
         .created_at = task.created_at,
         .due_date = task.due_date,
+        .priority = task.priority,
     };
 
     try http.jsonCreated(r, response);
@@ -147,6 +155,7 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         .completed = task.completed,
         .created_at = task.created_at,
         .due_date = task.due_date,
+        .priority = task.priority,
     };
 
     try http.jsonSuccess(r, response);

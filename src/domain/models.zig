@@ -1,5 +1,3 @@
-
-
 const std = @import("std");
 
 // ==========================================
@@ -26,6 +24,7 @@ pub const Task = struct {
     completed: bool = false,
     created_at: []const u8, // SurrealDB returns datetime as string in JSON
     due_date: ?[]const u8 = null,
+    priority: []const u8 = "normal",
 };
 
 pub const Session = struct {
@@ -77,6 +76,7 @@ pub const ChangePasswordRequest = struct {
 pub const CreateTaskRequest = struct {
     title: []const u8,
     due_date: ?[]const u8 = null,
+    priority: ?[]const u8 = null,
 };
 
 pub const TaskResponse = struct {
@@ -85,13 +85,14 @@ pub const TaskResponse = struct {
     completed: bool,
     created_at: []const u8,
     due_date: ?[]const u8 = null,
+    priority: []const u8 = "normal",
 };
 
 // --- Common ---
 
 pub const ErrorResponse = struct {
     error_message: []const u8,
-    
+
     // Custom JSON serialization to map "error_message" to "error" key
     // or we just use "error" as field name, but "error" is a keyword in Zig.
     // We can use @"" syntax or just use a different name and rely on custom stringify if needed.
