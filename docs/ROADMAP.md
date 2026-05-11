@@ -13,13 +13,16 @@ work visible for interviews and portfolio review.
 
 ## 2. Security Posture
 
+- Extend workspace RBAC with invite acceptance, role changes, and member removal.
 - Add lockout/backoff visibility for auth endpoints.
 - Add audit events for password resets and login failures.
 - Keep deployment hardening documented and reproducible.
 
 ## 3. Product Features
 
+- Add workspace selector and member management UI.
 - Add labels for task grouping.
+- Add Kanban status columns.
 - Add recurring tasks with a conservative recurrence model.
 - Add JSON/CSV export.
 

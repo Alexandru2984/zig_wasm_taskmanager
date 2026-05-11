@@ -37,12 +37,51 @@ pub fn queryWithVars(allocator: std.mem.Allocator, sql: []const u8, vars: anytyp
     return http_client.executeQueryWithVars(allocator, sql, vars);
 }
 
+const MigrationRow = struct {
+    version: []const u8,
+};
+
+fn migrationApplied(allocator: std.mem.Allocator, version: []const u8) !bool {
+    const result = try queryWithVars(allocator,
+        \\SELECT version FROM schema_migrations WHERE version = $version;
+    , .{ .version = version });
+    defer allocator.free(result);
+
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(MigrationRow), allocator, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    return parsed.value.len > 0 and parsed.value[0].result.len > 0;
+}
+
+fn recordMigration(allocator: std.mem.Allocator, version: []const u8) !void {
+    const result = try queryWithVars(allocator,
+        \\CREATE schema_migrations SET version = $version, applied_at = time::now();
+    , .{ .version = version });
+    allocator.free(result);
+}
+
+fn runMigration(allocator: std.mem.Allocator, version: []const u8, sql: []const u8) !void {
+    if (try migrationApplied(allocator, version)) return;
+    const result = try query(allocator, sql);
+    defer allocator.free(result);
+    try recordMigration(allocator, version);
+}
+
 // Initialize database schema
 pub fn initSchema(allocator: std.mem.Allocator) !void {
     std.debug.print("🗄️ Initializing SurrealDB schema...\n", .{});
 
+    const migrations_schema =
+        \\DEFINE TABLE schema_migrations SCHEMAFULL;
+        \\DEFINE FIELD version ON schema_migrations TYPE string;
+        \\DEFINE FIELD applied_at ON schema_migrations TYPE datetime DEFAULT time::now();
+        \\DEFINE INDEX schema_migrations_version_idx ON schema_migrations COLUMNS version UNIQUE;
+    ;
+    const migrations_result = try query(allocator, migrations_schema);
+    defer allocator.free(migrations_result);
+
     // Define users table
-    const users_schema =
+    try runMigration(allocator, "001_core_schema",
         \\DEFINE TABLE users SCHEMAFULL;
         \\DEFINE FIELD email ON users TYPE string;
         \\DEFINE FIELD password_hash ON users TYPE string;
@@ -55,13 +94,10 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD reset_token ON users TYPE option<string>;
         \\DEFINE FIELD reset_expires ON users TYPE option<int>;
         \\DEFINE INDEX email_idx ON users COLUMNS email UNIQUE;
-    ;
-
-    const users_result = try query(allocator, users_schema);
-    defer allocator.free(users_result);
+    );
 
     // Define tasks table
-    const tasks_schema =
+    try runMigration(allocator, "002_tasks_schema",
         \\DEFINE TABLE tasks SCHEMAFULL;
         \\DEFINE FIELD user_id ON tasks TYPE record<users>;
         \\DEFINE FIELD title ON tasks TYPE string;
@@ -71,35 +107,40 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD priority ON tasks TYPE string DEFAULT "normal";
         \\DEFINE FIELD reminder_sent ON tasks TYPE bool DEFAULT false;
         \\DEFINE FIELD reminder_sent_at ON tasks TYPE option<datetime>;
-    ;
-
-    const tasks_result = try query(allocator, tasks_schema);
-    defer allocator.free(tasks_result);
+    );
 
     // Define sessions table for secure token storage
-    const sessions_schema =
+    try runMigration(allocator, "003_sessions_schema",
         \\DEFINE TABLE sessions SCHEMAFULL;
         \\DEFINE FIELD token ON sessions TYPE string;
         \\DEFINE FIELD user_id ON sessions TYPE record<users>;
         \\DEFINE FIELD created_at ON sessions TYPE datetime DEFAULT time::now();
         \\DEFINE FIELD expires_at ON sessions TYPE datetime;
         \\DEFINE INDEX session_token_idx ON sessions COLUMNS token UNIQUE;
-    ;
+    );
 
-    const sessions_result = try query(allocator, sessions_schema);
-    defer allocator.free(sessions_result);
-
-    const activity_schema =
+    try runMigration(allocator, "004_activity_schema",
         \\DEFINE TABLE activity_events SCHEMAFULL;
         \\DEFINE FIELD user_id ON activity_events TYPE record<users>;
         \\DEFINE FIELD action ON activity_events TYPE string;
         \\DEFINE FIELD entity_type ON activity_events TYPE string;
         \\DEFINE FIELD entity_id ON activity_events TYPE string DEFAULT "";
         \\DEFINE FIELD created_at ON activity_events TYPE datetime DEFAULT time::now();
-    ;
+    );
 
-    const activity_result = try query(allocator, activity_schema);
-    defer allocator.free(activity_result);
+    try runMigration(allocator, "005_workspaces_schema",
+        \\DEFINE TABLE workspaces SCHEMAFULL;
+        \\DEFINE FIELD name ON workspaces TYPE string;
+        \\DEFINE FIELD owner_id ON workspaces TYPE record<users>;
+        \\DEFINE FIELD created_at ON workspaces TYPE datetime DEFAULT time::now();
+        \\DEFINE TABLE workspace_members SCHEMAFULL;
+        \\DEFINE FIELD workspace_id ON workspace_members TYPE record<workspaces>;
+        \\DEFINE FIELD user_id ON workspace_members TYPE record<users>;
+        \\DEFINE FIELD role ON workspace_members TYPE string ASSERT $value INSIDE ["owner", "admin", "member", "viewer"];
+        \\DEFINE FIELD created_at ON workspace_members TYPE datetime DEFAULT time::now();
+        \\DEFINE INDEX workspace_members_unique_idx ON workspace_members COLUMNS workspace_id, user_id UNIQUE;
+        \\DEFINE FIELD workspace_id ON tasks TYPE option<record<workspaces>>;
+    );
 
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
 }
@@ -228,15 +269,125 @@ pub fn bumpVerificationAttempts(
     return @intCast(@max(attempts, 0));
 }
 
-// ============== TASK OPERATIONS ==============
+// ============== WORKSPACE OPERATIONS ==============
 
-pub fn createTask(allocator: std.mem.Allocator, user_id: []const u8, title: []const u8, priority: []const u8) ![]u8 {
-    return queryWithVars(allocator,
-        \\CREATE tasks SET user_id = $user_id, title = $title, priority = $priority, completed = false, reminder_sent = false, created_at = time::now();
-    , .{ .user_id = user_id, .title = title, .priority = priority });
+const WorkspaceListRow = struct {
+    id: []const u8,
+    name: []const u8,
+    role: []const u8,
+    created_at: []const u8,
+};
+
+pub fn ensurePersonalWorkspace(allocator: std.mem.Allocator, user_id: []const u8, user_name: []const u8) ![]const u8 {
+    const existing = try queryWithVars(allocator,
+        \\SELECT workspace_id FROM workspace_members WHERE user_id = $user_id LIMIT 1;
+    , .{ .user_id = user_id });
+    defer allocator.free(existing);
+
+    const ExistingRow = struct { workspace_id: []const u8 };
+    const parsed_existing = try std.json.parseFromSlice([]models.SurrealResponse(ExistingRow), allocator, existing, .{ .ignore_unknown_fields = true });
+    defer parsed_existing.deinit();
+
+    if (parsed_existing.value.len > 0 and parsed_existing.value[0].result.len > 0) {
+        return try allocator.dupe(u8, parsed_existing.value[0].result[0].workspace_id);
+    }
+
+    const workspace_name = if (user_name.len > 0)
+        try std.fmt.allocPrint(allocator, "{s}'s Workspace", .{user_name})
+    else
+        try allocator.dupe(u8, "Personal Workspace");
+    defer allocator.free(workspace_name);
+
+    const created = try createWorkspace(allocator, user_id, workspace_name);
+    defer allocator.free(created);
+
+    const parsed_created = try std.json.parseFromSlice([]models.SurrealResponse(models.Workspace), allocator, created, .{ .ignore_unknown_fields = true });
+    defer parsed_created.deinit();
+
+    if (parsed_created.value.len == 0 or parsed_created.value[0].result.len == 0) return error.WorkspaceCreateFailed;
+    const workspace_id = parsed_created.value[0].result[0].id;
+
+    const update_tasks = try queryWithVars(allocator,
+        \\UPDATE tasks SET workspace_id = $workspace_id WHERE user_id = $user_id AND workspace_id = NONE;
+    , .{ .workspace_id = workspace_id, .user_id = user_id });
+    allocator.free(update_tasks);
+
+    return try allocator.dupe(u8, workspace_id);
 }
 
-pub fn createTaskWithDueDate(allocator: std.mem.Allocator, user_id: []const u8, title: []const u8, due_date: []const u8, priority: []const u8) ![]u8 {
+pub fn createWorkspace(allocator: std.mem.Allocator, owner_id: []const u8, name: []const u8) ![]u8 {
+    const workspace_result = try queryWithVars(allocator,
+        \\CREATE workspaces SET name = $name, owner_id = $owner_id, created_at = time::now();
+    , .{ .name = name, .owner_id = owner_id });
+    errdefer allocator.free(workspace_result);
+
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Workspace), allocator, workspace_result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    if (parsed.value.len == 0 or parsed.value[0].result.len == 0) return error.WorkspaceCreateFailed;
+    const workspace = parsed.value[0].result[0];
+
+    const member_result = try queryWithVars(allocator,
+        \\CREATE workspace_members SET workspace_id = $workspace_id, user_id = $owner_id, role = "owner", created_at = time::now();
+    , .{ .workspace_id = workspace.id, .owner_id = owner_id });
+    allocator.free(member_result);
+
+    return workspace_result;
+}
+
+pub fn listWorkspacesForUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\SELECT workspace_id.id AS id, workspace_id.name AS name, role, workspace_id.created_at AS created_at FROM workspace_members WHERE user_id = $user_id;
+    , .{ .user_id = user_id });
+}
+
+pub fn getWorkspaceRole(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8) !?[]const u8 {
+    const result = try queryWithVars(allocator,
+        \\SELECT role FROM workspace_members WHERE user_id = $user_id AND workspace_id = $workspace_id LIMIT 1;
+    , .{ .user_id = user_id, .workspace_id = workspace_id });
+    defer allocator.free(result);
+
+    const RoleRow = struct { role: []const u8 };
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(RoleRow), allocator, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    if (parsed.value.len == 0 or parsed.value[0].result.len == 0) return null;
+    return try allocator.dupe(u8, parsed.value[0].result[0].role);
+}
+
+fn roleCanWrite(role: []const u8) bool {
+    return std.mem.eql(u8, role, "owner") or
+        std.mem.eql(u8, role, "admin") or
+        std.mem.eql(u8, role, "member");
+}
+
+pub fn canReadWorkspace(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8) !bool {
+    const role = try getWorkspaceRole(allocator, user_id, workspace_id);
+    if (role) |r| {
+        allocator.free(r);
+        return true;
+    }
+    return false;
+}
+
+pub fn canWriteWorkspace(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8) !bool {
+    const role = try getWorkspaceRole(allocator, user_id, workspace_id);
+    if (role) |r| {
+        defer allocator.free(r);
+        return roleCanWrite(r);
+    }
+    return false;
+}
+
+// ============== TASK OPERATIONS ==============
+
+pub fn createTask(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8, title: []const u8, priority: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\CREATE tasks SET user_id = $user_id, workspace_id = $workspace_id, title = $title, priority = $priority, completed = false, reminder_sent = false, created_at = time::now();
+    , .{ .user_id = user_id, .workspace_id = workspace_id, .title = title, .priority = priority });
+}
+
+pub fn createTaskWithDueDate(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8, title: []const u8, due_date: []const u8, priority: []const u8) ![]u8 {
     // Ensure due_date has proper format (add :00Z if needed for SurrealDB)
     // HTML datetime-local gives "2025-12-25T12:00" but SurrealDB needs "2025-12-25T12:00:00Z"
     var formatted_date: []const u8 = due_date;
@@ -254,13 +405,13 @@ pub fn createTaskWithDueDate(allocator: std.mem.Allocator, user_id: []const u8, 
     defer if (needs_free) allocator.free(formatted_date);
 
     return queryWithVars(allocator,
-        \\CREATE tasks SET user_id = $user_id, title = $title, priority = $priority, completed = false, reminder_sent = false, created_at = time::now(), due_date = <datetime>$due_date;
-    , .{ .user_id = user_id, .title = title, .priority = priority, .due_date = formatted_date });
+        \\CREATE tasks SET user_id = $user_id, workspace_id = $workspace_id, title = $title, priority = $priority, completed = false, reminder_sent = false, created_at = time::now(), due_date = <datetime>$due_date;
+    , .{ .user_id = user_id, .workspace_id = workspace_id, .title = title, .priority = priority, .due_date = formatted_date });
 }
 
 pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
-        \\SELECT * FROM tasks WHERE user_id = $user_id;
+        \\SELECT * FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE);
     , .{ .user_id = user_id });
 }
 
@@ -314,12 +465,13 @@ pub fn getActivityByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u
 
 pub fn getTaskOwner(allocator: std.mem.Allocator, task_id: []const u8) !?[]const u8 {
     const result = try queryWithVars(allocator,
-        \\SELECT user_id FROM $record_id;
+        \\SELECT user_id, workspace_id FROM $record_id;
     , .{ .record_id = task_id });
     defer allocator.free(result);
 
     const TaskOwner = struct {
         user_id: []const u8,
+        workspace_id: ?[]const u8 = null,
     };
 
     const parsed = try std.json.parseFromSlice([]models.SurrealResponse(TaskOwner), allocator, result, .{ .ignore_unknown_fields = true });
@@ -332,13 +484,32 @@ pub fn getTaskOwner(allocator: std.mem.Allocator, task_id: []const u8) !?[]const
     return try allocator.dupe(u8, parsed.value[0].result[0].user_id);
 }
 
-pub fn verifyTaskOwnership(allocator: std.mem.Allocator, task_id: []const u8, user_id: []const u8) !bool {
-    const owner = try getTaskOwner(allocator, task_id);
-    if (owner) |task_owner| {
-        defer allocator.free(task_owner);
-        return std.mem.eql(u8, task_owner, user_id);
+pub fn canWriteTask(allocator: std.mem.Allocator, task_id: []const u8, user_id: []const u8) !bool {
+    const result = try queryWithVars(allocator,
+        \\SELECT user_id, workspace_id FROM $record_id;
+    , .{ .record_id = task_id });
+    defer allocator.free(result);
+
+    const TaskAccess = struct {
+        user_id: []const u8,
+        workspace_id: ?[]const u8 = null,
+    };
+
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(TaskAccess), allocator, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    if (parsed.value.len == 0 or parsed.value[0].result.len == 0) return false;
+    const task = parsed.value[0].result[0];
+
+    if (task.workspace_id) |workspace_id| {
+        return try canWriteWorkspace(allocator, user_id, workspace_id);
     }
-    return false; // Task doesn't exist or has no owner
+
+    return std.mem.eql(u8, task.user_id, user_id);
+}
+
+pub fn verifyTaskOwnership(allocator: std.mem.Allocator, task_id: []const u8, user_id: []const u8) !bool {
+    return canWriteTask(allocator, task_id, user_id);
 }
 
 // ============== SESSION MANAGEMENT ==============

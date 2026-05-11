@@ -13,6 +13,7 @@ const tasks_handler = @import("handlers/tasks.zig");
 const profile_handler = @import("handlers/profile.zig");
 const system_handler = @import("handlers/system.zig");
 const activity_handler = @import("handlers/activity.zig");
+const workspaces_handler = @import("handlers/workspaces.zig");
 const reminders = @import("services/reminders.zig");
 
 // Global allocator (will use GPA from app module)
@@ -222,6 +223,19 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
             return;
         }
         try activity_handler.getActivity(r, req_alloc);
+        return;
+    }
+
+    if (std.mem.eql(u8, path, "/api/workspaces")) {
+        if (std.mem.eql(u8, req_method, "GET")) {
+            try workspaces_handler.listWorkspaces(r, req_alloc);
+        } else if (std.mem.eql(u8, req_method, "POST")) {
+            try workspaces_handler.createWorkspace(r, req_alloc);
+        } else {
+            r.setHeader("Allow", "GET, POST") catch {};
+            r.setStatus(.method_not_allowed);
+            try r.sendBody("{\"error\": \"Method not allowed\"}");
+        }
         return;
     }
 

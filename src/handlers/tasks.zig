@@ -47,6 +47,7 @@ pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     for (parsed.value[0].result) |task| {
         try tasks.append(req_alloc, .{
             .id = task.id,
+            .workspace_id = task.workspace_id,
             .title = task.title,
             .completed = task.completed,
             .created_at = task.created_at,
@@ -89,10 +90,25 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     }
 
-    const db_result = if (request.due_date) |dd|
-        try db.createTaskWithDueDate(req_alloc, user_id, request.title, dd, priority)
+    const workspace_id = if (request.workspace_id) |workspace|
+        workspace
     else
-        try db.createTask(req_alloc, user_id, request.title, priority);
+        db.ensurePersonalWorkspace(req_alloc, user_id, "User") catch {
+            try http.jsonError(r, 500, "Failed to initialize workspace");
+            return;
+        };
+    const workspace_id_allocated = request.workspace_id == null;
+    defer if (workspace_id_allocated) req_alloc.free(workspace_id);
+
+    if (!try db.canWriteWorkspace(req_alloc, user_id, workspace_id)) {
+        try http.jsonError(r, 403, "Forbidden: workspace is read-only or unavailable");
+        return;
+    }
+
+    const db_result = if (request.due_date) |dd|
+        try db.createTaskWithDueDate(req_alloc, user_id, workspace_id, request.title, dd, priority)
+    else
+        try db.createTask(req_alloc, user_id, workspace_id, request.title, priority);
     defer req_alloc.free(db_result);
 
     const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Task), req_alloc, db_result, .{ .ignore_unknown_fields = true });
@@ -109,6 +125,7 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 
     const response = models.TaskResponse{
         .id = task.id,
+        .workspace_id = task.workspace_id,
         .title = task.title,
         .completed = task.completed,
         .created_at = task.created_at,
@@ -159,6 +176,7 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
 
     const response = models.TaskResponse{
         .id = task.id,
+        .workspace_id = task.workspace_id,
         .title = task.title,
         .completed = task.completed,
         .created_at = task.created_at,

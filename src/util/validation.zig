@@ -88,6 +88,17 @@ pub fn validateTaskTitle(title: []const u8) bool {
     return true;
 }
 
+pub fn validateWorkspaceName(name: []const u8) bool {
+    if (name.len < 1 or name.len > 120) return false;
+    for (name) |c| {
+        switch (c) {
+            '<', '>', '"', '\'', '\\', ';' => return false,
+            else => {},
+        }
+    }
+    return true;
+}
+
 pub fn validateTaskPriority(priority: []const u8) bool {
     return std.mem.eql(u8, priority, "low") or
         std.mem.eql(u8, priority, "normal") or

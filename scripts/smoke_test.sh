@@ -155,6 +155,16 @@ test_endpoint "Logout (1)" "POST" "/api/auth/logout" "" "logged out" || true
 test_endpoint "Login" "POST" "/api/auth/login" \
     "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" "$EMAIL" || true
 
+echo ""
+echo "=== Workspace Operations ==="
+test_endpoint "List Workspaces" "GET" "/api/workspaces" "" "Workspace" || true
+test_endpoint "Create Workspace" "POST" "/api/workspaces" \
+    "{\"name\":\"Smoke Workspace\"}" "Smoke Workspace" || true
+WORKSPACE_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
+if [ -n "$WORKSPACE_ID" ]; then
+    echo "Created Workspace ID: $WORKSPACE_ID"
+fi
+
 # 5. Tasks
 echo ""
 echo "=== Task Operations ==="
@@ -172,8 +182,11 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-test_endpoint "Create Task" "POST" "/api/tasks" \
-    "{\"title\":\"Smoke Test Task\",\"priority\":\"high\"}" "Smoke Test Task" || true
+TASK_PAYLOAD="{\"title\":\"Smoke Test Task\",\"priority\":\"high\"}"
+if [ -n "${WORKSPACE_ID:-}" ]; then
+    TASK_PAYLOAD="{\"title\":\"Smoke Test Task\",\"priority\":\"high\",\"workspace_id\":\"$WORKSPACE_ID\"}"
+fi
+test_endpoint "Create Task" "POST" "/api/tasks" "$TASK_PAYLOAD" "Smoke Test Task" || true
 TASK_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
 
 if [ -n "$TASK_ID" ]; then

@@ -20,6 +20,7 @@ pub const User = struct {
 pub const Task = struct {
     id: []const u8,
     user_id: []const u8,
+    workspace_id: ?[]const u8 = null,
     title: []const u8,
     completed: bool = false,
     created_at: []const u8, // SurrealDB returns datetime as string in JSON
@@ -76,18 +77,46 @@ pub const ChangePasswordRequest = struct {
 
 pub const CreateTaskRequest = struct {
     title: []const u8,
+    workspace_id: ?[]const u8 = null,
     due_date: ?[]const u8 = null,
     priority: ?[]const u8 = null,
 };
 
 pub const TaskResponse = struct {
     id: []const u8,
+    workspace_id: ?[]const u8 = null,
     title: []const u8,
     completed: bool,
     created_at: []const u8,
     due_date: ?[]const u8 = null,
     priority: []const u8 = "normal",
     reminder_sent: bool = false,
+};
+
+pub const Workspace = struct {
+    id: []const u8,
+    name: []const u8,
+    owner_id: []const u8,
+    created_at: []const u8,
+};
+
+pub const WorkspaceMembership = struct {
+    id: []const u8,
+    workspace_id: []const u8,
+    user_id: []const u8,
+    role: []const u8,
+    created_at: []const u8,
+};
+
+pub const WorkspaceResponse = struct {
+    id: []const u8,
+    name: []const u8,
+    role: []const u8,
+    created_at: []const u8,
+};
+
+pub const CreateWorkspaceRequest = struct {
+    name: []const u8,
 };
 
 pub const ActivityEvent = struct {

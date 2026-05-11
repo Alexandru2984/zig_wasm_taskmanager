@@ -79,6 +79,15 @@ pub const markTaskReminderSent = impl.markTaskReminderSent;
 pub const logActivity = impl.logActivity;
 pub const getActivityByUser = impl.getActivityByUser;
 
+// Workspace operations
+pub const ensurePersonalWorkspace = impl.ensurePersonalWorkspace;
+pub const createWorkspace = impl.createWorkspace;
+pub const listWorkspacesForUser = impl.listWorkspacesForUser;
+pub const getWorkspaceRole = impl.getWorkspaceRole;
+pub const canReadWorkspace = impl.canReadWorkspace;
+pub const canWriteWorkspace = impl.canWriteWorkspace;
+pub const canWriteTask = impl.canWriteTask;
+
 // Session operations
 pub const generateSecureToken = impl.generateSecureToken;
 pub const createSession = impl.createSession;

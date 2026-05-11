@@ -116,6 +116,11 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 500, "Failed to create session");
         return;
     };
+    const workspace_id = db.ensurePersonalWorkspace(req_alloc, user.id, user.name) catch {
+        try http.jsonError(r, 500, "Failed to create default workspace");
+        return;
+    };
+    defer req_alloc.free(workspace_id);
 
     // SECURITY: session is carried ONLY via the HttpOnly cookie — the token is
     // NOT echoed in the response body, so an XSS that reads fetch responses
@@ -184,6 +189,11 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 500, "Failed to create session");
         return;
     };
+    const workspace_id = db.ensurePersonalWorkspace(req_alloc, user.id, user.name) catch {
+        try http.jsonError(r, 500, "Failed to initialize workspace");
+        return;
+    };
+    defer req_alloc.free(workspace_id);
 
     // SECURITY: session lives in the HttpOnly cookie only (see signup note).
     http.setAuthCookie(r, token);

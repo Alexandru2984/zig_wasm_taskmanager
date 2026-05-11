@@ -197,6 +197,33 @@ paths:
           description: Password changed
         "403":
           description: Current password is invalid
+  /api/workspaces:
+    get:
+      summary: List workspaces for the current user
+      responses:
+        "200":
+          description: Workspace list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Workspace"
+        "401":
+          description: Not authenticated
+    post:
+      summary: Create a workspace owned by the current user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWorkspaceRequest"
+      responses:
+        "201":
+          description: Created workspace
+        "401":
+          description: Not authenticated
   /api/tasks:
     get:
       summary: List tasks for the current user
@@ -291,6 +318,9 @@ components:
           type: string
           minLength: 1
           maxLength: 500
+        workspace_id:
+          type: string
+          nullable: true
         due_date:
           type: string
           nullable: true
@@ -314,6 +344,7 @@ components:
             - resend_verification
             - update_profile
             - change_password
+            - create_workspace
             - create_task
             - toggle_task
             - delete_task
@@ -328,6 +359,9 @@ components:
       properties:
         id:
           type: string
+        workspace_id:
+          type: string
+          nullable: true
         title:
           type: string
         completed:
@@ -340,3 +374,25 @@ components:
         priority:
           type: string
           enum: [low, normal, high]
+        reminder_sent:
+          type: boolean
+    CreateWorkspaceRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+    Workspace:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+          enum: [owner, admin, member, viewer]
+        created_at:
+          type: string

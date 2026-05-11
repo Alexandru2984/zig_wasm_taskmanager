@@ -27,14 +27,14 @@ SurrealDB HTTP API on localhost
 
 - `src/main.zig` owns routing, CORS, security headers, static serving, and API
   dispatch.
-- `src/handlers/*` contains endpoint behavior for auth, profile, tasks, and
-  system checks.
+- `src/handlers/*` contains endpoint behavior for auth, profile, workspaces,
+  tasks, activity, and system checks.
 - `src/services/auth.zig` handles password hashing, verification, reset tokens,
   and verification codes.
 - `src/services/email.zig` builds MIME messages and sends them through SMTP.
 - `src/services/reminders.zig` runs the optional due-task reminder worker.
-- `src/db/surreal.zig` exposes repository-style functions for users, tasks, and
-  sessions.
+- `src/db/surreal.zig` exposes repository-style functions for users,
+  workspaces, memberships, tasks, sessions, and migrations.
 - `src/db/http_client.zig` performs SurrealDB HTTP requests and binds variables
   into SurrealQL safely.
 
@@ -52,14 +52,19 @@ Core tables:
 
 - `users`: email, Argon2id password hash, profile name, verification/reset
   fields.
+- `schema_migrations`: applied database migration versions.
 - `sessions`: opaque session token, `users` record reference, expiry timestamp.
-- `tasks`: `users` record reference, title, priority, completion state,
-  creation time, optional due date, reminder marker.
+- `workspaces`: workspace name, owner, creation timestamp.
+- `workspace_members`: workspace membership and role
+  (`owner`/`admin`/`member`/`viewer`).
+- `tasks`: `users` creator reference, workspace reference, title, priority,
+  completion state, creation time, optional due date, reminder marker.
 - `activity_events`: account and task audit history for the current user.
 
 Planned task extensions:
 
 - labels
+- invites and member management
 - recurrence rule
 
 ## Operational Model
@@ -76,4 +81,5 @@ The service exposes:
 - `/api/health`: process liveness
 - `/api/ready`: database/config readiness
 - `/api/metrics`: protected metrics, enabled only with `METRICS_TOKEN`
+- `/api/workspaces`: authenticated workspace listing and creation
 - `/api/activity`: authenticated user activity history
