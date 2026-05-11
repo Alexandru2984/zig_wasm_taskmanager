@@ -60,10 +60,15 @@ SURREAL_DB = main
 SURREAL_USER = YOUR_DB_USER
 SURREAL_PASS = YOUR_DB_PASS
 
-# Email (Brevo)
-BREVO_API_KEY = your-brevo-api-key
-SENDER_EMAIL = noreply@yourdomain.com
-SENDER_NAME = Task Manager
+# Email (SMTP)
+SMTP_HOST = smtp.yourdomain.com
+SMTP_PORT = 587
+SMTP_USER = noreply@yourdomain.com
+SMTP_PASS = replace-with-a-real-smtp-password
+SMTP_FROM = noreply@yourdomain.com
+SMTP_FROM_NAME = Task Manager
+FROM_EMAIL = noreply@yourdomain.com
+FROM_NAME = Task Manager
 
 # App
 APP_URL = https://yourdomain.com
