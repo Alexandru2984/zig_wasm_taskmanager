@@ -108,6 +108,18 @@ pub const WorkspaceMembership = struct {
     created_at: []const u8,
 };
 
+pub const WorkspaceInvite = struct {
+    id: []const u8,
+    workspace_id: []const u8,
+    email: []const u8,
+    role: []const u8,
+    token: []const u8,
+    invited_by: []const u8,
+    expires_at: i64,
+    accepted_at: ?i64 = null,
+    created_at: []const u8,
+};
+
 pub const WorkspaceResponse = struct {
     id: []const u8,
     name: []const u8,
@@ -117,6 +129,34 @@ pub const WorkspaceResponse = struct {
 
 pub const CreateWorkspaceRequest = struct {
     name: []const u8,
+};
+
+pub const WorkspaceMemberResponse = struct {
+    id: []const u8,
+    user_id: []const u8,
+    email: []const u8,
+    name: []const u8,
+    role: []const u8,
+    created_at: []const u8,
+};
+
+pub const CreateWorkspaceInviteRequest = struct {
+    email: []const u8,
+    role: []const u8,
+};
+
+pub const AcceptWorkspaceInviteRequest = struct {
+    token: []const u8,
+};
+
+pub const WorkspaceInviteResponse = struct {
+    id: []const u8,
+    workspace_id: []const u8,
+    email: []const u8,
+    role: []const u8,
+    expires_at: i64,
+    accepted_at: ?i64 = null,
+    created_at: []const u8,
 };
 
 pub const ActivityEvent = struct {

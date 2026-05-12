@@ -14,7 +14,8 @@ systemd-sandboxed VPS deployment.
   workspaces, memberships, and tasks.
 - Argon2id password hashing and server-side sessions carried by HttpOnly
   cookies.
-- Multi-workspace task tenancy with owner/admin/member/viewer role foundations.
+- Multi-workspace task tenancy with owner/admin/member/viewer roles, member
+  listing, and email invite acceptance.
 - Email verification and password reset through SMTP.
 - Optional email reminders for overdue incomplete tasks.
 - Activity log API for account and task actions.
@@ -110,7 +111,7 @@ Main endpoint groups:
 
 - `/api/auth/*`: signup, login, logout, verification, password reset
 - `/api/profile*`: profile and password changes
-- `/api/workspaces`: workspace listing and creation
+- `/api/workspaces`: workspace listing, creation, members, and invites
 - `/api/tasks*`: task CRUD with priority and due-date metadata
 - `/api/activity`: authenticated activity log
 - `/api/health`, `/api/ready`, `/api/metrics`: operational endpoints
@@ -157,7 +158,7 @@ engineering work visible:
 
 - isolated integration test database
 - secret scanning
-- workspace invites and member management UI
+- workspace member management UI
 - task labels
 - recurring tasks
 - activity export

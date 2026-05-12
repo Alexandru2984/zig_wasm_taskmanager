@@ -224,6 +224,54 @@ paths:
           description: Created workspace
         "401":
           description: Not authenticated
+  /api/workspaces/invites/accept:
+    post:
+      summary: Accept a workspace invite for the authenticated user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptWorkspaceInviteRequest"
+      responses:
+        "200":
+          description: Invite accepted
+        "400":
+          description: Expired, already accepted, or already a member
+        "403":
+          description: Invite belongs to a different email
+  /api/workspaces/{id}/members:
+    get:
+      summary: List workspace members
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: Workspace members
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkspaceMember"
+        "403":
+          description: Requires owner or admin role
+  /api/workspaces/{id}/invites:
+    post:
+      summary: Invite a user to a workspace
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWorkspaceInviteRequest"
+      responses:
+        "201":
+          description: Invite created
+        "403":
+          description: Requires owner or admin role
   /api/tasks:
     get:
       summary: List tasks for the current user
@@ -288,6 +336,12 @@ components:
       required: true
       schema:
         type: string
+    WorkspaceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
   schemas:
     SignupRequest:
       type: object
@@ -345,6 +399,8 @@ components:
             - update_profile
             - change_password
             - create_workspace
+            - invite_workspace_member
+            - accept_workspace_invite
             - create_task
             - toggle_task
             - delete_task
@@ -394,5 +450,58 @@ components:
         role:
           type: string
           enum: [owner, admin, member, viewer]
+        created_at:
+          type: string
+    WorkspaceMember:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        role:
+          type: string
+          enum: [owner, admin, member, viewer]
+        created_at:
+          type: string
+    CreateWorkspaceInviteRequest:
+      type: object
+      required: [email, role]
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [admin, member, viewer]
+    AcceptWorkspaceInviteRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+    WorkspaceInvite:
+      type: object
+      properties:
+        id:
+          type: string
+        workspace_id:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [admin, member, viewer]
+        expires_at:
+          type: integer
+        accepted_at:
+          type: integer
+          nullable: true
         created_at:
           type: string

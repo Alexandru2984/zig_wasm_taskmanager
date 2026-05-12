@@ -374,6 +374,41 @@ pub fn sendTaskReminderEmail(
     try sendEmail(allocator, to_email, to_name, subject, body);
 }
 
+pub fn sendWorkspaceInviteEmail(
+    allocator: std.mem.Allocator,
+    to_email: []const u8,
+    workspace_name: []const u8,
+    token: []const u8,
+) !void {
+    const base_url = config.get("APP_BASE_URL") orelse {
+        std.debug.print("APP_BASE_URL not set; refusing to send workspace invite with broken link\n", .{});
+        return error.MissingAppBaseUrl;
+    };
+    const trimmed = std.mem.trimRight(u8, base_url, "/");
+    const invite_link = try std.fmt.allocPrint(allocator, "{s}/?invite_token={s}", .{ trimmed, token });
+    defer allocator.free(invite_link);
+
+    const subject = "Workspace invitation - Task Manager";
+    const body = try std.fmt.allocPrint(allocator,
+        \\Hello,
+        \\
+        \\You have been invited to join the "{s}" workspace in Task Manager.
+        \\
+        \\Open this link while logged into the invited email address:
+        \\{s}
+        \\
+        \\This invitation expires in 7 days.
+        \\
+        \\If you did not expect this invitation, you can ignore this email.
+        \\
+        \\Best regards,
+        \\Task Manager
+    , .{ workspace_name, invite_link });
+    defer allocator.free(body);
+
+    try sendEmail(allocator, to_email, "", subject, body);
+}
+
 fn sendEmail(allocator: std.mem.Allocator, to_email: []const u8, to_name: []const u8, subject: []const u8, text_content: []const u8) !void {
     const email_cfg = try getEmailConfig();
 

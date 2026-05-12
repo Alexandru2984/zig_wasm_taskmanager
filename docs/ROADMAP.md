@@ -13,7 +13,7 @@ work visible for interviews and portfolio review.
 
 ## 2. Security Posture
 
-- Extend workspace RBAC with invite acceptance, role changes, and member removal.
+- Extend workspace RBAC with role changes and member removal.
 - Add lockout/backoff visibility for auth endpoints.
 - Add audit events for password resets and login failures.
 - Keep deployment hardening documented and reproducible.

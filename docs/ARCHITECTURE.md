@@ -57,6 +57,8 @@ Core tables:
 - `workspaces`: workspace name, owner, creation timestamp.
 - `workspace_members`: workspace membership and role
   (`owner`/`admin`/`member`/`viewer`).
+- `workspace_invites`: invite token, target email, role, inviter, expiration,
+  and acceptance marker.
 - `tasks`: `users` creator reference, workspace reference, title, priority,
   completion state, creation time, optional due date, reminder marker.
 - `activity_events`: account and task audit history for the current user.
@@ -64,7 +66,7 @@ Core tables:
 Planned task extensions:
 
 - labels
-- invites and member management
+- role changes and member removal
 - recurrence rule
 
 ## Operational Model
@@ -81,5 +83,6 @@ The service exposes:
 - `/api/health`: process liveness
 - `/api/ready`: database/config readiness
 - `/api/metrics`: protected metrics, enabled only with `METRICS_TOKEN`
-- `/api/workspaces`: authenticated workspace listing and creation
+- `/api/workspaces`: authenticated workspace listing, creation, members, and
+  invite acceptance
 - `/api/activity`: authenticated user activity history

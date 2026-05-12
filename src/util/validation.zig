@@ -99,6 +99,12 @@ pub fn validateWorkspaceName(name: []const u8) bool {
     return true;
 }
 
+pub fn validateWorkspaceInviteRole(role: []const u8) bool {
+    return std.mem.eql(u8, role, "admin") or
+        std.mem.eql(u8, role, "member") or
+        std.mem.eql(u8, role, "viewer");
+}
+
 pub fn validateTaskPriority(priority: []const u8) bool {
     return std.mem.eql(u8, priority, "low") or
         std.mem.eql(u8, priority, "normal") or

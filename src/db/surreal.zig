@@ -142,6 +142,19 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD workspace_id ON tasks TYPE option<record<workspaces>>;
     );
 
+    try runMigration(allocator, "006_workspace_invites_schema",
+        \\DEFINE TABLE workspace_invites SCHEMAFULL;
+        \\DEFINE FIELD workspace_id ON workspace_invites TYPE record<workspaces>;
+        \\DEFINE FIELD email ON workspace_invites TYPE string;
+        \\DEFINE FIELD role ON workspace_invites TYPE string ASSERT $value INSIDE ["admin", "member", "viewer"];
+        \\DEFINE FIELD token ON workspace_invites TYPE string;
+        \\DEFINE FIELD invited_by ON workspace_invites TYPE record<users>;
+        \\DEFINE FIELD expires_at ON workspace_invites TYPE int;
+        \\DEFINE FIELD accepted_at ON workspace_invites TYPE option<int>;
+        \\DEFINE FIELD created_at ON workspace_invites TYPE datetime DEFAULT time::now();
+        \\DEFINE INDEX workspace_invites_token_idx ON workspace_invites COLUMNS token UNIQUE;
+    );
+
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
 }
 
@@ -335,6 +348,12 @@ pub fn createWorkspace(allocator: std.mem.Allocator, owner_id: []const u8, name:
     return workspace_result;
 }
 
+pub fn getWorkspaceById(allocator: std.mem.Allocator, workspace_id: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\SELECT * FROM $workspace_id;
+    , .{ .workspace_id = workspace_id });
+}
+
 pub fn listWorkspacesForUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\SELECT workspace_id.id AS id, workspace_id.name AS name, role, workspace_id.created_at AS created_at FROM workspace_members WHERE user_id = $user_id;
@@ -361,6 +380,10 @@ fn roleCanWrite(role: []const u8) bool {
         std.mem.eql(u8, role, "member");
 }
 
+fn roleCanAdmin(role: []const u8) bool {
+    return std.mem.eql(u8, role, "owner") or std.mem.eql(u8, role, "admin");
+}
+
 pub fn canReadWorkspace(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8) !bool {
     const role = try getWorkspaceRole(allocator, user_id, workspace_id);
     if (role) |r| {
@@ -377,6 +400,62 @@ pub fn canWriteWorkspace(allocator: std.mem.Allocator, user_id: []const u8, work
         return roleCanWrite(r);
     }
     return false;
+}
+
+pub fn canAdminWorkspace(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8) !bool {
+    const role = try getWorkspaceRole(allocator, user_id, workspace_id);
+    if (role) |r| {
+        defer allocator.free(r);
+        return roleCanAdmin(r);
+    }
+    return false;
+}
+
+pub fn listWorkspaceMembers(allocator: std.mem.Allocator, workspace_id: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\SELECT id, user_id.id AS user_id, user_id.email AS email, user_id.name AS name, role, created_at FROM workspace_members WHERE workspace_id = $workspace_id;
+    , .{ .workspace_id = workspace_id });
+}
+
+pub fn createWorkspaceInvite(
+    allocator: std.mem.Allocator,
+    workspace_id: []const u8,
+    email: []const u8,
+    role: []const u8,
+    invited_by: []const u8,
+    token: []const u8,
+    expires_at: i64,
+) ![]u8 {
+    return queryWithVars(allocator,
+        \\CREATE workspace_invites SET workspace_id = $workspace_id, email = $email, role = $role, token = $invite_token, invited_by = $invited_by, expires_at = $expires_at, accepted_at = NONE, created_at = time::now();
+    , .{
+        .workspace_id = workspace_id,
+        .email = email,
+        .role = role,
+        .invite_token = token,
+        .invited_by = invited_by,
+        .expires_at = expires_at,
+    });
+}
+
+pub fn getWorkspaceInviteByToken(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\SELECT * FROM workspace_invites WHERE token = $invite_token LIMIT 1;
+    , .{ .invite_token = token });
+}
+
+pub fn addWorkspaceMember(allocator: std.mem.Allocator, workspace_id: []const u8, user_id: []const u8, role: []const u8) !void {
+    const result = try queryWithVars(allocator,
+        \\CREATE workspace_members SET workspace_id = $workspace_id, user_id = $user_id, role = $role, created_at = time::now();
+    , .{ .workspace_id = workspace_id, .user_id = user_id, .role = role });
+    allocator.free(result);
+}
+
+pub fn markWorkspaceInviteAccepted(allocator: std.mem.Allocator, invite_id: []const u8, accepted_at: i64) !void {
+    const result = try queryWithVars(allocator,
+        \\UPDATE $invite_id SET accepted_at = $accepted_at;
+    , .{ .invite_id = invite_id, .accepted_at = accepted_at });
+    allocator.free(result);
 }
 
 // ============== TASK OPERATIONS ==============

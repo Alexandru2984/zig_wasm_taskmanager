@@ -239,6 +239,55 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         return;
     }
 
+    if (std.mem.eql(u8, path, "/api/workspaces/invites/accept")) {
+        if (!std.mem.eql(u8, req_method, "POST")) {
+            r.setHeader("Allow", "POST") catch {};
+            r.setStatus(.method_not_allowed);
+            try r.sendBody("{\"error\": \"Method not allowed\"}");
+            return;
+        }
+        try workspaces_handler.acceptInvite(r, req_alloc);
+        return;
+    }
+
+    if (std.mem.startsWith(u8, path, "/api/workspaces/")) {
+        const rest = path["/api/workspaces/".len..];
+        const MembersSuffix = "/members";
+        const InvitesSuffix = "/invites";
+
+        if (std.mem.endsWith(u8, rest, MembersSuffix)) {
+            const workspace_id = rest[0 .. rest.len - MembersSuffix.len];
+            if (workspace_id.len == 0 or !std.mem.startsWith(u8, workspace_id, "workspaces:")) {
+                try http.jsonError(r, 400, "Invalid workspace ID");
+                return;
+            }
+            if (!std.mem.eql(u8, req_method, "GET")) {
+                r.setHeader("Allow", "GET") catch {};
+                r.setStatus(.method_not_allowed);
+                try r.sendBody("{\"error\": \"Method not allowed\"}");
+                return;
+            }
+            try workspaces_handler.listMembers(r, workspace_id, req_alloc);
+            return;
+        }
+
+        if (std.mem.endsWith(u8, rest, InvitesSuffix)) {
+            const workspace_id = rest[0 .. rest.len - InvitesSuffix.len];
+            if (workspace_id.len == 0 or !std.mem.startsWith(u8, workspace_id, "workspaces:")) {
+                try http.jsonError(r, 400, "Invalid workspace ID");
+                return;
+            }
+            if (!std.mem.eql(u8, req_method, "POST")) {
+                r.setHeader("Allow", "POST") catch {};
+                r.setStatus(.method_not_allowed);
+                try r.sendBody("{\"error\": \"Method not allowed\"}");
+                return;
+            }
+            try workspaces_handler.createInvite(r, workspace_id, req_alloc);
+            return;
+        }
+    }
+
     // Task routes
     if (std.mem.eql(u8, path, "/api/tasks")) {
         if (r.method) |method| {

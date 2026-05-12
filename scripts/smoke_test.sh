@@ -163,6 +163,10 @@ test_endpoint "Create Workspace" "POST" "/api/workspaces" \
 WORKSPACE_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
 if [ -n "$WORKSPACE_ID" ]; then
     echo "Created Workspace ID: $WORKSPACE_ID"
+    test_endpoint "List Workspace Members" "GET" "/api/workspaces/$WORKSPACE_ID/members" "" "$EMAIL" || true
+    INVITE_EMAIL="invite${RANDOM_ID}@example.com"
+    test_endpoint "Create Workspace Invite" "POST" "/api/workspaces/$WORKSPACE_ID/invites" \
+        "{\"email\":\"$INVITE_EMAIL\",\"role\":\"viewer\"}" "$INVITE_EMAIL" || true
 fi
 
 # 5. Tasks

@@ -82,10 +82,17 @@ pub const getActivityByUser = impl.getActivityByUser;
 // Workspace operations
 pub const ensurePersonalWorkspace = impl.ensurePersonalWorkspace;
 pub const createWorkspace = impl.createWorkspace;
+pub const getWorkspaceById = impl.getWorkspaceById;
 pub const listWorkspacesForUser = impl.listWorkspacesForUser;
 pub const getWorkspaceRole = impl.getWorkspaceRole;
 pub const canReadWorkspace = impl.canReadWorkspace;
 pub const canWriteWorkspace = impl.canWriteWorkspace;
+pub const canAdminWorkspace = impl.canAdminWorkspace;
+pub const listWorkspaceMembers = impl.listWorkspaceMembers;
+pub const createWorkspaceInvite = impl.createWorkspaceInvite;
+pub const getWorkspaceInviteByToken = impl.getWorkspaceInviteByToken;
+pub const addWorkspaceMember = impl.addWorkspaceMember;
+pub const markWorkspaceInviteAccepted = impl.markWorkspaceInviteAccepted;
 pub const canWriteTask = impl.canWriteTask;
 
 // Session operations
