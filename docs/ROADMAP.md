@@ -8,7 +8,7 @@ work visible for interviews and portfolio review.
 - Maintain `zig build`, `zig build test`, and `./scripts/check.sh` as the
   baseline verification flow.
 - Add isolated integration tests with a disposable SurrealDB namespace.
-- Add secret scanning to CI.
+- Keep CI secret scanning enabled and review findings before merging.
 - Publish an OpenAPI document for the public API.
 
 ## 2. Security Posture

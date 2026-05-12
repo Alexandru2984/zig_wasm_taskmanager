@@ -125,17 +125,21 @@ pub const RateLimiter = struct {
 
 // Global rate limiters for different endpoints
 pub var login_limiter: ?RateLimiter = null;
+pub var login_account_limiter: ?RateLimiter = null;
 pub var signup_limiter: ?RateLimiter = null;
 pub var forgot_password_limiter: ?RateLimiter = null;
 pub var verify_limiter: ?RateLimiter = null;
 pub var reset_password_limiter: ?RateLimiter = null;
 pub var resend_verification_limiter: ?RateLimiter = null;
 pub var task_write_limiter: ?RateLimiter = null;
+pub var workspace_invite_limiter: ?RateLimiter = null;
 
 /// Initialize all rate limiters
 pub fn initAll(allocator: std.mem.Allocator) void {
     // Login: 5 attempts per minute
     login_limiter = RateLimiter.init(allocator, .{ .max_requests = 5, .window_seconds = 60 });
+    // Login per account/email: slows distributed credential stuffing.
+    login_account_limiter = RateLimiter.init(allocator, .{ .max_requests = 10, .window_seconds = 300 });
 
     // Signup: 3 per minute (prevent account enumeration)
     signup_limiter = RateLimiter.init(allocator, .{ .max_requests = 3, .window_seconds = 60 });
@@ -155,6 +159,8 @@ pub fn initAll(allocator: std.mem.Allocator) void {
     // Task write operations (create/toggle/delete): 60 per minute per user.
     // Stops an authenticated user from spamming the DB.
     task_write_limiter = RateLimiter.init(allocator, .{ .max_requests = 60, .window_seconds = 60 });
+    // Workspace invites trigger email. Keep the budget tight per inviting user.
+    workspace_invite_limiter = RateLimiter.init(allocator, .{ .max_requests = 10, .window_seconds = 3600 });
 
     std.debug.print("✅ Rate limiters initialized\n", .{});
 }
@@ -162,12 +168,14 @@ pub fn initAll(allocator: std.mem.Allocator) void {
 /// Cleanup all rate limiters
 pub fn cleanupAll() void {
     if (login_limiter) |*l| l.cleanup();
+    if (login_account_limiter) |*l| l.cleanup();
     if (signup_limiter) |*l| l.cleanup();
     if (forgot_password_limiter) |*l| l.cleanup();
     if (verify_limiter) |*l| l.cleanup();
     if (reset_password_limiter) |*l| l.cleanup();
     if (resend_verification_limiter) |*l| l.cleanup();
     if (task_write_limiter) |*l| l.cleanup();
+    if (workspace_invite_limiter) |*l| l.cleanup();
 }
 
 var cleanup_thread: ?std.Thread = null;
@@ -210,18 +218,22 @@ pub fn deinitAll() void {
     stopCleanupThread();
 
     if (login_limiter) |*l| l.deinit();
+    if (login_account_limiter) |*l| l.deinit();
     if (signup_limiter) |*l| l.deinit();
     if (forgot_password_limiter) |*l| l.deinit();
     if (verify_limiter) |*l| l.deinit();
     if (reset_password_limiter) |*l| l.deinit();
     if (resend_verification_limiter) |*l| l.deinit();
     if (task_write_limiter) |*l| l.deinit();
+    if (workspace_invite_limiter) |*l| l.deinit();
 
     login_limiter = null;
+    login_account_limiter = null;
     signup_limiter = null;
     forgot_password_limiter = null;
     verify_limiter = null;
     reset_password_limiter = null;
     resend_verification_limiter = null;
     task_write_limiter = null;
+    workspace_invite_limiter = null;
 }

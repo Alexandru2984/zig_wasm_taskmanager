@@ -158,8 +158,8 @@ test_endpoint "Login" "POST" "/api/auth/login" \
 echo ""
 echo "=== Workspace Operations ==="
 test_endpoint "List Workspaces" "GET" "/api/workspaces" "" "Workspace" || true
-test_endpoint "Create Workspace" "POST" "/api/workspaces" \
-    "{\"name\":\"Smoke Workspace\"}" "Smoke Workspace" || true
+test_endpoint "Create Workspace Requires Verified Email" "POST" "/api/workspaces" \
+    "{\"name\":\"Smoke Workspace\"}" "Email verification required" || true
 WORKSPACE_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
 if [ -n "$WORKSPACE_ID" ]; then
     echo "Created Workspace ID: $WORKSPACE_ID"

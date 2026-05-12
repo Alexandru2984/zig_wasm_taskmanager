@@ -18,6 +18,7 @@ pub const HttpError = error{
     InvalidResponse,
     ResponseTooLarge,
     MissingConfig,
+    QueryError,
 };
 
 /// Database config
@@ -126,8 +127,10 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
         // Check status
         const status = result.status;
         if (status == .ok or status == .created or status == .accepted) {
-            // Success! Return owned slice (only written bytes, not full capacity)
-            return response_writer.toOwnedSlice() catch return HttpError.InvalidResponse;
+            const raw_response = response_writer.toOwnedSlice() catch return HttpError.InvalidResponse;
+            errdefer allocator.free(raw_response);
+            try validateSurrealResponse(allocator, raw_response);
+            return raw_response;
         } else if (@intFromEnum(status) >= 500) {
             // Server error - retry
             std.debug.print("⚠️ DB attempt {d}/{d}: HTTP {d}\n", .{ attempt + 1, MAX_RETRIES, @intFromEnum(status) });
@@ -149,6 +152,44 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
     // All retries exhausted
     std.debug.print("❌ DB query failed after {d} attempts\n", .{MAX_RETRIES});
     return last_error orelse HttpError.ConnectionFailed;
+}
+
+fn validateSurrealResponse(allocator: std.mem.Allocator, raw_response: []const u8) !void {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw_response, .{}) catch {
+        return HttpError.InvalidResponse;
+    };
+    defer parsed.deinit();
+
+    switch (parsed.value) {
+        .array => |arr| {
+            for (arr.items) |item| {
+                const obj = switch (item) {
+                    .object => |o| o,
+                    else => return HttpError.InvalidResponse,
+                };
+                const status_value = obj.get("status") orelse return HttpError.InvalidResponse;
+                const status = switch (status_value) {
+                    .string => |s| s,
+                    else => return HttpError.InvalidResponse,
+                };
+                if (!std.mem.eql(u8, status, "OK")) {
+                    if (obj.get("result")) |result_value| {
+                        switch (result_value) {
+                            .string => |msg| {
+                                const preview_len = @min(msg.len, 300);
+                                std.debug.print("❌ SurrealDB query error: {s}\n", .{msg[0..preview_len]});
+                            },
+                            else => std.debug.print("❌ SurrealDB query returned status {s}\n", .{status}),
+                        }
+                    } else {
+                        std.debug.print("❌ SurrealDB query returned status {s}\n", .{status});
+                    }
+                    return HttpError.QueryError;
+                }
+            }
+        },
+        else => return HttpError.InvalidResponse,
+    }
 }
 
 /// Execute SQL query with bind variables (SECURE - prevents SQL injection)
@@ -254,63 +295,49 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
     // Raw response looks like: [{...}, {...}, {...last...}]
     // We want to return: [{...last...}]
 
-    // Find the last '{' before the final '}]'
-    if (raw_response.len < 3 or raw_response[0] != '[') {
-        // Not a JSON array, return as-is (shouldn't happen)
-        return try allocator.dupe(u8, raw_response);
-    }
+    return try extractLastSurrealResult(allocator, raw_response);
+}
 
-    // Find the last complete object in the array
-    var depth: i32 = 0;
-    var last_obj_start: ?usize = null;
-    var i: usize = raw_response.len;
-    while (i > 0) {
-        i -= 1;
-        const c = raw_response[i];
-        if (c == '}') {
-            if (depth == 0) {
-                // This is the end of the last object
-            }
-            depth += 1;
-        } else if (c == '{') {
-            depth -= 1;
-            if (depth == 0) {
-                // Found the start of the last object
-                last_obj_start = i;
-                break;
-            }
-        }
-    }
+fn extractLastSurrealResult(allocator: std.mem.Allocator, raw_response: []const u8) ![]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw_response, .{}) catch {
+        return HttpError.InvalidResponse;
+    };
+    defer parsed.deinit();
 
-    if (last_obj_start) |start| {
-        // Extract just the last object, wrapped in an array
-        var result = std.ArrayListUnmanaged(u8){};
-        try result.append(allocator, '[');
-        try result.appendSlice(allocator, raw_response[start..]);
-        // raw_response ends with ']', so we need to remove any trailing junk and ensure it's "]"
-        // Actually raw_response[start..] should give us "{...}]", we want "[{...}]"
-        // So we need to find where the object ends
-        var end_idx: usize = 0;
-        depth = 0;
-        for (raw_response[start..], 0..) |c, j| {
-            if (c == '{') depth += 1 else if (c == '}') {
-                depth -= 1;
-                if (depth == 0) {
-                    end_idx = start + j + 1;
-                    break;
-                }
-            }
-        }
+    const arr = switch (parsed.value) {
+        .array => |a| a,
+        else => return HttpError.InvalidResponse,
+    };
+    if (arr.items.len == 0) return try allocator.dupe(u8, "[]");
 
-        // Build the result properly
-        result.deinit(allocator);
-        var final_result = try allocator.alloc(u8, end_idx - start + 2); // "[" + object + "]"
-        final_result[0] = '[';
-        @memcpy(final_result[1 .. end_idx - start + 1], raw_response[start..end_idx]);
-        final_result[end_idx - start + 1] = ']';
-        return final_result;
-    }
+    const last = arr.items[arr.items.len - 1];
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
 
-    // Fallback: return as-is
-    return try allocator.dupe(u8, raw_response);
+    try out.append(allocator, '[');
+    var writer = out.writer(allocator);
+    var buf: [256]u8 = undefined;
+    var adapter = writer.adaptToNewApi(&buf);
+    try std.json.Stringify.value(last, .{}, &adapter.new_interface);
+    try adapter.new_interface.flush();
+    try out.append(allocator, ']');
+
+    return try out.toOwnedSlice(allocator);
+}
+
+test "validateSurrealResponse rejects Surreal ERR status" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(HttpError.QueryError, validateSurrealResponse(allocator,
+        \\[{"time":"1ms","status":"ERR","result":"Parse error"}]
+    ));
+}
+
+test "extractLastSurrealResult keeps the final statement result" {
+    const allocator = std.testing.allocator;
+    const result = try extractLastSurrealResult(allocator,
+        \\[{"time":"1ms","status":"OK","result":null},{"time":"2ms","status":"OK","result":[{"id":"users:1"}]}]
+    );
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"id\":\"users:1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"result\":null") == null);
 }

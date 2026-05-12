@@ -4,7 +4,20 @@ const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
 const email = @import("../services/email.zig");
 const http = @import("../util/http.zig");
+const rate_limiter = @import("../util/rate_limiter.zig");
 const validation = @import("../util/validation.zig");
+
+fn requireVerifiedUser(r: zap.Request, req_alloc: std.mem.Allocator, user_id: []const u8) !bool {
+    const verified = db.isUserEmailVerified(req_alloc, user_id) catch {
+        try http.jsonError(r, 500, "Failed to verify account status");
+        return false;
+    };
+    if (!verified) {
+        try http.jsonError(r, 403, "Email verification required");
+        return false;
+    }
+    return true;
+}
 
 pub fn listWorkspaces(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     const user_id = http.getCurrentUserId(req_alloc, r) orelse {
@@ -34,6 +47,7 @@ pub fn createWorkspace(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 401, "Not authenticated");
         return;
     };
+    if (!try requireVerifiedUser(r, req_alloc, user_id)) return;
 
     const request = http.parseBody(req_alloc, r, models.CreateWorkspaceRequest) catch {
         try http.jsonError(r, 400, "Invalid JSON body");
@@ -105,6 +119,14 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
         try http.jsonError(r, 401, "Not authenticated");
         return;
     };
+    if (!try requireVerifiedUser(r, req_alloc, user_id)) return;
+    if (rate_limiter.workspace_invite_limiter) |*limiter| {
+        if (!limiter.isAllowed(user_id)) {
+            r.setHeader("Retry-After", "3600") catch {};
+            try http.jsonError(r, 429, "Too many workspace invites. Please wait 1 hour.");
+            return;
+        }
+    }
 
     if (!try db.canAdminWorkspace(req_alloc, user_id, workspace_id)) {
         try http.jsonError(r, 403, "Forbidden");
@@ -124,6 +146,11 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
         try http.jsonError(r, 400, "Invalid role");
         return;
     }
+    const now = std.time.timestamp();
+    if (db.hasPendingWorkspaceInvite(req_alloc, workspace_id, request.email, now) catch false) {
+        try http.jsonError(r, 409, "A pending invite already exists for this email");
+        return;
+    }
 
     const workspace_result = db.getWorkspaceById(req_alloc, workspace_id) catch {
         try http.jsonError(r, 500, "Failed to load workspace");
@@ -140,7 +167,7 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
     const workspace = parsed_workspace.value[0].result[0];
 
     const token = db.generateSecureToken();
-    const expires_at = std.time.timestamp() + (7 * 24 * 60 * 60);
+    const expires_at = now + (7 * 24 * 60 * 60);
     const invite_result = db.createWorkspaceInvite(req_alloc, workspace_id, request.email, request.role, user_id, token[0..], expires_at) catch {
         try http.jsonError(r, 500, "Failed to create invite");
         return;
@@ -157,6 +184,11 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
 
     email.sendWorkspaceInviteEmail(req_alloc, request.email, workspace.name, token[0..]) catch |err| {
         std.debug.print("Failed to send workspace invite: {}\n", .{err});
+        db.deleteWorkspaceInviteById(req_alloc, invite.id) catch |delete_err| {
+            std.debug.print("Failed to delete unsent workspace invite: {}\n", .{delete_err});
+        };
+        try http.jsonError(r, 502, "Failed to send invite email");
+        return;
     };
     db.logActivity(req_alloc, user_id, "invite_workspace_member", "workspace", workspace_id) catch |err| {
         std.debug.print("Failed to log invite activity: {}\n", .{err});
@@ -183,6 +215,10 @@ pub fn acceptInvite(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 400, "Invalid JSON body");
         return;
     };
+    if (!validation.validateHexToken64(request.token)) {
+        try http.jsonError(r, 404, "Invite not found");
+        return;
+    }
 
     const invite_result = db.getWorkspaceInviteByToken(req_alloc, request.token) catch {
         try http.jsonError(r, 500, "Failed to load invite");
@@ -221,6 +257,10 @@ pub fn acceptInvite(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     }
     const user = parsed_user.value[0].result[0];
+    if (!user.email_verified) {
+        try http.jsonError(r, 403, "Email verification required");
+        return;
+    }
 
     if (!std.ascii.eqlIgnoreCase(user.email, invite.email)) {
         try http.jsonError(r, 403, "Invite belongs to a different email");

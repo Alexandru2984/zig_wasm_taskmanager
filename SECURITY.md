@@ -27,18 +27,19 @@ Primary attacker capabilities:
 | Area | Control |
 | --- | --- |
 | Passwords | Argon2id with per-user random salt |
-| Sessions | Server-side SurrealDB sessions, 7-day expiry, HttpOnly cookie transport |
+| Sessions | Server-side SurrealDB sessions, 7-day expiry, hashed session tokens, HttpOnly cookie transport |
 | Cookies | `HttpOnly`, `SameSite=Strict`, `Secure` in production |
-| Password reset | Random 256-bit token, 1-hour expiry, token cleared atomically after use |
-| Email verification | Authenticated verification, 6-digit code, expiry, per-user attempt cap |
-| Rate limiting | Separate buckets for signup, login, forgot/reset, verification, resend, and task writes |
+| Password reset | Random 256-bit token, stored hashed, 1-hour expiry, token cleared atomically after use |
+| Email verification | Authenticated verification, hashed 6-digit code, expiry, per-user attempt cap |
+| Rate limiting | Separate buckets for signup, login IP/account, forgot/reset, verification, resend, task writes, and workspace invites |
 | Request bodies | 64 KiB JSON body cap |
 | Input validation | Email/name/password/task title/date validation before database writes |
-| Database access | SurrealQL variable binding helper for user-controlled values |
+| Database access | SurrealQL variable binding helper for user-controlled values; Surreal `ERR` results are treated as failed queries |
 | XSS defense | DOM rendering uses `textContent`; strict CSP for HTML responses |
 | Static files | realpath-based public-directory containment and sensitive-file deny list |
 | Security headers | CSP, HSTS, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy` |
 | Email | SMTP via mailcow; secrets stay in `.env`; curl config and payload files are private temp files |
+| Workspace invites | Invite tokens are stored hashed, deduplicated while pending, and gated behind verified inviter/recipient emails |
 | Metrics | `/api/metrics` disabled unless `METRICS_TOKEN` is configured |
 | Deployment | systemd sandboxing, non-root user, no Linux capabilities, private `/tmp`, read-only home/system views |
 
@@ -68,8 +69,6 @@ RUN_SMOKE=1 ./scripts/check.sh
 
 ## Known Follow-Ups
 
-- Add CSRF tokens for state-changing cookie-authenticated requests.
 - Add integration tests that run against an isolated SurrealDB test database.
-- Add a secret-scanning step in CI.
 - Replace the curl SMTP subprocess with a native SMTP client if the dependency
   tradeoff becomes worthwhile.

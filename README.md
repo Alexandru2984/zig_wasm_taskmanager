@@ -123,16 +123,16 @@ Security controls are documented in [SECURITY.md](SECURITY.md).
 Current controls include:
 
 - Argon2id password hashing
-- server-side sessions with HttpOnly cookies
+- server-side sessions with HttpOnly cookies and hashed DB tokens
 - double-submit CSRF protection for cookie-authenticated writes
 - workspace membership checks for task reads/writes
-- reset-token invalidation and session invalidation after password reset
+- reset-token invalidation and session invalidation after password reset/password change
 - authenticated email verification with per-user attempt caps
-- route-specific rate limiting
+- route-specific rate limiting, including login account throttling and invite throttling
 - strict CSP/HSTS/security headers
 - SurrealQL variable binding for user input
 - path traversal protection for static assets
-- SMTP credentials stored only in `.env`
+- SMTP credentials stored only in `.env`; CI secret scanning blocks new leaks
 - systemd sandboxing for the deployed process
 
 ## Project Structure
@@ -157,7 +157,7 @@ The current roadmap focuses on making the app more useful while keeping the
 engineering work visible:
 
 - isolated integration test database
-- secret scanning
+- ongoing secret-scanning review
 - workspace member management UI
 - task labels
 - recurring tasks

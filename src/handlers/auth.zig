@@ -157,6 +157,18 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 400, "Invalid JSON body");
         return;
     };
+    if (!validation.validateEmail(request.email)) {
+        auth.burnTime(req_alloc, request.password);
+        try http.jsonError(r, 401, "Invalid credentials");
+        return;
+    }
+    if (rate_limiter.login_account_limiter) |*limiter| {
+        if (!limiter.isAllowed(request.email)) {
+            r.setHeader("Retry-After", "300") catch {};
+            try http.jsonError(r, 429, "Too many login attempts for this account. Please wait 5 minutes.");
+            return;
+        }
+    }
 
     // Get user from DB
     const db_result = db.getUserByEmail(req_alloc, request.email) catch {
@@ -373,6 +385,10 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 400, "Invalid JSON body");
         return;
     };
+    if (!validation.validateHexToken64(request.token)) {
+        try http.jsonError(r, 400, "Invalid or expired token");
+        return;
+    }
 
     // SECURITY: Validate new password strength — previously reset-password
     // would accept any password, bypassing the signup strength rules.

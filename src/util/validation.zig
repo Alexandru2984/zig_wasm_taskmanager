@@ -111,6 +111,17 @@ pub fn validateTaskPriority(priority: []const u8) bool {
         std.mem.eql(u8, priority, "high");
 }
 
+pub fn validateHexToken64(token: []const u8) bool {
+    if (token.len != 64) return false;
+    for (token) |c| {
+        const is_hex = (c >= '0' and c <= '9') or
+            (c >= 'a' and c <= 'f') or
+            (c >= 'A' and c <= 'F');
+        if (!is_hex) return false;
+    }
+    return true;
+}
+
 /// Validate an ISO-8601-ish datetime string the frontend is allowed to send.
 /// Accepts "YYYY-MM-DDTHH:MM", "YYYY-MM-DDTHH:MM:SS" and their Z-terminated
 /// forms. Rejects anything else so arbitrary user strings can't reach the DB.

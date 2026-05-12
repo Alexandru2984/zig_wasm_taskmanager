@@ -24,6 +24,19 @@ fn getDbConfig() !DbConfig {
     };
 }
 
+fn hashToken(token: []const u8) [64]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(token, &digest, .{});
+
+    const hex = "0123456789abcdef";
+    var out: [64]u8 = undefined;
+    for (digest, 0..) |byte, i| {
+        out[i * 2] = hex[byte >> 4];
+        out[i * 2 + 1] = hex[byte & 0x0F];
+    }
+    return out;
+}
+
 // Execute a SurrealQL query using native HTTP client (no variables)
 // SECURITY: Use queryWithVars for user input to prevent SQL injection
 pub fn query(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
@@ -161,13 +174,14 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
 // ============== USER OPERATIONS ==============
 
 pub fn createUser(allocator: std.mem.Allocator, email: []const u8, password_hash: []const u8, name: []const u8, verification_token: []const u8, verification_expires: i64) ![]u8 {
+    const verification_hash = hashToken(verification_token);
     return queryWithVars(allocator,
         \\CREATE users SET email = $email, password_hash = $password_hash, name = $name, email_verified = false, verification_token = $verification_tkn, verification_expires = $expires, verification_attempts = 0;
     , .{
         .email = email,
         .password_hash = password_hash,
         .name = name,
-        .verification_tkn = verification_token,
+        .verification_tkn = verification_hash,
         .expires = verification_expires,
     });
 }
@@ -210,9 +224,10 @@ pub fn resetUserPasswordAndClearToken(
 }
 
 pub fn setResetToken(allocator: std.mem.Allocator, user_id: []const u8, token: []const u8, expires: i64) ![]u8 {
+    const token_hash = hashToken(token);
     return queryWithVars(allocator,
         \\UPDATE $record_id SET reset_token = $reset_tkn, reset_expires = $expires;
-    , .{ .record_id = user_id, .reset_tkn = token, .expires = expires });
+    , .{ .record_id = user_id, .reset_tkn = token_hash, .expires = expires });
 }
 
 pub fn clearResetToken(allocator: std.mem.Allocator, user_id: []const u8) !void {
@@ -224,15 +239,17 @@ pub fn clearResetToken(allocator: std.mem.Allocator, user_id: []const u8) !void 
 
 pub fn setVerificationToken(allocator: std.mem.Allocator, user_id: []const u8, token: []const u8, expires: i64) ![]u8 {
     // SECURITY: reset the attempt counter so a fresh code gets a fresh budget.
+    const token_hash = hashToken(token);
     return queryWithVars(allocator,
         \\UPDATE $record_id SET verification_token = $verification_tkn, verification_expires = $expires, verification_attempts = 0;
-    , .{ .record_id = user_id, .verification_tkn = token, .expires = expires });
+    , .{ .record_id = user_id, .verification_tkn = token_hash, .expires = expires });
 }
 
 pub fn getUserByResetToken(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
+    const token_hash = hashToken(token);
     return queryWithVars(allocator,
         \\SELECT * FROM users WHERE reset_token = $reset_tkn;
-    , .{ .reset_tkn = token });
+    , .{ .reset_tkn = token_hash });
 }
 
 /// Atomic verify: marks email as verified ONLY if user_id + code + not-expired match.
@@ -244,9 +261,10 @@ pub fn verifyUserEmailAtomic(
     code: []const u8,
     now_ts: i64,
 ) !bool {
+    const code_hash = hashToken(code);
     const result = try queryWithVars(allocator,
         \\UPDATE $record_id SET email_verified = true, verification_token = NONE, verification_expires = NONE, verification_attempts = 0 WHERE verification_token = $code AND (verification_expires = NONE OR verification_expires >= $now_ts) RETURN AFTER;
-    , .{ .record_id = user_id, .code = code, .now_ts = now_ts });
+    , .{ .record_id = user_id, .code = code_hash, .now_ts = now_ts });
     defer allocator.free(result);
 
     // If no row updated, UPDATE returns []. Parse and check.
@@ -374,6 +392,20 @@ pub fn getWorkspaceRole(allocator: std.mem.Allocator, user_id: []const u8, works
     return try allocator.dupe(u8, parsed.value[0].result[0].role);
 }
 
+pub fn isUserEmailVerified(allocator: std.mem.Allocator, user_id: []const u8) !bool {
+    const result = try queryWithVars(allocator,
+        \\SELECT email_verified FROM $record_id;
+    , .{ .record_id = user_id });
+    defer allocator.free(result);
+
+    const VerificationRow = struct { email_verified: bool = false };
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(VerificationRow), allocator, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    if (parsed.value.len == 0 or parsed.value[0].result.len == 0) return false;
+    return parsed.value[0].result[0].email_verified;
+}
+
 fn roleCanWrite(role: []const u8) bool {
     return std.mem.eql(u8, role, "owner") or
         std.mem.eql(u8, role, "admin") or
@@ -426,22 +458,43 @@ pub fn createWorkspaceInvite(
     token: []const u8,
     expires_at: i64,
 ) ![]u8 {
+    const token_hash = hashToken(token);
     return queryWithVars(allocator,
         \\CREATE workspace_invites SET workspace_id = $workspace_id, email = $email, role = $role, token = $invite_token, invited_by = $invited_by, expires_at = $expires_at, accepted_at = NONE, created_at = time::now();
     , .{
         .workspace_id = workspace_id,
         .email = email,
         .role = role,
-        .invite_token = token,
+        .invite_token = token_hash,
         .invited_by = invited_by,
         .expires_at = expires_at,
     });
 }
 
+pub fn hasPendingWorkspaceInvite(allocator: std.mem.Allocator, workspace_id: []const u8, email: []const u8, now_ts: i64) !bool {
+    const result = try queryWithVars(allocator,
+        \\SELECT id FROM workspace_invites WHERE workspace_id = $workspace_id AND email = $email AND accepted_at = NONE AND expires_at >= $now_ts LIMIT 1;
+    , .{ .workspace_id = workspace_id, .email = email, .now_ts = now_ts });
+    defer allocator.free(result);
+
+    const ExistingInvite = struct { id: []const u8 };
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(ExistingInvite), allocator, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    return parsed.value.len > 0 and parsed.value[0].result.len > 0;
+}
+
 pub fn getWorkspaceInviteByToken(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
+    const token_hash = hashToken(token);
     return queryWithVars(allocator,
         \\SELECT * FROM workspace_invites WHERE token = $invite_token LIMIT 1;
-    , .{ .invite_token = token });
+    , .{ .invite_token = token_hash });
+}
+
+pub fn deleteWorkspaceInviteById(allocator: std.mem.Allocator, invite_id: []const u8) !void {
+    const result = try queryWithVars(allocator,
+        \\DELETE $invite_id;
+    , .{ .invite_id = invite_id });
+    allocator.free(result);
 }
 
 pub fn addWorkspaceMember(allocator: std.mem.Allocator, workspace_id: []const u8, user_id: []const u8, role: []const u8) !void {
@@ -614,13 +667,14 @@ pub fn generateSecureToken() [64]u8 {
 /// Session expires in 7 days by default
 pub fn createSession(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     const token = generateSecureToken();
+    const token_hash = hashToken(token[0..]);
 
     // Calculate expiration (7 days from now in milliseconds)
     const expires_ms = std.time.milliTimestamp() + (7 * 24 * 60 * 60 * 1000);
 
     const result = try queryWithVars(allocator,
         \\CREATE sessions SET token = $session_token, user_id = $user_id, expires_at = time::from::millis($expires_ms);
-    , .{ .session_token = token, .user_id = user_id, .expires_ms = expires_ms });
+    , .{ .session_token = token_hash, .user_id = user_id, .expires_ms = expires_ms });
     defer allocator.free(result);
 
     // Return a copy of the token
@@ -630,9 +684,10 @@ pub fn createSession(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
 /// Validate a session token and return the user_id if valid
 /// Returns null if token is invalid or expired
 pub fn validateSession(allocator: std.mem.Allocator, token: []const u8) !?[]u8 {
+    const token_hash = hashToken(token);
     const result = try queryWithVars(allocator,
         \\SELECT user_id, time::unix(expires_at) * 1000 as expires_ms FROM sessions WHERE token = $session_token;
-    , .{ .session_token = token });
+    , .{ .session_token = token_hash });
     defer allocator.free(result);
 
     const SessionResult = struct {
@@ -660,9 +715,10 @@ pub fn validateSession(allocator: std.mem.Allocator, token: []const u8) !?[]u8 {
 
 /// Delete a specific session (logout)
 pub fn deleteSession(allocator: std.mem.Allocator, token: []const u8) !void {
+    const token_hash = hashToken(token);
     const result = try queryWithVars(allocator,
         \\DELETE FROM sessions WHERE token = $session_token;
-    , .{ .session_token = token });
+    , .{ .session_token = token_hash });
     allocator.free(result);
 }
 

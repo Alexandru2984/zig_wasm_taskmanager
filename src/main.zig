@@ -59,7 +59,12 @@ pub fn main() !void {
     // SECURITY: warn if CORS_ORIGIN is missing so operators don't accidentally
     // deploy without cross-origin protection (and because our frontend needs
     // the cookie + origin match to work through nginx).
-    if (config.get("CORS_ORIGIN") == null) {
+    if (config.get("CORS_ORIGIN")) |cors_origin| {
+        if (!validateCorsOrigin(cors_origin)) {
+            log.warn("Invalid CORS_ORIGIN in .env: refusing to start", .{});
+            return error.InvalidCorsOrigin;
+        }
+    } else {
         log.warn("CORS_ORIGIN is not set in .env — cross-origin requests will have no ACAO header", .{});
     }
 
@@ -77,6 +82,24 @@ pub fn main() !void {
         .threads = 2,
         .workers = 1,
     });
+}
+
+fn validHeaderValue(value: []const u8) bool {
+    for (value) |c| {
+        switch (c) {
+            '\r', '\n', 0 => return false,
+            else => {},
+        }
+    }
+    return true;
+}
+
+fn validateCorsOrigin(origin: []const u8) bool {
+    if (!validHeaderValue(origin)) return false;
+    if (std.mem.eql(u8, origin, "*")) return false;
+    return std.mem.startsWith(u8, origin, "https://") or
+        std.mem.startsWith(u8, origin, "http://localhost") or
+        std.mem.startsWith(u8, origin, "http://127.0.0.1");
 }
 
 fn handleRequest(r: zap.Request) anyerror!void {
@@ -112,8 +135,10 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
     // "*" combined with Allow-Credentials (browsers reject it anyway, but
     // leaving a wildcard would silently disable CORS for our own frontend).
     if (config.get("CORS_ORIGIN")) |cors_origin| {
-        r.setHeader("Access-Control-Allow-Origin", cors_origin) catch {};
-        r.setHeader("Access-Control-Allow-Credentials", "true") catch {};
+        if (validateCorsOrigin(cors_origin)) {
+            r.setHeader("Access-Control-Allow-Origin", cors_origin) catch {};
+            r.setHeader("Access-Control-Allow-Credentials", "true") catch {};
+        }
     }
     r.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS") catch {};
     r.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token") catch {};

@@ -44,7 +44,8 @@ SurrealDB HTTP API on localhost
   shipped UI.
 - `frontend/src/main.zig` builds the WASM module installed as
   `public/app.wasm`.
-- Auth uses an HttpOnly cookie; JavaScript never stores session tokens.
+- Auth uses an HttpOnly cookie; JavaScript never stores session tokens, and the
+  database stores token hashes rather than reusable plaintext tokens.
 
 ## Data Model
 
@@ -53,11 +54,11 @@ Core tables:
 - `users`: email, Argon2id password hash, profile name, verification/reset
   fields.
 - `schema_migrations`: applied database migration versions.
-- `sessions`: opaque session token, `users` record reference, expiry timestamp.
+- `sessions`: hashed opaque session token, `users` record reference, expiry timestamp.
 - `workspaces`: workspace name, owner, creation timestamp.
 - `workspace_members`: workspace membership and role
   (`owner`/`admin`/`member`/`viewer`).
-- `workspace_invites`: invite token, target email, role, inviter, expiration,
+- `workspace_invites`: hashed invite token, target email, role, inviter, expiration,
   and acceptance marker.
 - `tasks`: `users` creator reference, workspace reference, title, priority,
   completion state, creation time, optional due date, reminder marker.
