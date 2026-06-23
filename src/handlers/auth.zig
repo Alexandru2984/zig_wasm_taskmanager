@@ -419,12 +419,16 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     }
     const user = parsed.value[0].result[0];
 
-    // Check expiration
-    if (user.reset_expires) |expires| {
-        if (expires < std.time.timestamp()) {
-            try http.jsonError(r, 400, "Token expired");
-            return;
-        }
+    // Check expiration. SECURITY: a token with no expiry must be treated as
+    // invalid (fail closed) rather than accepted, even though tokens and their
+    // expiry are always written together today.
+    const reset_expires = user.reset_expires orelse {
+        try http.jsonError(r, 400, "Invalid or expired token");
+        return;
+    };
+    if (reset_expires < std.time.timestamp()) {
+        try http.jsonError(r, 400, "Token expired");
+        return;
     }
 
     // SECURITY: update password AND invalidate the reset token in a single
