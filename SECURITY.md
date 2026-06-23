@@ -31,10 +31,12 @@ Primary attacker capabilities:
 | Cookies | `HttpOnly`, `SameSite=Strict`, `Secure` in production |
 | Password reset | Random 256-bit token, stored hashed, 1-hour expiry, token cleared atomically after use |
 | Email verification | Authenticated verification, hashed 6-digit code, expiry, per-user attempt cap |
-| Rate limiting | Separate buckets for signup, login IP/account, forgot/reset, verification, resend, task writes, and workspace invites |
+| Account enumeration | Uniform responses plus background email dispatch, so signup/login/reset/verify response times don't reveal whether an address exists |
+| Rate limiting | Separate buckets for signup, login IP/account, forgot/reset, verification, resend, task writes, password changes, and workspace invites; the per-account login bucket counts only failed attempts |
 | Request bodies | 64 KiB JSON body cap |
 | Input validation | Email/name/password/task title/date validation before database writes |
-| Database access | SurrealQL variable binding helper for user-controlled values; Surreal `ERR` results are treated as failed queries |
+| Database access | SurrealQL variable binding helper for user-controlled values (unit-tested for quote/control-byte escaping; unsupported bind types are rejected at compile time); Surreal `ERR` results are treated as failed queries |
+| Password change | Re-authenticates the current password, rejects reuse, invalidates other sessions, and is rate-limited |
 | XSS defense | DOM rendering uses `textContent`; strict CSP for HTML responses |
 | Static files | realpath-based public-directory containment and sensitive-file deny list |
 | Security headers | CSP, HSTS, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy` |
@@ -51,6 +53,15 @@ Primary attacker capabilities:
 - The public app should remain behind nginx/TLS with `INTERFACE=127.0.0.1`.
 - `TRUST_PROXY` should contain only the immediate nginx peer addresses.
 - `COOKIE_INSECURE=1` is only for local HTTP development.
+- Configuration can come from a `0600` `.env` file or from process environment
+  variables (the latter override the file), so secrets never need to enter the
+  container image.
+- The Zap/facil.io response-header map has a practical cap on how many headers a
+  single response can carry. The application sends the core set (CSP, HSTS,
+  `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`,
+  `Permissions-Policy`); cross-origin isolation headers such as
+  `Cross-Origin-Opener-Policy` / `Cross-Origin-Resource-Policy` are added at the
+  nginx layer in production.
 
 ## Verification
 
@@ -69,6 +80,12 @@ RUN_SMOKE=1 ./scripts/check.sh
 
 ## Known Follow-Ups
 
-- Add integration tests that run against an isolated SurrealDB test database.
+- Add integration tests that run against an isolated SurrealDB test database
+  (unit tests already cover validation, rate limiting, query escaping, and the
+  Argon2 round-trip).
 - Replace the curl SMTP subprocess with a native SMTP client if the dependency
   tradeoff becomes worthwhile.
+- The 6-digit email verification code is stored as an unsalted SHA-256 digest.
+  This is acceptable given the code is single-use, expires in 10 minutes, and is
+  rate-limited per user and per IP; a keyed digest would be the next step if the
+  threat model tightens.

@@ -9,18 +9,24 @@ systemd-sandboxed VPS deployment.
 ## Highlights
 
 - Zig backend with [Zap](https://github.com/zigzap/zap) and facil.io.
-- Zig-to-WebAssembly frontend module served with static assets.
+- Zig-to-WebAssembly module that owns the anonymous/offline task state, mirrored
+  to `localStorage` for persistence across reloads.
+- Accessible, responsive UI with light and dark themes: focus-trapped modals,
+  keyboard-navigable menus, `aria-live` announcements, and reduced-motion support.
 - SurrealDB persistence for users, sessions, verification tokens, reset tokens,
   workspaces, memberships, and tasks.
 - Argon2id password hashing and server-side sessions carried by HttpOnly
   cookies.
 - Multi-workspace task tenancy with owner/admin/member/viewer roles, member
   listing, and email invite acceptance.
-- Email verification and password reset through SMTP.
+- Email verification and password reset through SMTP, dispatched on a background
+  queue so response time never reveals whether an address exists.
 - Optional email reminders for overdue incomplete tasks.
 - Activity log API for account and task actions.
 - Per-route rate limiting, strict CORS, CSP, HSTS, safe static-file serving,
   CSRF protection, and protected metrics.
+- One-command Docker Compose stack (app + SurrealDB) and 12-factor configuration
+  via `.env` or environment variables.
 - Production deployment behind nginx/TLS with a hardened systemd service.
 
 ## Portfolio Summary
@@ -42,20 +48,35 @@ More: [docs/PORTFOLIO.md](docs/PORTFOLIO.md)
 
 ## Quick Start
 
+### With Docker (recommended)
+
+Brings up the app and SurrealDB together; no local Zig toolchain required:
+
+```bash
+docker compose up --build
+```
+
+The app is served at `http://localhost:9000`. Configuration is passed via the
+`environment:` block in `docker-compose.yml`; set `SMTP_*` there to enable
+verification and reset email.
+
+### From source
+
 Requirements:
 
 - Zig 0.15.x
 - SurrealDB reachable over HTTP
-- SMTP credentials for verification/reset email
+- SMTP credentials for verification/reset email (optional for local use)
 
 ```bash
 git clone <repo-url>
 cd taskmanager
-cp .env.example .env
+cp .env.example .env   # optional: config can also come from the environment
 zig build run
 ```
 
-The app defaults to `http://127.0.0.1:9000`.
+The app defaults to `http://127.0.0.1:9000`. Every `.env` key can be overridden
+by a process environment variable of the same name.
 
 ## Verification
 
@@ -128,9 +149,10 @@ Current controls include:
 - workspace membership checks for task reads/writes
 - reset-token invalidation and session invalidation after password reset/password change
 - authenticated email verification with per-user attempt caps
-- route-specific rate limiting, including login account throttling and invite throttling
+- background email dispatch so reset/verify response time can't be used to enumerate accounts
+- route-specific rate limiting; the per-account login limit counts only failed attempts, and password changes are throttled
 - strict CSP/HSTS/security headers
-- SurrealQL variable binding for user input
+- SurrealQL variable binding for user input, unit-tested for injection escaping
 - path traversal protection for static assets
 - SMTP credentials stored only in `.env`; CI secret scanning blocks new leaks
 - systemd sandboxing for the deployed process
@@ -144,11 +166,13 @@ src/
   services/             auth and email services
   db/                   SurrealDB repository and HTTP client
   util/                 HTTP helpers, validation, rate limiting, logging
-frontend/src/main.zig   WASM frontend module
-public/                 HTML, CSS, JS, generated WASM
+frontend/src/main.zig   WASM module backing anonymous tasks
+public/                 HTML, CSS, JS, SVG favicon, generated WASM
 scripts/check.sh        local verification entry point
 scripts/smoke_test.sh   optional API smoke tests
 docs/                   deployment, architecture, roadmap, OpenAPI, portfolio
+Dockerfile              multi-stage build (Zig builder + slim runtime)
+docker-compose.yml      app + SurrealDB stack
 ```
 
 ## Roadmap
