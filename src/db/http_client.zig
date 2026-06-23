@@ -4,6 +4,7 @@
 // PERFORMANCE: Uses thread-local client for Keep-Alive connection reuse
 
 const std = @import("std");
+const log = @import("../util/log.zig");
 const config = @import("../config/config.zig");
 
 // Retry configuration
@@ -90,7 +91,7 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
     while (attempt < MAX_RETRIES) : (attempt += 1) {
         // Get thread-local client
         const client = getThreadLocalClient() catch |err| {
-            std.debug.print("❌ Failed to get HTTP client: {}\n", .{err});
+            log.warn("❌ Failed to get HTTP client: {}", .{err});
             return err;
         };
 
@@ -114,7 +115,7 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
             .response_writer = &response_writer.writer,
         }) catch |err| {
             last_error = err;
-            std.debug.print("⚠️ DB attempt {d}/{d} failed: {}\n", .{ attempt + 1, MAX_RETRIES, err });
+            log.warn("⚠️ DB attempt {d}/{d} failed: {}", .{ attempt + 1, MAX_RETRIES, err });
 
             // If connection failed, maybe we need to reset the client?
             // std.http.Client handles this mostly, but if it's stuck, we might want to deinit and null it.
@@ -135,7 +136,7 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
             return raw_response;
         } else if (@intFromEnum(status) >= 500) {
             // Server error - retry
-            std.debug.print("⚠️ DB attempt {d}/{d}: HTTP {d}\n", .{ attempt + 1, MAX_RETRIES, @intFromEnum(status) });
+            log.warn("⚠️ DB attempt {d}/{d}: HTTP {d}", .{ attempt + 1, MAX_RETRIES, @intFromEnum(status) });
             last_error = HttpError.ServerError;
 
             if (attempt < MAX_RETRIES - 1) {
@@ -143,16 +144,16 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
             }
         } else {
             // Client error (4xx) - don't retry
-            std.debug.print("❌ DB query error: HTTP {d}\n", .{@intFromEnum(status)});
+            log.warn("❌ DB query error: HTTP {d}", .{@intFromEnum(status)});
             const body = response_writer.writer.buffer;
             const preview_len = @min(body.len, 200);
-            std.debug.print("   Response: {s}\n", .{body[0..preview_len]});
+            log.warn("   Response: {s}", .{body[0..preview_len]});
             return HttpError.RequestFailed;
         }
     }
 
     // All retries exhausted
-    std.debug.print("❌ DB query failed after {d} attempts\n", .{MAX_RETRIES});
+    log.warn("❌ DB query failed after {d} attempts", .{MAX_RETRIES});
     return last_error orelse HttpError.ConnectionFailed;
 }
 
@@ -179,12 +180,12 @@ fn validateSurrealResponse(allocator: std.mem.Allocator, raw_response: []const u
                         switch (result_value) {
                             .string => |msg| {
                                 const preview_len = @min(msg.len, 300);
-                                std.debug.print("❌ SurrealDB query error: {s}\n", .{msg[0..preview_len]});
+                                log.warn("❌ SurrealDB query error: {s}", .{msg[0..preview_len]});
                             },
-                            else => std.debug.print("❌ SurrealDB query returned status {s}\n", .{status}),
+                            else => log.warn("❌ SurrealDB query returned status {s}", .{status}),
                         }
                     } else {
-                        std.debug.print("❌ SurrealDB query returned status {s}\n", .{status});
+                        log.warn("❌ SurrealDB query returned status {s}", .{status});
                     }
                     return HttpError.QueryError;
                 }
@@ -239,10 +240,10 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
             try writer.writeAll("\";\n");
         } else if (@typeInfo(FieldType) == .int or @typeInfo(FieldType) == .comptime_int) {
             // Integer: write directly
-            try writer.print("{d};\n", .{value});
+            try writer.print("{d};", .{value});
         } else if (@typeInfo(FieldType) == .bool) {
             // Boolean
-            try writer.print("{s};\n", .{if (value) "true" else "false"});
+            try writer.print("{s};", .{if (value) "true" else "false"});
         } else if (@typeInfo(FieldType) == .optional) {
             // Optional: write NONE if null, otherwise escape as string.
             if (value) |v| {

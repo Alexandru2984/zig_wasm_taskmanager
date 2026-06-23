@@ -27,6 +27,9 @@ pub fn main() !void {
 
     allocator = app.allocator();
 
+    // Apply the configured log level (defaults to info) before anything noisy.
+    if (config.get("LOG_LEVEL")) |lvl| log.setLevelFromString(lvl);
+
     // Initialize SurrealDB schema, waiting for the DB to accept connections.
     // On a fresh `docker compose up` the database may not be ready the instant
     // the app boots, so retry a bounded number of times before giving up.

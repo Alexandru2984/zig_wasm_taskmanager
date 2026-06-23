@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../util/log.zig");
 const zap = @import("zap");
 const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
@@ -125,7 +126,7 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     // can't exfiltrate it.
     http.setAuthCookie(r, token);
     db.logActivity(req_alloc, user.id, "signup", "user", user.id) catch |err| {
-        std.debug.print("Failed to log signup activity: {}\n", .{err});
+        log.warn("Failed to log signup activity: {}", .{err});
     };
 
     const response = models.AuthResponse{
@@ -214,7 +215,7 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     // SECURITY: session lives in the HttpOnly cookie only (see signup note).
     http.setAuthCookie(r, token);
     db.logActivity(req_alloc, user.id, "login", "session", "") catch |err| {
-        std.debug.print("Failed to log login activity: {}\n", .{err});
+        log.warn("Failed to log login activity: {}", .{err});
     };
 
     const response = models.AuthResponse{
@@ -318,7 +319,7 @@ pub fn handleVerifyEmail(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     }
 
     db.logActivity(req_alloc, user_id, "verify_email", "user", user_id) catch |err| {
-        std.debug.print("Failed to log email verification activity: {}\n", .{err});
+        log.warn("Failed to log email verification activity: {}", .{err});
     };
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "Email verified successfully" });
@@ -445,7 +446,7 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 
     // SECURITY: force re-login on all devices after a password reset.
     db.deleteUserSessions(req_alloc, user.id) catch |err| {
-        std.debug.print("Failed to invalidate sessions for {s}: {}\n", .{ user.id, err });
+        log.warn("Failed to invalidate sessions for {s}: {}", .{ user.id, err });
     };
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "Password reset successfully" });
@@ -469,13 +470,13 @@ pub fn handleLogout(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 
     if (token_opt) |token| {
         db.deleteSession(req_alloc, token) catch |err| {
-            std.debug.print("Failed to delete session: {}\n", .{err});
+            log.warn("Failed to delete session: {}", .{err});
         };
     }
 
     if (user_id_opt) |user_id| {
         db.logActivity(req_alloc, user_id, "logout", "session", "") catch |err| {
-            std.debug.print("Failed to log logout activity: {}\n", .{err});
+            log.warn("Failed to log logout activity: {}", .{err});
         };
     }
 
@@ -537,7 +538,7 @@ pub fn handleResendVerification(r: zap.Request, req_alloc: std.mem.Allocator) !v
     email.enqueueConfirmation(user.email, user.name, verification_code);
 
     db.logActivity(req_alloc, user_id, "resend_verification", "user", user_id) catch |err| {
-        std.debug.print("Failed to log resend verification activity: {}\n", .{err});
+        log.warn("Failed to log resend verification activity: {}", .{err});
     };
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "Verification code sent" });

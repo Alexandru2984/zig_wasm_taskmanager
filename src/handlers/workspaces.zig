@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../util/log.zig");
 const zap = @import("zap");
 const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
@@ -75,7 +76,7 @@ pub fn createWorkspace(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 
     const workspace = parsed.value[0].result[0];
     db.logActivity(req_alloc, user_id, "create_workspace", "workspace", workspace.id) catch |err| {
-        std.debug.print("Failed to log workspace activity: {}\n", .{err});
+        log.warn("Failed to log workspace activity: {}", .{err});
     };
 
     try http.jsonCreated(r, models.WorkspaceResponse{
@@ -183,15 +184,15 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
     const invite = parsed_invite.value[0].result[0];
 
     email.sendWorkspaceInviteEmail(req_alloc, request.email, workspace.name, token[0..]) catch |err| {
-        std.debug.print("Failed to send workspace invite: {}\n", .{err});
+        log.warn("Failed to send workspace invite: {}", .{err});
         db.deleteWorkspaceInviteById(req_alloc, invite.id) catch |delete_err| {
-            std.debug.print("Failed to delete unsent workspace invite: {}\n", .{delete_err});
+            log.warn("Failed to delete unsent workspace invite: {}", .{delete_err});
         };
         try http.jsonError(r, 502, "Failed to send invite email");
         return;
     };
     db.logActivity(req_alloc, user_id, "invite_workspace_member", "workspace", workspace_id) catch |err| {
-        std.debug.print("Failed to log invite activity: {}\n", .{err});
+        log.warn("Failed to log invite activity: {}", .{err});
     };
 
     try http.jsonCreated(r, models.WorkspaceInviteResponse{
@@ -277,10 +278,10 @@ pub fn acceptInvite(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     };
     db.markWorkspaceInviteAccepted(req_alloc, invite.id, now) catch |err| {
-        std.debug.print("Failed to mark invite accepted: {}\n", .{err});
+        log.warn("Failed to mark invite accepted: {}", .{err});
     };
     db.logActivity(req_alloc, user_id, "accept_workspace_invite", "workspace", invite.workspace_id) catch |err| {
-        std.debug.print("Failed to log accept invite activity: {}\n", .{err});
+        log.warn("Failed to log accept invite activity: {}", .{err});
     };
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "invite accepted" });

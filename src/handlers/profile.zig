@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../util/log.zig");
 const zap = @import("zap");
 const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
@@ -59,7 +60,7 @@ pub fn updateProfile(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     };
     db.logActivity(req_alloc, user_id, "update_profile", "user", user_id) catch |err| {
-        std.debug.print("Failed to log profile activity: {}\n", .{err});
+        log.warn("Failed to log profile activity: {}", .{err});
     };
 
     // Return updated profile
@@ -171,7 +172,7 @@ pub fn changePassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     defer req_alloc.free(new_token);
     http.setAuthCookie(r, new_token);
     db.logActivity(req_alloc, user_id, "change_password", "user", user_id) catch |err| {
-        std.debug.print("Failed to log password activity: {}\n", .{err});
+        log.warn("Failed to log password activity: {}", .{err});
     };
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "Password updated successfully" });

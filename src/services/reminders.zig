@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../util/log.zig");
 const config = @import("../config/config.zig");
 const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
@@ -24,13 +25,13 @@ fn processDueReminders(allocator: std.mem.Allocator) !void {
         const due_date = task.due_date orelse continue;
 
         const user_result = db.getUserById(allocator, task.user_id) catch |err| {
-            std.debug.print("Reminder skipped; failed to load user for task {s}: {}\n", .{ task.id, err });
+            log.warn("Reminder skipped; failed to load user for task {s}: {}", .{ task.id, err });
             continue;
         };
         defer allocator.free(user_result);
 
         const parsed_users = std.json.parseFromSlice([]models.SurrealResponse(models.User), allocator, user_result, .{ .ignore_unknown_fields = true }) catch |err| {
-            std.debug.print("Reminder skipped; invalid user payload for task {s}: {}\n", .{ task.id, err });
+            log.warn("Reminder skipped; invalid user payload for task {s}: {}", .{ task.id, err });
             continue;
         };
         defer parsed_users.deinit();
@@ -39,12 +40,12 @@ fn processDueReminders(allocator: std.mem.Allocator) !void {
         const user = parsed_users.value[0].result[0];
 
         email.sendTaskReminderEmail(allocator, user.email, user.name, task.title, due_date) catch |err| {
-            std.debug.print("Reminder email failed for task {s}: {}\n", .{ task.id, err });
+            log.warn("Reminder email failed for task {s}: {}", .{ task.id, err });
             continue;
         };
 
         db.markTaskReminderSent(allocator, task.id) catch |err| {
-            std.debug.print("Reminder sent but marker update failed for task {s}: {}\n", .{ task.id, err });
+            log.warn("Reminder sent but marker update failed for task {s}: {}", .{ task.id, err });
         };
     }
 }
@@ -53,7 +54,7 @@ fn reminderLoop(allocator: std.mem.Allocator) void {
     while (reminder_running.load(.acquire)) {
         var arena = std.heap.ArenaAllocator.init(allocator);
         processDueReminders(arena.allocator()) catch |err| {
-            std.debug.print("Reminder cycle failed: {}\n", .{err});
+            log.warn("Reminder cycle failed: {}", .{err});
         };
         arena.deinit();
 
@@ -68,7 +69,7 @@ pub fn startReminderThread(allocator: std.mem.Allocator) !void {
     if (!enabled() or reminder_thread != null) return;
     reminder_running.store(true, .release);
     reminder_thread = try std.Thread.spawn(.{}, reminderLoop, .{allocator});
-    std.debug.print("✅ Task reminder thread started\n", .{});
+    log.info("Task reminder thread started", .{});
 }
 
 pub fn stopReminderThread() void {
@@ -76,6 +77,6 @@ pub fn stopReminderThread() void {
         reminder_running.store(false, .release);
         thread.join();
         reminder_thread = null;
-        std.debug.print("🛑 Task reminder thread stopped\n", .{});
+        log.info("Task reminder thread stopped", .{});
     }
 }

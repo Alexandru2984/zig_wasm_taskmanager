@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("../util/log.zig");
 const zap = @import("zap");
 const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
@@ -120,7 +121,7 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     }
     const task = parsed.value[0].result[0];
     db.logActivity(req_alloc, user_id, "create_task", "task", task.id) catch |err| {
-        std.debug.print("Failed to log create task activity: {}\n", .{err});
+        log.warn("Failed to log create task activity: {}", .{err});
     };
 
     const response = models.TaskResponse{
@@ -171,7 +172,7 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
     }
     const task = parsed.value[0].result[0];
     db.logActivity(req_alloc, user_id, "toggle_task", "task", task.id) catch |err| {
-        std.debug.print("Failed to log toggle task activity: {}\n", .{err});
+        log.warn("Failed to log toggle task activity: {}", .{err});
     };
 
     const response = models.TaskResponse{
@@ -210,7 +211,7 @@ pub fn deleteTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         return;
     };
     db.logActivity(req_alloc, user_id, "delete_task", "task", task_id) catch |err| {
-        std.debug.print("Failed to log delete task activity: {}\n", .{err});
+        log.warn("Failed to log delete task activity: {}", .{err});
     };
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "success" });

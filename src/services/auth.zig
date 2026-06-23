@@ -2,6 +2,7 @@
 // SECURITY: Uses Argon2id for password hashing (industry standard)
 const std = @import("std");
 const config = @import("../config/config.zig");
+const log = @import("../util/log.zig");
 
 // Argon2id parameters (OWASP recommendations for password hashing)
 const ARGON2_T_COST = 3; // Time cost (iterations)
@@ -36,7 +37,7 @@ pub fn hashPassword(allocator: std.mem.Allocator, password: []const u8) ![]u8 {
         },
         .argon2id,
     ) catch |err| {
-        std.debug.print("Argon2 KDF error: {}\n", .{err});
+        log.err("Argon2 KDF error: {}", .{err});
         return error.HashingFailed;
     };
 
@@ -120,7 +121,7 @@ fn verifyLegacyPassword(allocator: std.mem.Allocator, stored_hash: []const u8, p
     // that might still exist simply fails to verify — the user must reset their
     // password. This is safer than silently falling back to a well-known secret.
     const SECRET = config.get("LEGACY_SECRET") orelse {
-        std.debug.print("⚠️ LEGACY_SECRET not set — legacy hash verification disabled\n", .{});
+        log.warn("LEGACY_SECRET not set — legacy hash verification disabled", .{});
         return false;
     };
 

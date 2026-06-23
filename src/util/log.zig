@@ -16,6 +16,20 @@ pub fn setLevel(level: Level) void {
     min_level = level;
 }
 
+/// Set the minimum level from a string (e.g. the LOG_LEVEL env var). Unknown
+/// values are ignored, leaving the current level untouched.
+pub fn setLevelFromString(s: []const u8) void {
+    if (std.ascii.eqlIgnoreCase(s, "debug")) {
+        min_level = .debug;
+    } else if (std.ascii.eqlIgnoreCase(s, "info")) {
+        min_level = .info;
+    } else if (std.ascii.eqlIgnoreCase(s, "warn") or std.ascii.eqlIgnoreCase(s, "warning")) {
+        min_level = .warn;
+    } else if (std.ascii.eqlIgnoreCase(s, "err") or std.ascii.eqlIgnoreCase(s, "error")) {
+        min_level = .err;
+    }
+}
+
 fn shouldLog(level: Level) bool {
     return @intFromEnum(level) >= @intFromEnum(min_level);
 }
