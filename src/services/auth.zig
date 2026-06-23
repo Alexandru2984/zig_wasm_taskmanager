@@ -184,3 +184,32 @@ pub fn generateVerificationCode(allocator: std.mem.Allocator) ![]u8 {
 pub fn burnTime(allocator: std.mem.Allocator, password: []const u8) void {
     _ = verifyPassword(allocator, DUMMY_ARGON2_HASH, password) catch {};
 }
+
+// ---------- Tests ----------
+
+test "hashPassword produces a verifiable Argon2id hash" {
+    const a = std.testing.allocator;
+    const hash = try hashPassword(a, "correct horse battery staple");
+    defer a.free(hash);
+
+    try std.testing.expect(std.mem.startsWith(u8, hash, "$argon2id$"));
+    try std.testing.expect(!isLegacyHash(hash));
+    try std.testing.expect(try verifyPassword(a, hash, "correct horse battery staple"));
+    try std.testing.expect(!try verifyPassword(a, hash, "wrong password"));
+}
+
+test "isLegacyHash flags non-Argon2 hashes" {
+    try std.testing.expect(isLegacyHash("deadbeefcafef00d"));
+    try std.testing.expect(!isLegacyHash("$argon2id$abc$def"));
+}
+
+test "generateResetToken returns 64 lowercase hex chars" {
+    const a = std.testing.allocator;
+    const tok = try generateResetToken(a);
+    defer a.free(tok);
+
+    try std.testing.expectEqual(@as(usize, 64), tok.len);
+    for (tok) |c| {
+        try std.testing.expect((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'));
+    }
+}

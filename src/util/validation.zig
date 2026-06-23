@@ -209,3 +209,30 @@ test "validatePasswordStrength" {
     try std.testing.expect(!result4.valid);
     try std.testing.expect(result4.weak);
 }
+
+test "validateHexToken64" {
+    try std.testing.expect(validateHexToken64("a" ** 64));
+    try std.testing.expect(validateHexToken64("0123456789abcdef" ** 4));
+    try std.testing.expect(!validateHexToken64("a" ** 63)); // too short
+    try std.testing.expect(!validateHexToken64("g" ** 64)); // non-hex char
+}
+
+test "validateName rejects markup and SQL metacharacters" {
+    try std.testing.expect(validateName("Jane Doe"));
+    try std.testing.expect(validateName("Tom & Jerry"));
+    try std.testing.expect(!validateName(""));
+    try std.testing.expect(!validateName("<script>"));
+    try std.testing.expect(!validateName("a'b"));
+    try std.testing.expect(!validateName("a;b"));
+}
+
+test "role and priority validators are allow-lists" {
+    try std.testing.expect(validateTaskPriority("low"));
+    try std.testing.expect(validateTaskPriority("high"));
+    try std.testing.expect(!validateTaskPriority("urgent"));
+
+    try std.testing.expect(validateWorkspaceInviteRole("member"));
+    try std.testing.expect(validateWorkspaceInviteRole("viewer"));
+    // "owner" must not be assignable via an invite.
+    try std.testing.expect(!validateWorkspaceInviteRole("owner"));
+}

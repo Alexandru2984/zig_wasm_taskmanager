@@ -198,14 +198,35 @@ fn validateSurrealResponse(allocator: std.mem.Allocator, raw_response: []const u
 /// Execute SQL query with bind variables (SECURE - prevents SQL injection)
 /// Variables are passed as a struct with field names matching $variable names in query
 /// Example: queryWithVars(alloc, "SELECT * FROM users WHERE email = $email", .{ .email = "test@example.com" })
-pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []const u8, vars: anytype) ![]u8 {
-    // Build the full query with LET statements for each variable
+/// Append a SurrealQL double-quoted string literal, escaping everything that
+/// could break out of the quotes. SECURITY: this is the core anti-injection
+/// step — control bytes are \u-encoded and NUL is rejected (fail closed).
+fn writeEscapedString(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x00 => return error.InvalidInput,
+            0x01...0x08, 0x0B, 0x0C, 0x0E...0x1F, 0x7F => try writer.print("\\u{x:0>4}", .{c}),
+            else => try writer.writeByte(c),
+        }
+    }
+    try writer.writeAll("\";\n");
+}
+
+/// Build the full SurrealQL string for a parameterized query: a `LET $x = ...`
+/// prefix per bind variable, followed by the template. Kept separate from
+/// execution so the escaping can be unit-tested without a live database.
+fn buildVarsQuery(allocator: std.mem.Allocator, query_template: []const u8, vars: anytype) ![]u8 {
     var query_builder = std.ArrayListUnmanaged(u8){};
     defer query_builder.deinit(allocator);
 
     const writer = query_builder.writer(allocator);
 
-    // Iterate over struct fields and create LET statements
     const VarsType = @TypeOf(vars);
     const fields = @typeInfo(VarsType).@"struct".fields;
 
@@ -213,56 +234,17 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
         const value = @field(vars, field.name);
         const FieldType = @TypeOf(value);
 
-        // Write: LET $fieldname = <value>;
         try writer.print("LET ${s} = ", .{field.name});
 
-        // Handle different types
         if (FieldType == []const u8 or FieldType == []u8) {
-            // String: escape and quote. SECURITY: cover NUL + all control bytes,
-            // and reject lone surrogates/bytes >0x7F we can't safely pass
-            // through. Anything that slips past escape becomes injection, so we
-            // prefer to fail closed on control characters.
-            try writer.writeByte('"');
-            for (value) |c| {
-                switch (c) {
-                    '"' => try writer.writeAll("\\\""),
-                    '\\' => try writer.writeAll("\\\\"),
-                    '\n' => try writer.writeAll("\\n"),
-                    '\r' => try writer.writeAll("\\r"),
-                    '\t' => try writer.writeAll("\\t"),
-                    0x00 => return error.InvalidInput,
-                    0x01...0x08, 0x0B, 0x0C, 0x0E...0x1F, 0x7F => {
-                        try writer.print("\\u{x:0>4}", .{c});
-                    },
-                    else => try writer.writeByte(c),
-                }
-            }
-            try writer.writeAll("\";\n");
+            try writeEscapedString(writer, value);
         } else if (@typeInfo(FieldType) == .int or @typeInfo(FieldType) == .comptime_int) {
-            // Integer: write directly
-            try writer.print("{d};", .{value});
+            try writer.print("{d};\n", .{value});
         } else if (@typeInfo(FieldType) == .bool) {
-            // Boolean
-            try writer.print("{s};", .{if (value) "true" else "false"});
+            try writer.print("{s};\n", .{if (value) "true" else "false"});
         } else if (@typeInfo(FieldType) == .optional) {
-            // Optional: write NONE if null, otherwise escape as string.
             if (value) |v| {
-                try writer.writeByte('"');
-                for (v) |c| {
-                    switch (c) {
-                        '"' => try writer.writeAll("\\\""),
-                        '\\' => try writer.writeAll("\\\\"),
-                        '\n' => try writer.writeAll("\\n"),
-                        '\r' => try writer.writeAll("\\r"),
-                        '\t' => try writer.writeAll("\\t"),
-                        0x00 => return error.InvalidInput,
-                        0x01...0x08, 0x0B, 0x0C, 0x0E...0x1F, 0x7F => {
-                            try writer.print("\\u{x:0>4}", .{c});
-                        },
-                        else => try writer.writeByte(c),
-                    }
-                }
-                try writer.writeAll("\";\n");
+                try writeEscapedString(writer, v);
             } else {
                 try writer.writeAll("NONE;\n");
             }
@@ -278,29 +260,29 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
             try writer.writeAll("\";\n");
         } else {
             // SECURITY: refuse to bind any type we don't have an explicit,
-            // escaped encoding for. A silent {any} fallback could emit an
-            // unescaped value straight into the query (injection). This fires
-            // at compile time only if a call site actually uses such a type.
+            // escaped encoding for. A silent fallback could emit an unescaped
+            // value straight into the query. Fires at compile time only if a
+            // call site actually uses such a type.
             @compileError("queryWithVars: unsupported bind type " ++ @typeName(FieldType));
         }
     }
 
-    // Append the actual query template
     try writer.writeAll(query_template);
+    return try query_builder.toOwnedSlice(allocator);
+}
 
-    // Execute the complete query
-    const full_query = try query_builder.toOwnedSlice(allocator);
+/// Execute SQL query with bind variables (SECURE - prevents SQL injection).
+/// Variables are passed as a struct with field names matching $variable names.
+/// Example: queryWithVars(alloc, "SELECT * FROM users WHERE email = $email", .{ .email = "a@b.c" })
+pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []const u8, vars: anytype) ![]u8 {
+    const full_query = try buildVarsQuery(allocator, query_template, vars);
     defer allocator.free(full_query);
 
     const raw_response = try executeQuery(allocator, full_query);
     defer allocator.free(raw_response);
 
-    // Post-process: When using LET statements, SurrealDB returns multiple results.
-    // The first N-1 are LET results (with result: null), the last is the actual query result.
-    // We need to extract only the last result to maintain compatibility with existing parsers.
-    // Raw response looks like: [{...}, {...}, {...last...}]
-    // We want to return: [{...last...}]
-
+    // With LET prefixes SurrealDB returns one result per statement; keep only
+    // the last (the actual query), matching what the callers' parsers expect.
     return try extractLastSurrealResult(allocator, raw_response);
 }
 
@@ -346,4 +328,38 @@ test "extractLastSurrealResult keeps the final statement result" {
     defer allocator.free(result);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"id\":\"users:1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\"result\":null") == null);
+}
+
+test "buildVarsQuery escapes injection attempts in string values" {
+    const allocator = std.testing.allocator;
+    const payload: []const u8 = "x\" OR true; --";
+    const q = try buildVarsQuery(allocator, "SELECT * FROM users WHERE email = $email;", .{ .email = payload });
+    defer allocator.free(q);
+    // The closing quote in the payload must be escaped so it can't end the literal.
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $email = \"x\\\" OR true; --\";") != null);
+    // The template is appended verbatim after the LET prefix.
+    try std.testing.expect(std.mem.endsWith(u8, q, "SELECT * FROM users WHERE email = $email;"));
+}
+
+test "buildVarsQuery rejects NUL bytes (fail closed)" {
+    const allocator = std.testing.allocator;
+    const nul: []const u8 = "a\x00b";
+    try std.testing.expectError(error.InvalidInput, buildVarsQuery(allocator, "X", .{ .v = nul }));
+}
+
+test "buildVarsQuery escapes control bytes" {
+    const allocator = std.testing.allocator;
+    const ctrl: []const u8 = "a\x01b";
+    const q = try buildVarsQuery(allocator, "Q", .{ .v = ctrl });
+    defer allocator.free(q);
+    try std.testing.expect(std.mem.indexOf(u8, q, "\\u0001") != null);
+}
+
+test "buildVarsQuery encodes ints, bools and NONE optionals" {
+    const allocator = std.testing.allocator;
+    const q = try buildVarsQuery(allocator, "Q", .{ .n = @as(i64, 42), .b = true, .opt = @as(?[]const u8, null) });
+    defer allocator.free(q);
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $n = 42;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $b = true;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $opt = NONE;") != null);
 }

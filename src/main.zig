@@ -17,6 +17,16 @@ const workspaces_handler = @import("handlers/workspaces.zig");
 const reminders = @import("services/reminders.zig");
 const email = @import("services/email.zig");
 
+// Test aggregator: `zig build test` runs tests in the root file only, so pull
+// in every module that has unit tests. Without this they silently never run.
+test {
+    _ = @import("config/config.zig");
+    _ = @import("util/validation.zig");
+    _ = @import("util/rate_limiter.zig");
+    _ = @import("db/http_client.zig");
+    _ = @import("services/auth.zig");
+}
+
 // Global allocator (will use GPA from app module)
 var allocator: std.mem.Allocator = undefined;
 

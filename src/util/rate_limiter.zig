@@ -261,3 +261,35 @@ pub fn deinitAll() void {
     workspace_invite_limiter = null;
     password_change_limiter = null;
 }
+
+// ---------- Tests ----------
+
+test "isAllowed permits up to max then blocks, per key" {
+    var rl = RateLimiter.init(std.testing.allocator, .{ .max_requests = 3, .window_seconds = 60 });
+    defer rl.deinit();
+
+    try std.testing.expect(rl.isAllowed("a"));
+    try std.testing.expect(rl.isAllowed("a"));
+    try std.testing.expect(rl.isAllowed("a"));
+    try std.testing.expect(!rl.isAllowed("a")); // 4th over the limit
+    // A different key keeps its own budget.
+    try std.testing.expect(rl.isAllowed("b"));
+}
+
+test "peek does not consume budget but reflects exhaustion" {
+    var rl = RateLimiter.init(std.testing.allocator, .{ .max_requests = 2, .window_seconds = 60 });
+    defer rl.deinit();
+
+    // Peeking repeatedly must not use up the budget.
+    try std.testing.expect(rl.peek("k"));
+    try std.testing.expect(rl.peek("k"));
+    try std.testing.expect(rl.peek("k"));
+
+    // Full budget is still available.
+    try std.testing.expect(rl.isAllowed("k"));
+    try std.testing.expect(rl.isAllowed("k"));
+    try std.testing.expect(!rl.isAllowed("k"));
+
+    // Once exhausted, peek reports blocked too.
+    try std.testing.expect(!rl.peek("k"));
+}
