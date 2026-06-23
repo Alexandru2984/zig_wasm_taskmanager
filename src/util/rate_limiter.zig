@@ -77,6 +77,23 @@ pub const RateLimiter = struct {
         }
     }
 
+    /// Check whether a request would currently be allowed WITHOUT consuming
+    /// budget. Pair with isAllowed() on the failure path when you only want to
+    /// count failures (e.g. failed logins) so success never burns the budget.
+    pub fn peek(self: *RateLimiter, ip: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const now = std.time.timestamp();
+        const window_size: i64 = @intCast(self.config.window_seconds);
+
+        if (self.map.get(ip)) |state| {
+            if (now - state.window_start >= window_size) return true; // window expired
+            return state.count < self.config.max_requests;
+        }
+        return true;
+    }
+
     /// Get remaining requests for an IP
     pub fn getRemaining(self: *RateLimiter, ip: []const u8) u32 {
         self.mutex.lock();

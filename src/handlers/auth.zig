@@ -162,8 +162,12 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 401, "Invalid credentials");
         return;
     }
+    // SECURITY: only failed attempts count against the per-account limit (see
+    // the isAllowed calls on the failure paths below). A correct login never
+    // consumes budget, so a user who eventually types the right password isn't
+    // throttled by their own earlier typos.
     if (rate_limiter.login_account_limiter) |*limiter| {
-        if (!limiter.isAllowed(request.email)) {
+        if (!limiter.peek(request.email)) {
             r.setHeader("Retry-After", "300") catch {};
             try http.jsonError(r, 429, "Too many login attempts for this account. Please wait 5 minutes.");
             return;
@@ -184,6 +188,7 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         // SECURITY: equalize timing with the real-user path so attackers can't
         // probe which emails are registered by measuring response latency.
         auth.burnTime(req_alloc, request.password);
+        if (rate_limiter.login_account_limiter) |*limiter| _ = limiter.isAllowed(request.email);
         try http.jsonError(r, 401, "Invalid credentials");
         return;
     }
@@ -192,6 +197,7 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     // Verify password
     const valid = auth.verifyPassword(req_alloc, user.password_hash, request.password) catch false;
     if (!valid) {
+        if (rate_limiter.login_account_limiter) |*limiter| _ = limiter.isAllowed(request.email);
         try http.jsonError(r, 401, "Invalid credentials");
         return;
     }
