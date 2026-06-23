@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const config = @import("../config/config.zig");
-const app = @import("../app.zig");
 
 // Retry configuration
 const MAX_RETRIES: u8 = 3;
@@ -63,8 +62,11 @@ threadlocal var tl_client: ?std.http.Client = null;
 fn getThreadLocalClient() !*std.http.Client {
     if (tl_client) |*c| return c;
 
-    // Initialize with global allocator (must persist across requests)
-    tl_client = std.http.Client{ .allocator = app.allocator() };
+    // The pooled connections live for the whole life of the worker thread, not
+    // for any single request. Back them with the process-wide smp allocator
+    // (thread-safe, reclaimed by the OS at exit) instead of the request-tracking
+    // GPA, so the keep-alive pool isn't flagged as a leak on shutdown.
+    tl_client = std.http.Client{ .allocator = std.heap.smp_allocator };
     return &tl_client.?;
 }
 
