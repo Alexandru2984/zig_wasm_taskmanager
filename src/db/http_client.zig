@@ -274,8 +274,11 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
             try writer.writeAll(&value);
             try writer.writeAll("\";\n");
         } else {
-            // Unknown type - try to print as-is
-            try writer.print("{any};\n", .{value});
+            // SECURITY: refuse to bind any type we don't have an explicit,
+            // escaped encoding for. A silent {any} fallback could emit an
+            // unescaped value straight into the query (injection). This fires
+            // at compile time only if a call site actually uses such a type.
+            @compileError("queryWithVars: unsupported bind type " ++ @typeName(FieldType));
         }
     }
 
