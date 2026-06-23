@@ -20,7 +20,12 @@ COPY build.zig build.zig.zon ./
 COPY src ./src
 COPY frontend ./frontend
 COPY public ./public
-RUN zig build -Doptimize=ReleaseSafe
+# zap links facil.io as a shared library that lives only in the build cache,
+# so stage the binary together with libfacil.io.so for the runtime image.
+RUN zig build -Doptimize=ReleaseSafe \
+    && mkdir -p /out/bin /out/lib \
+    && cp zig-out/bin/taskmanager /out/bin/taskmanager \
+    && cp "$(find .zig-cache -name 'libfacil.io.so' | head -n1)" /out/lib/libfacil.io.so
 
 # ---------- runtime stage ----------
 FROM debian:bookworm-slim AS runtime
@@ -32,15 +37,18 @@ RUN apt-get update \
     && useradd --system --uid 10001 --create-home --home-dir /app app
 
 WORKDIR /app
-COPY --from=build /src/zig-out/bin/taskmanager /app/taskmanager
+COPY --from=build /out/bin/taskmanager /app/taskmanager
+COPY --from=build /out/lib/ /app/lib/
 COPY --from=build /src/public /app/public
 
 USER app
 EXPOSE 9000
 
 # Listen on all interfaces inside the container; the host maps the port.
+# LD_LIBRARY_PATH lets the binary find libfacil.io.so staged above.
 ENV INTERFACE=0.0.0.0 \
-    PORT=9000
+    PORT=9000 \
+    LD_LIBRARY_PATH=/app/lib
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:9000/api/health" || exit 1
