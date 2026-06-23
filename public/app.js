@@ -1,33 +1,75 @@
-// Zig Task Manager - JavaScript with Auth
-// Logged users: tasks in DB | Anonymous: tasks in localStorage
+// Zig Tasks — front-end controller.
+// Logged-in tasks live in the API; anonymous tasks live client-side.
+// SECURITY: auth is carried only by the HttpOnly session cookie. We never read
+// or store the session token in JS, so an XSS cannot exfiltrate it.
 
 let wasm = null;
 let wasmMemory = null;
 let currentUser = null;
 
-// DOM Elements
-const taskForm = document.getElementById('taskForm');
-const taskInput = document.getElementById('taskInput');
-const taskPriority = document.getElementById('taskPriority');
-const taskList = document.getElementById('taskList');
-const emptyState = document.getElementById('emptyState');
-const totalCount = document.getElementById('totalCount');
-const completedCount = document.getElementById('completedCount');
-const authButtons = document.getElementById('authButtons');
-const userMenu = document.getElementById('userMenu');
-const userName = document.getElementById('userName');
-const userEmail = document.getElementById('userEmail');
-const userAvatar = document.getElementById('userAvatar');
+const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+let lastFocused = null;
 
-// ============ AUTH FUNCTIONS ============
+// ============ THEME ============
 
-// Loading state helpers - prevent double-submit on buttons
+function systemTheme() {
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+function currentTheme() {
+    return document.documentElement.getAttribute('data-theme') || systemTheme();
+}
+
+function updateThemeIcon() {
+    const icon = document.getElementById('themeIcon');
+    if (icon) icon.textContent = currentTheme() === 'dark' ? '🌙' : '☀️';
+}
+
+function applyTheme(theme) {
+    const root = document.documentElement;
+    if (theme === 'light' || theme === 'dark') {
+        root.setAttribute('data-theme', theme);
+    } else {
+        root.removeAttribute('data-theme');
+    }
+    updateThemeIcon();
+}
+
+function toggleTheme() {
+    const next = currentTheme() === 'dark' ? 'light' : 'dark';
+    try {
+        localStorage.setItem('theme', next);
+    } catch (_) { /* private mode */ }
+    applyTheme(next);
+    announce(`${next.charAt(0).toUpperCase() + next.slice(1)} theme`);
+}
+
+function initTheme() {
+    let saved = null;
+    try {
+        saved = localStorage.getItem('theme');
+    } catch (_) { /* ignore */ }
+    if (saved === 'light' || saved === 'dark') applyTheme(saved);
+    else updateThemeIcon();
+}
+
+// ============ LIVE ANNOUNCER ============
+
+function announce(message) {
+    const el = document.getElementById('announcer');
+    if (!el) return;
+    el.textContent = '';
+    setTimeout(() => { el.textContent = message; }, 30);
+}
+
+// ============ AUTH HELPERS ============
+
 function setButtonLoading(btn, loading) {
     if (!btn) return;
-    console.log('🔄 Button loading state:', loading, 'Button text:', btn.textContent);
     if (loading) {
         btn.dataset.originalText = btn.textContent;
-        btn.textContent = 'Loading...';
+        btn.textContent = 'Loading…';
         btn.disabled = true;
         btn.classList.add('loading');
     } else {
@@ -59,9 +101,6 @@ function csrfHeaders(headers = {}) {
     return token ? { ...headers, 'X-CSRF-Token': token } : headers;
 }
 
-// SECURITY: auth is carried by the HttpOnly session cookie set by the server.
-// We deliberately do not read or store the token in JS; otherwise any XSS
-// would exfiltrate it. All fetches that need auth must use credentials:'include'.
 async function checkAuth() {
     try {
         const response = await fetch('/api/auth/me', { credentials: 'include' });
@@ -72,61 +111,69 @@ async function checkAuth() {
             showLoggedOut();
         }
     } catch (error) {
-        console.error('Auth check failed:', error);
         showLoggedOut();
     }
 }
 
 function showLoggedIn(user) {
-    authButtons.classList.add('hidden');
-    userMenu.classList.remove('hidden');
-    userName.textContent = user.name;
-    userEmail.textContent = user.email;
-    userAvatar.textContent = user.name.charAt(0).toUpperCase();
+    document.getElementById('authButtons').classList.add('hidden');
+    document.getElementById('userMenu').classList.remove('hidden');
+    document.getElementById('userName').textContent = user.name;
+    document.getElementById('userEmail').textContent = user.email;
+    document.getElementById('userAvatar').textContent = (user.name || '?').charAt(0).toUpperCase();
 
-    // Update Profile Modal
     document.getElementById('profileName').textContent = user.name;
     document.getElementById('profileEmail').textContent = user.email;
-    document.getElementById('profileAvatar').textContent = user.name.charAt(0).toUpperCase();
+    document.getElementById('profileAvatar').textContent = (user.name || '?').charAt(0).toUpperCase();
     document.getElementById('profileNameInput').value = user.name;
 
     const badge = document.getElementById('profileVerified');
+    badge.textContent = '';
     if (user.email_verified) {
-        badge.innerHTML = '<span class="badge badge-success">✅ Verified</span>';
+        const span = document.createElement('span');
+        span.className = 'badge badge-success';
+        span.textContent = '✅ Verified';
+        badge.appendChild(span);
     } else {
-        badge.innerHTML = `
-            <span class="badge badge-warning">⚠️ Not Verified</span>
-            <a href="#" class="verify-now-link" data-action="verify-now">Verify Now</a>
-        `;
+        const span = document.createElement('span');
+        span.className = 'badge badge-warning';
+        span.textContent = '⚠️ Not verified';
+        const link = document.createElement('a');
+        link.href = '#';
+        link.className = 'verify-now-link';
+        link.dataset.action = 'verify-now';
+        link.textContent = 'Verify now';
+        badge.append(span, link);
     }
 }
 
 function showLoggedOut() {
     currentUser = null;
-    authButtons.classList.remove('hidden');
-    userMenu.classList.add('hidden');
+    document.getElementById('authButtons').classList.remove('hidden');
+    document.getElementById('userMenu').classList.add('hidden');
+    closeDropdown();
 }
 
-// ============ LOCAL STORAGE TASKS ============
+// ============ ANONYMOUS TASK STORAGE (localStorage) ============
 
 function getLocalTasks() {
-    const stored = localStorage.getItem('localTasks');
-    return stored ? JSON.parse(stored) : [];
+    try {
+        const stored = localStorage.getItem('localTasks');
+        return stored ? JSON.parse(stored) : [];
+    } catch (_) {
+        return [];
+    }
 }
 
 function saveLocalTasks(tasks) {
-    localStorage.setItem('localTasks', JSON.stringify(tasks));
+    try {
+        localStorage.setItem('localTasks', JSON.stringify(tasks));
+    } catch (_) { /* ignore */ }
 }
 
 function addLocalTask(title, dueDate = null, priority = 'normal') {
     const tasks = getLocalTasks();
-    const newTask = {
-        id: Date.now(),
-        title: title,
-        completed: false,
-        due_date: dueDate,
-        priority
-    };
+    const newTask = { id: Date.now(), title, completed: false, due_date: dueDate, priority };
     tasks.push(newTask);
     saveLocalTasks(tasks);
     return newTask;
@@ -142,34 +189,90 @@ function toggleLocalTask(id) {
 }
 
 function deleteLocalTask(id) {
-    let tasks = getLocalTasks();
-    tasks = tasks.filter(t => t.id !== id);
-    saveLocalTasks(tasks);
+    saveLocalTasks(getLocalTasks().filter(t => t.id !== id));
 }
 
-// ============ MODAL FUNCTIONS ============
+// ============ MODALS ============
+
+function getOpenModal() {
+    return [...document.querySelectorAll('.modal')].find(m => !m.hidden) || null;
+}
 
 function showModal(id) {
-    document.getElementById(id).classList.add('active');
+    const modal = document.getElementById(id);
+    if (!modal) return;
+    lastFocused = document.activeElement;
+    modal.hidden = false;
+    const focusables = [...modal.querySelectorAll(FOCUSABLE)].filter(el => el.offsetParent !== null);
+    (focusables[0] || modal.querySelector('.modal-content')).focus();
 }
 
 function hideModal(id) {
     const modal = document.getElementById(id);
-    modal.classList.remove('active');
-    
-    // Reset any forms in the modal
+    if (!modal) return;
+    modal.hidden = true;
+
     const form = modal.querySelector('form');
     if (form) form.reset();
-    
-    const error = modal.querySelector('.form-error');
-    if (error) error.textContent = '';
-    const success = modal.querySelector('.form-success');
-    if (success) success.classList.add('hidden');
+    modal.querySelectorAll('.form-error').forEach(el => { el.textContent = ''; });
+    modal.querySelectorAll('.form-success').forEach(el => el.classList.add('hidden'));
+    modal.querySelectorAll('.code-input.filled').forEach(el => el.classList.remove('filled'));
+
+    if (lastFocused && document.contains(lastFocused)) lastFocused.focus();
 }
 
 function switchModal(fromId, toId) {
     hideModal(fromId);
     showModal(toId);
+}
+
+function trapFocus(e, modal) {
+    const focusables = [...modal.querySelectorAll(FOCUSABLE)].filter(el => el.offsetParent !== null);
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+    }
+}
+
+// ============ DROPDOWN ============
+
+function dropdownOpen() {
+    const menu = document.getElementById('dropdownMenu');
+    return menu && !menu.hidden;
+}
+
+function setDropdown(open) {
+    const btn = document.getElementById('userBtn');
+    const menu = document.getElementById('dropdownMenu');
+    if (!btn || !menu) return;
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', String(open));
+}
+
+function closeDropdown() {
+    setDropdown(false);
+}
+
+// ============ PROFILE / VERIFICATION ============
+
+function switchProfileTab(tabName, clickedBtn) {
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('active');
+        btn.setAttribute('aria-selected', 'false');
+    });
+    if (clickedBtn) {
+        clickedBtn.classList.add('active');
+        clickedBtn.setAttribute('aria-selected', 'true');
+    }
+    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+    const target = tabName === 'password' ? 'tabPassword' : 'tabEdit';
+    document.getElementById(target).classList.add('active');
 }
 
 // ============ AUTH HANDLERS ============
@@ -191,26 +294,25 @@ async function handleSignup(e) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, email, password })
         });
-
         let data;
         try {
             data = await response.json();
-        } catch (parseError) {
-            errorEl.textContent = 'Server returned invalid response';
+        } catch (_) {
+            errorEl.textContent = 'Server returned an invalid response';
             return;
         }
-
         if (response.ok) {
             currentUser = data.user;
             showLoggedIn(currentUser);
             hideModal('signupModal');
             loadTasks();
             showModal('verifyModal');
+            announce('Account created. Check your email for a verification code.');
         } else {
             errorEl.textContent = data.error || 'Signup failed';
         }
     } catch (error) {
-        errorEl.textContent = 'Connection error: ' + error.message;
+        errorEl.textContent = 'Connection error';
     } finally {
         setButtonLoading(btn, false);
     }
@@ -232,15 +334,13 @@ async function handleLogin(e) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password })
         });
-
         const data = await response.json();
-
         if (response.ok) {
             currentUser = data.user;
             showLoggedIn(currentUser);
             hideModal('loginModal');
-            document.getElementById('loginForm').reset();
             loadTasks();
+            announce('Logged in');
         } else {
             errorEl.textContent = data.error || 'Invalid credentials';
         }
@@ -252,31 +352,17 @@ async function handleLogin(e) {
 }
 
 async function logout() {
+    closeDropdown();
     try {
         await fetch('/api/auth/logout', {
             method: 'POST',
             credentials: 'include',
             headers: csrfHeaders()
         });
-    } catch (err) {
-        console.warn('Server logout failed, clearing client state anyway:', err);
-    }
+    } catch (_) { /* clear client state anyway */ }
     showLoggedOut();
     loadTasks();
-}
-
-// ============ PROFILE & VERIFICATION HANDLERS ============
-
-function switchProfileTab(tabName, clickedBtn) {
-    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-    if (clickedBtn) clickedBtn.classList.add('active');
-
-    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-    if (tabName === 'edit') {
-        document.getElementById('tabEdit').classList.add('active');
-    } else if (tabName === 'password') {
-        document.getElementById('tabPassword').classList.add('active');
-    }
+    announce('Logged out');
 }
 
 async function handleUpdateProfile(e) {
@@ -284,7 +370,6 @@ async function handleUpdateProfile(e) {
     const name = document.getElementById('profileNameInput').value;
     const errorEl = document.getElementById('profileError');
     const successEl = document.getElementById('profileSuccess');
-    
     try {
         const response = await fetch('/api/profile', {
             method: 'PUT',
@@ -292,11 +377,9 @@ async function handleUpdateProfile(e) {
             headers: csrfHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ name })
         });
-        
         if (response.ok) {
-            const user = await response.json();
-            currentUser = user;
-            showLoggedIn(user); // Update UI
+            currentUser = await response.json();
+            showLoggedIn(currentUser);
             successEl.classList.remove('hidden');
             errorEl.textContent = '';
             setTimeout(() => successEl.classList.add('hidden'), 3000);
@@ -315,12 +398,11 @@ async function handleChangePassword(e) {
     const confirmPassword = document.getElementById('confirmPassword').value;
     const errorEl = document.getElementById('passwordError');
     const successEl = document.getElementById('passwordSuccess');
-    
+
     if (newPassword !== confirmPassword) {
         errorEl.textContent = 'Passwords do not match';
         return;
     }
-    
     try {
         const response = await fetch('/api/profile/password', {
             method: 'PUT',
@@ -328,7 +410,6 @@ async function handleChangePassword(e) {
             headers: csrfHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ old_password: currentPassword, new_password: newPassword })
         });
-        
         if (response.ok) {
             successEl.classList.remove('hidden');
             errorEl.textContent = '';
@@ -350,19 +431,17 @@ async function handleForgotPassword(e) {
     const email = document.getElementById('forgotEmail').value;
     const errorEl = document.getElementById('forgotError');
     const successEl = document.getElementById('forgotSuccess');
-    
+
     setButtonLoading(btn, true);
     try {
-        const response = await fetch('/api/auth/forgot-password', {
+        await fetch('/api/auth/forgot-password', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email })
         });
-        
-        // Always show success
         successEl.classList.remove('hidden');
         errorEl.textContent = '';
-        document.getElementById('forgotForm').reset();
+        form.reset();
     } catch (error) {
         errorEl.textContent = 'Connection error';
     } finally {
@@ -398,15 +477,13 @@ async function handleVerifyEmail(e) {
     const inputs = document.querySelectorAll('.code-input');
     let code = '';
     inputs.forEach(input => code += input.value);
-    
     const errorEl = document.getElementById('verifyError');
     const successEl = document.getElementById('verifySuccess');
-    
+
     if (code.length !== 6) {
         errorEl.textContent = 'Please enter the full 6-digit code';
         return;
     }
-    
     setButtonLoading(btn, true);
     try {
         const response = await fetch('/api/auth/verify', {
@@ -415,15 +492,14 @@ async function handleVerifyEmail(e) {
             headers: csrfHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ code })
         });
-        
         if (response.ok) {
             successEl.classList.remove('hidden');
             errorEl.textContent = '';
+            announce('Email verified');
             setTimeout(() => {
                 hideModal('verifyModal');
-                // Refresh user data
                 checkAuth();
-            }, 2000);
+            }, 1500);
         } else {
             const data = await response.json();
             errorEl.textContent = data.error || 'Verification failed';
@@ -435,33 +511,29 @@ async function handleVerifyEmail(e) {
     }
 }
 
-// Resend verification code with cooldown
 let resendCooldown = 0;
 
 async function handleResendCode(e) {
     e.preventDefault();
     if (resendCooldown > 0) return;
-    
     const link = document.getElementById('resendLink');
     const timer = document.getElementById('resendTimer');
     const errorEl = document.getElementById('verifyError');
-    
-    // Start 30s cooldown
+
     resendCooldown = 30;
     link.classList.add('hidden');
     timer.classList.remove('hidden');
     timer.textContent = `Resend in ${resendCooldown}s`;
-    
+
     try {
         const response = await fetch('/api/auth/resend-verification', {
             method: 'POST',
             credentials: 'include',
             headers: csrfHeaders()
         });
-        
         if (response.ok) {
             errorEl.textContent = '';
-            timer.textContent = `Code sent! Resend in ${resendCooldown}s`;
+            timer.textContent = `Code sent · ${resendCooldown}s`;
         } else {
             const data = await response.json();
             errorEl.textContent = data.error || 'Failed to resend code';
@@ -469,8 +541,7 @@ async function handleResendCode(e) {
     } catch (error) {
         errorEl.textContent = 'Connection error';
     }
-    
-    // Countdown timer
+
     const interval = setInterval(() => {
         resendCooldown--;
         if (resendCooldown > 0) {
@@ -483,114 +554,100 @@ async function handleResendCode(e) {
     }, 1000);
 }
 
-// ============ TASK FUNCTIONS ============
+// ============ TASKS ============
 
 async function loadTasks() {
     let tasks = [];
-
     if (isLoggedIn()) {
-        // Logged in: get from API
         try {
-            const response = await fetch('/api/tasks', {
-                credentials: 'include'
-            });
+            const response = await fetch('/api/tasks', { credentials: 'include' });
             tasks = await response.json();
         } catch (error) {
-            console.error('Failed to load tasks from API:', error);
             tasks = [];
         }
     } else {
-        // Anonymous: get from localStorage
         tasks = getLocalTasks();
     }
-
     renderTasks(tasks);
 }
 
+function formatDate(dateStr) {
+    if (!dateStr) return '';
+    try {
+        return new Date(dateStr).toLocaleDateString('en-GB', {
+            day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+        });
+    } catch {
+        return dateStr;
+    }
+}
+
+// SECURITY: every task field is inserted with textContent / setAttribute, so a
+// malicious title can never break out into HTML.
+function renderTaskItem(task, isCompleted) {
+    const li = document.createElement('li');
+    li.className = isCompleted ? 'task-item completed' : 'task-item';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'task-checkbox';
+    checkbox.dataset.id = task.id;
+    checkbox.setAttribute('aria-label', isCompleted ? 'Mark as not done' : 'Mark as done');
+    if (isCompleted) checkbox.checked = true;
+
+    const content = document.createElement('div');
+    content.className = 'task-content';
+
+    const titleEl = document.createElement('span');
+    titleEl.className = 'task-title';
+    titleEl.textContent = task.title;
+    content.appendChild(titleEl);
+
+    const meta = document.createElement('div');
+    meta.className = 'task-meta';
+
+    const priority = task.priority || 'normal';
+    if (priority !== 'normal') {
+        const priorityEl = document.createElement('span');
+        priorityEl.className = `task-priority task-priority-${priority}`;
+        priorityEl.textContent = priority === 'high' ? 'High' : 'Low';
+        meta.appendChild(priorityEl);
+    }
+    const createdStr = formatDate(task.created_at);
+    if (createdStr) {
+        const el = document.createElement('span');
+        el.className = 'task-created';
+        el.textContent = `🕐 ${createdStr}`;
+        meta.appendChild(el);
+    }
+    const dueStr = task.due_date ? formatDate(task.due_date) : '';
+    if (dueStr) {
+        const el = document.createElement('span');
+        el.className = 'task-due';
+        el.textContent = `📅 ${dueStr}`;
+        meta.appendChild(el);
+    }
+    if (meta.childElementCount > 0) content.appendChild(meta);
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'btn-delete';
+    del.dataset.id = task.id;
+    del.setAttribute('aria-label', 'Delete task');
+    del.textContent = '🗑️';
+
+    li.append(checkbox, content, del);
+    return li;
+}
+
 function renderTasks(tasks) {
-    taskList.innerHTML = '';
-    
-    // Get completed task list element
+    const taskList = document.getElementById('taskList');
     const completedTaskList = document.getElementById('completedTaskList');
     const completedSection = document.getElementById('completedSection');
+    const emptyState = document.getElementById('emptyState');
+
+    taskList.innerHTML = '';
     completedTaskList.innerHTML = '';
-    
-    // Date formatting helper
-    function formatDate(dateStr) {
-        if (!dateStr) return '';
-        try {
-            const date = new Date(dateStr);
-            return date.toLocaleDateString('ro-RO', { 
-                day: '2-digit', 
-                month: 'short',
-                hour: '2-digit',
-                minute: '2-digit'
-            });
-        } catch {
-            return dateStr;
-        }
-    }
-    
-    // SECURITY: build every <li> with createElement + setAttribute so no
-    // task field (id, title, dates) can ever escape its attribute quoting,
-    // regardless of what the DB returns.
-    function renderTaskItem(task, isCompleted) {
-        const li = document.createElement('li');
-        li.className = isCompleted ? 'task-item completed' : 'task-item';
-
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.className = 'task-checkbox';
-        checkbox.dataset.id = task.id;
-        if (isCompleted) checkbox.checked = true;
-
-        const content = document.createElement('div');
-        content.className = 'task-content';
-
-        const titleEl = document.createElement('span');
-        titleEl.className = 'task-title';
-        titleEl.textContent = task.title; // safe against HTML injection
-
-        const meta = document.createElement('div');
-        meta.className = 'task-meta';
-
-        const priority = task.priority || 'normal';
-        if (priority !== 'normal') {
-            const priorityEl = document.createElement('span');
-            priorityEl.className = `task-priority task-priority-${priority}`;
-            priorityEl.textContent = priority === 'high' ? 'High' : 'Low';
-            meta.appendChild(priorityEl);
-        }
-
-        const createdStr = formatDate(task.created_at);
-        if (createdStr) {
-            const createdEl = document.createElement('span');
-            createdEl.className = 'task-created';
-            createdEl.textContent = `🕐 ${createdStr}`;
-            meta.appendChild(createdEl);
-        }
-        const dueStr = task.due_date ? formatDate(task.due_date) : '';
-        if (dueStr) {
-            const dueEl = document.createElement('span');
-            dueEl.className = 'task-due';
-            dueEl.textContent = `📅 ${dueStr}`;
-            meta.appendChild(dueEl);
-        }
-
-        content.appendChild(titleEl);
-        content.appendChild(meta);
-
-        const del = document.createElement('button');
-        del.className = 'btn-delete';
-        del.dataset.id = task.id;
-        del.title = 'Delete task';
-        del.textContent = '🗑️';
-
-        li.appendChild(checkbox);
-        li.appendChild(content);
-        li.appendChild(del);
-        return li;
-    }
 
     const activeTasks = tasks.filter(t => !t.completed);
     const completedTasks = tasks.filter(t => t.completed);
@@ -600,52 +657,33 @@ function renderTasks(tasks) {
         completedSection.classList.add('hidden');
     } else {
         emptyState.classList.remove('visible');
-
         activeTasks.forEach(task => taskList.appendChild(renderTaskItem(task, false)));
-
         if (completedTasks.length > 0) {
             completedSection.classList.remove('hidden');
             completedTasks.forEach(task => completedTaskList.appendChild(renderTaskItem(task, true)));
         } else {
             completedSection.classList.add('hidden');
         }
-
-        completedCount.textContent = completedTasks.length;
     }
 
-    totalCount.textContent = tasks.length;
-}
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    document.getElementById('completedCount').textContent = completedTasks.length;
+    document.getElementById('totalCount').textContent = tasks.length;
 }
 
 async function addTask(title, dueDate = null, priority = 'normal') {
     if (isLoggedIn()) {
-        // Logged in: save to API
         try {
             const taskData = { title, priority };
-            if (dueDate) {
-                taskData.due_date = dueDate;
-            }
-            
+            if (dueDate) taskData.due_date = dueDate;
             const response = await fetch('/api/tasks', {
                 method: 'POST',
                 credentials: 'include',
                 headers: csrfHeaders({ 'Content-Type': 'application/json' }),
                 body: JSON.stringify(taskData)
             });
-
-            if (response.ok) {
-                loadTasks();
-            }
-        } catch (error) {
-            console.error('Failed to add task:', error);
-        }
+            if (response.ok) loadTasks();
+        } catch (error) { /* ignore */ }
     } else {
-        // Anonymous: save to localStorage
         addLocalTask(title, dueDate, priority);
         loadTasks();
     }
@@ -660,9 +698,7 @@ async function toggleTask(id) {
                 headers: csrfHeaders()
             });
             loadTasks();
-        } catch (error) {
-            console.error('Failed to toggle task:', error);
-        }
+        } catch (error) { /* ignore */ }
     } else {
         toggleLocalTask(id);
         loadTasks();
@@ -678,16 +714,14 @@ async function deleteTask(id) {
                 headers: csrfHeaders()
             });
             loadTasks();
-        } catch (error) {
-            console.error('Failed to delete task:', error);
-        }
+        } catch (error) { /* ignore */ }
     } else {
         deleteLocalTask(id);
         loadTasks();
     }
 }
 
-// ============ WASM INIT ============
+// ============ WASM ============
 
 async function initWasm() {
     try {
@@ -697,192 +731,160 @@ async function initWasm() {
                     const bytes = new Uint8Array(wasmMemory.buffer, ptr, len);
                     console.log('[WASM]', new TextDecoder().decode(bytes));
                 },
-                js_renderTasks: () => loadTasks(),
-                js_alert: (ptr, len) => {
-                    const bytes = new Uint8Array(wasmMemory.buffer, ptr, len);
-                    alert(new TextDecoder().decode(bytes));
-                }
+                js_renderTasks: () => loadTasks()
             }
         };
-
         const response = await fetch('/app.wasm');
         if (!response.ok) throw new Error('WASM fetch failed');
-        
         const bytes = await response.arrayBuffer();
         const result = await WebAssembly.instantiate(bytes, importObject);
-        
         wasm = result.instance.exports;
         wasmMemory = wasm.memory;
         wasm.init();
-        
-        console.log('✅ WASM initialized');
     } catch (error) {
         console.log('Running without WASM');
     }
 }
 
-// ============ EVENT LISTENERS ============
+// ============ EVENT WIRING ============
 
-// Date picker functionality
-const datePickerBtn = document.getElementById('datePickerBtn');
-const dateClearBtn = document.getElementById('dateClearBtn');
-const datePreview = document.getElementById('datePreview');
-const datePickerWrapper = document.querySelector('.date-picker-wrapper');
-
-function updateDatePreview() {
-    const dueDateInput = document.getElementById('taskDueDate');
-    if (dueDateInput.value) {
-        const date = new Date(dueDateInput.value);
-        const formatted = date.toLocaleDateString('ro-RO', {
-            day: 'numeric',
-            month: 'short',
-            hour: '2-digit',
-            minute: '2-digit'
-        });
-        datePreview.textContent = formatted;
-        datePreview.classList.add('has-date');
-        datePickerWrapper.classList.add('has-date');
-    } else {
-        datePreview.textContent = '';
-        datePreview.classList.remove('has-date');
-        datePickerWrapper.classList.remove('has-date');
-    }
+function bindTaskListClicks(listEl) {
+    listEl.addEventListener('click', (e) => {
+        const target = e.target;
+        const id = target.dataset.id;
+        if (!id) return;
+        if (target.classList.contains('task-checkbox')) toggleTask(id);
+        else if (target.classList.contains('btn-delete')) deleteTask(id);
+    });
 }
 
-function clearDatePicker() {
+function bindDatePicker() {
     const dueDateInput = document.getElementById('taskDueDate');
-    dueDateInput.value = '';
-    updateDatePreview();
+    const datePreview = document.getElementById('datePreview');
+    const datePickerWrapper = document.querySelector('.date-picker-wrapper');
+
+    function updateDatePreview() {
+        if (dueDateInput.value) {
+            datePreview.textContent = new Date(dueDateInput.value).toLocaleDateString('en-GB', {
+                day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
+            });
+            datePreview.classList.add('has-date');
+            datePickerWrapper.classList.add('has-date');
+        } else {
+            datePreview.textContent = '';
+            datePreview.classList.remove('has-date');
+            datePickerWrapper.classList.remove('has-date');
+        }
+    }
+
+    document.getElementById('datePickerBtn').addEventListener('click', () => {
+        const now = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        dueDateInput.min = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+        dueDateInput.showPicker?.();
+    });
+    dueDateInput.addEventListener('change', updateDatePreview);
+    document.getElementById('dateClearBtn').addEventListener('click', () => {
+        dueDateInput.value = '';
+        updateDatePreview();
+    });
 }
 
-// Open native picker on button click
-datePickerBtn.addEventListener('click', () => {
-    const dueDateInput = document.getElementById('taskDueDate');
-    
-    // Set minimum date to now (prevent past dates)
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    dueDateInput.min = `${year}-${month}-${day}T${hours}:${minutes}`;
-    
-    dueDateInput.showPicker();
-});
-
-// Update preview when date changes
-document.getElementById('taskDueDate').addEventListener('change', updateDatePreview);
-
-// Clear date
-dateClearBtn.addEventListener('click', clearDatePicker);
-
-taskForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const title = taskInput.value.trim();
-    if (!title) return;
-    
-    const dueDateInput = document.getElementById('taskDueDate');
-    const dueDate = dueDateInput.value || null;
-    const priority = taskPriority ? taskPriority.value : 'normal';
-    
-    addTask(title, dueDate, priority);
-    taskInput.value = '';
-    if (taskPriority) taskPriority.value = 'normal';
-    clearDatePicker();
-    taskInput.focus();
-});
-
-taskList.addEventListener('click', (e) => {
-    const target = e.target;
-    const id = target.dataset.id;  // Use string ID directly for SurrealDB
-    
-    if (!id) return;  // No ID on this element
-    
-    if (target.classList.contains('task-checkbox')) {
-        toggleTask(id);
-    } else if (target.classList.contains('btn-delete')) {
-        deleteTask(id);
-    }
-});
-
-// Also handle click events on completed task list
-document.getElementById('completedTaskList').addEventListener('click', (e) => {
-    const target = e.target;
-    const id = target.dataset.id;
-    
-    if (!id) return;
-    
-    if (target.classList.contains('task-checkbox')) {
-        toggleTask(id);
-    } else if (target.classList.contains('btn-delete')) {
-        deleteTask(id);
-    }
-});
-
-// ============ DATA-ACTION BINDINGS (CSP: no inline handlers) ============
-
-function bindDataActions() {
-    // Click delegation for all data-action buttons/links anywhere in the page.
+function bindActions() {
     document.body.addEventListener('click', (e) => {
         const el = e.target.closest('[data-action]');
         if (!el) return;
-
         const action = el.dataset.action;
+        const fromDropdown = !!el.closest('#dropdownMenu');
         switch (action) {
-            case 'show-modal':
-                showModal(el.dataset.target);
-                break;
-            case 'hide-modal':
-                hideModal(el.dataset.target);
-                break;
-            case 'switch-modal':
-                e.preventDefault();
-                switchModal(el.dataset.from, el.dataset.to);
-                break;
-            case 'logout':
-                logout();
-                break;
-            case 'switch-tab':
-                switchProfileTab(el.dataset.tab, el);
-                break;
-            case 'verify-now':
-                e.preventDefault();
-                showModal('verifyModal');
-                hideModal('profileModal');
-                break;
-            case 'resend-code':
-                handleResendCode(e);
-                break;
+            case 'show-modal': showModal(el.dataset.target); break;
+            case 'hide-modal': hideModal(el.dataset.target); break;
+            case 'switch-modal': e.preventDefault(); switchModal(el.dataset.from, el.dataset.to); break;
+            case 'logout': logout(); break;
+            case 'switch-tab': switchProfileTab(el.dataset.tab, el); break;
+            case 'verify-now': e.preventDefault(); hideModal('profileModal'); showModal('verifyModal'); break;
+            case 'resend-code': handleResendCode(e); break;
+        }
+        if (fromDropdown) closeDropdown();
+    });
+
+    // Theme toggle
+    document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+
+    // User dropdown
+    const userBtn = document.getElementById('userBtn');
+    userBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setDropdown(!dropdownOpen());
+    });
+    document.addEventListener('click', (e) => {
+        if (dropdownOpen() && !e.target.closest('.user-dropdown')) closeDropdown();
+    });
+
+    // Global keyboard: Escape closes, Tab traps focus inside modals
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            if (dropdownOpen()) { closeDropdown(); return; }
+            const open = getOpenModal();
+            if (open) hideModal(open.id);
+            return;
+        }
+        if (e.key === 'Tab') {
+            const open = getOpenModal();
+            if (open) trapFocus(e, open);
         }
     });
 
-    // Form submit bindings.
+    // Forms
     const forms = {
         loginForm: handleLogin,
         signupForm: handleSignup,
         verifyForm: handleVerifyEmail,
         forgotForm: handleForgotPassword,
         profileForm: handleUpdateProfile,
-        passwordForm: handleChangePassword,
+        passwordForm: handleChangePassword
     };
     for (const [id, handler] of Object.entries(forms)) {
         const form = document.getElementById(id);
         if (form) form.addEventListener('submit', handler);
     }
 
-    // Verification-code input handlers.
+    // Add-task form
+    const taskForm = document.getElementById('taskForm');
+    const taskInput = document.getElementById('taskInput');
+    const taskPriority = document.getElementById('taskPriority');
+    taskForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const title = taskInput.value.trim();
+        if (!title) return;
+        const dueDateInput = document.getElementById('taskDueDate');
+        const dueDate = dueDateInput.value || null;
+        const priority = taskPriority ? taskPriority.value : 'normal';
+        addTask(title, dueDate, priority);
+        taskInput.value = '';
+        if (taskPriority) taskPriority.value = 'normal';
+        dueDateInput.value = '';
+        document.getElementById('dateClearBtn').click();
+        taskInput.focus();
+    });
+
+    // Verification-code inputs
     document.querySelectorAll('.code-input').forEach((input) => {
         const index = parseInt(input.dataset.codeIndex || '0', 10);
         input.addEventListener('keyup', () => handleCodeKeyup(input, index));
         input.addEventListener('keydown', (e) => handleCodeKeydown(e, input, index));
     });
+
+    bindTaskListClicks(document.getElementById('taskList'));
+    bindTaskListClicks(document.getElementById('completedTaskList'));
+    bindDatePicker();
 }
 
 // ============ INIT ============
 
 document.addEventListener('DOMContentLoaded', async () => {
-    bindDataActions();
+    initTheme();
+    bindActions();
     await initWasm();
     await checkAuth();
     loadTasks();

@@ -1,3 +1,13 @@
+// Respect the saved theme so this standalone page matches the app.
+(function initTheme() {
+    try {
+        const saved = localStorage.getItem('theme');
+        if (saved === 'light' || saved === 'dark') {
+            document.documentElement.setAttribute('data-theme', saved);
+        }
+    } catch (_) { /* private mode */ }
+})();
+
 async function handleResetPassword(e) {
     e.preventDefault();
     const newPassword = document.getElementById('newPassword').value;

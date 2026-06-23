@@ -3,41 +3,59 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Task Manager built with Zig - Backend and Frontend in pure Zig">
-    <title>⚡ Zig Task Manager</title>
+    <meta name="description" content="A fast task manager with a Zig (Zap) backend and a WebAssembly front end written in Zig.">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#0b0c10" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Zig Tasks">
+    <meta property="og:description" content="A fast task manager with a Zig backend and a WebAssembly front end.">
+    <meta property="og:image" content="favicon.svg">
+
+    <title>Zig Tasks — fast task manager in Zig</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="style.css">
-    <script defer src="https://analytics.micutu.com/script.js" data-website-id="b23dfae2-5f1d-42fe-9498-bdcba606ab81"></script>
 </head>
 <body>
-    <nav class="navbar" id="navbar">
+    <a class="skip-link" href="#taskInput">Skip to content</a>
+
+    <nav class="navbar">
         <div class="nav-brand">
-            <span class="nav-logo">🦎</span>
+            <span class="nav-logo" aria-hidden="true">🦎</span>
             <span class="nav-title">Zig Tasks</span>
         </div>
-        <div class="nav-menu" id="navMenu">
-            <!-- Logged out state -->
+        <div class="nav-menu">
+            <button class="icon-btn theme-toggle" id="themeToggle" type="button"
+                    aria-label="Switch theme" title="Switch theme">
+                <span class="theme-icon" id="themeIcon" aria-hidden="true">🌙</span>
+            </button>
+
+            <!-- Logged out -->
             <div class="nav-auth" id="authButtons">
-                <button class="btn-nav" data-action="show-modal" data-target="loginModal">Login</button>
-                <button class="btn-nav btn-primary" data-action="show-modal" data-target="signupModal">Sign Up</button>
+                <button class="btn btn-ghost" data-action="show-modal" data-target="loginModal">Login</button>
+                <button class="btn btn-primary" data-action="show-modal" data-target="signupModal">Sign Up</button>
             </div>
-            <!-- Logged in state -->
+
+            <!-- Logged in -->
             <div class="nav-user hidden" id="userMenu">
                 <div class="user-dropdown">
-                    <button class="user-btn" id="userBtn">
-                        <span class="user-avatar" id="userAvatar">U</span>
+                    <button class="user-btn" id="userBtn" type="button"
+                            aria-haspopup="true" aria-expanded="false" aria-controls="dropdownMenu">
+                        <span class="user-avatar" id="userAvatar" aria-hidden="true">U</span>
                         <span class="user-name" id="userName">User</span>
-                        <span class="dropdown-arrow">▼</span>
+                        <span class="dropdown-arrow" aria-hidden="true">▾</span>
                     </button>
-                    <div class="dropdown-menu" id="dropdownMenu">
+                    <div class="dropdown-menu" id="dropdownMenu" role="menu" hidden>
                         <div class="dropdown-header">
                             <span class="user-email" id="userEmail">user@example.com</span>
                         </div>
                         <hr>
-                        <button class="dropdown-item" data-action="show-modal" data-target="profileModal">
-                            👤 Profile
+                        <button class="dropdown-item" role="menuitem" data-action="show-modal" data-target="profileModal">
+                            <span aria-hidden="true">👤</span> Profile
                         </button>
-                        <button class="dropdown-item" data-action="logout">
-                            🚪 Logout
+                        <button class="dropdown-item dropdown-item-danger" role="menuitem" data-action="logout">
+                            <span aria-hidden="true">🚪</span> Logout
                         </button>
                     </div>
                 </div>
@@ -46,19 +64,22 @@
     </nav>
 
     <div class="app-container">
-        <header class="header">
-            <p class="subtitle">PURE ZIG • BACKEND + WASM FRONTEND</p>
+        <header class="hero">
+            <h1 class="hero-title">Organize your day</h1>
+            <p class="hero-subtitle">Zig backend · WebAssembly front end</p>
         </header>
 
-        <main class="main">
+        <main class="main" id="main">
             <form class="task-form" id="taskForm">
                 <div class="input-group">
-                    <input 
-                        type="text" 
-                        id="taskInput" 
-                        class="task-input" 
+                    <input
+                        type="text"
+                        id="taskInput"
+                        class="task-input"
                         placeholder="What needs to be done?"
                         autocomplete="off"
+                        aria-label="Task title"
+                        maxlength="500"
                         required
                     >
                     <select id="taskPriority" class="priority-select" aria-label="Task priority">
@@ -67,73 +88,64 @@
                         <option value="low">Low</option>
                     </select>
                     <div class="date-picker-wrapper">
-                        <button type="button" class="date-picker-btn" id="datePickerBtn" title="Set due date">
-                            📅
+                        <button type="button" class="date-picker-btn" id="datePickerBtn"
+                                aria-label="Set due date" title="Set due date">
+                            <span aria-hidden="true">📅</span>
                         </button>
-                        <input 
-                            type="datetime-local" 
-                            id="taskDueDate" 
-                            class="task-due-input hidden-input"
-                        >
+                        <input type="datetime-local" id="taskDueDate" class="task-due-input hidden-input"
+                               aria-label="Due date">
                         <span class="date-preview" id="datePreview"></span>
-                        <button type="button" class="date-clear-btn" id="dateClearBtn" title="Clear date">×</button>
+                        <button type="button" class="date-clear-btn" id="dateClearBtn"
+                                aria-label="Clear due date" title="Clear due date">×</button>
                     </div>
-                    <button type="submit" class="btn-add">
-                        <span class="btn-icon">+</span>
+                    <button type="submit" class="btn btn-primary btn-add">
+                        <span class="btn-icon" aria-hidden="true">+</span>
                         <span class="btn-text">Add</span>
                     </button>
                 </div>
             </form>
 
             <div class="stats" id="stats">
-                <span class="stat">
-                    <span id="totalCount">0</span> tasks
-                </span>
-                <span class="stat">
-                    <span id="completedCount">0</span> completed
-                </span>
+                <span class="stat"><span id="totalCount">0</span> tasks</span>
+                <span class="stat"><span id="completedCount">0</span> completed</span>
             </div>
 
-
-            <ul class="task-list" id="taskList">
-            </ul>
+            <ul class="task-list" id="taskList" aria-label="Active tasks"></ul>
 
             <div class="empty-state" id="emptyState">
-                <div class="empty-icon">📝</div>
-                <p>No tasks yet. Add one above!</p>
+                <div class="empty-icon" aria-hidden="true">📝</div>
+                <p>No tasks yet. Add one above to get started.</p>
             </div>
 
-            <!-- Completed Tasks Section -->
-            <div class="completed-section hidden" id="completedSection">
-                <h3 class="section-title">✅ Completed Tasks</h3>
-                <ul class="task-list task-list-completed" id="completedTaskList">
-                </ul>
-            </div>
+            <section class="completed-section hidden" id="completedSection" aria-label="Completed tasks">
+                <h2 class="section-title"><span aria-hidden="true">✅</span> Completed</h2>
+                <ul class="task-list task-list-completed" id="completedTaskList"></ul>
+            </section>
         </main>
 
         <footer class="footer">
-            <p>Built with <span class="heart">⚡</span> in Zig</p>
-            <p class="tech">Zap Server + WebAssembly</p>
+            <p>Built with <span class="heart" aria-hidden="true">⚡</span> in Zig</p>
+            <p class="tech">Zap server · WebAssembly front end</p>
         </footer>
     </div>
 
     <!-- Login Modal -->
-    <div class="modal" id="loginModal">
+    <div class="modal" id="loginModal" role="dialog" aria-modal="true" aria-labelledby="loginTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="loginModal"></div>
         <div class="modal-content">
-            <button class="modal-close" data-action="hide-modal" data-target="loginModal">×</button>
-            <h2>Welcome Back</h2>
+            <button class="modal-close" data-action="hide-modal" data-target="loginModal" aria-label="Close">×</button>
+            <h2 id="loginTitle">Welcome back</h2>
             <form id="loginForm">
                 <div class="form-group">
                     <label for="loginEmail">Email</label>
-                    <input type="email" id="loginEmail" required placeholder="you@example.com">
+                    <input type="email" id="loginEmail" autocomplete="email" required placeholder="you@example.com">
                 </div>
                 <div class="form-group">
                     <label for="loginPassword">Password</label>
-                    <input type="password" id="loginPassword" required placeholder="••••••••">
+                    <input type="password" id="loginPassword" autocomplete="current-password" required placeholder="••••••••">
                 </div>
-                <div class="form-error" id="loginError"></div>
-                <button type="submit" class="btn-submit">Login</button>
+                <div class="form-error" id="loginError" role="alert" aria-live="assertive"></div>
+                <button type="submit" class="btn btn-primary btn-block">Login</button>
             </form>
             <p class="modal-footer">
                 <a href="#" data-action="switch-modal" data-from="loginModal" data-to="forgotModal">Forgot password?</a>
@@ -145,26 +157,27 @@
     </div>
 
     <!-- Signup Modal -->
-    <div class="modal" id="signupModal">
+    <div class="modal" id="signupModal" role="dialog" aria-modal="true" aria-labelledby="signupTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="signupModal"></div>
         <div class="modal-content">
-            <button class="modal-close" data-action="hide-modal" data-target="signupModal">×</button>
-            <h2>Create Account</h2>
+            <button class="modal-close" data-action="hide-modal" data-target="signupModal" aria-label="Close">×</button>
+            <h2 id="signupTitle">Create account</h2>
             <form id="signupForm">
                 <div class="form-group">
                     <label for="signupName">Name</label>
-                    <input type="text" id="signupName" required placeholder="John Doe">
+                    <input type="text" id="signupName" autocomplete="name" required placeholder="Jane Doe">
                 </div>
                 <div class="form-group">
                     <label for="signupEmail">Email</label>
-                    <input type="email" id="signupEmail" required placeholder="you@example.com">
+                    <input type="email" id="signupEmail" autocomplete="email" required placeholder="you@example.com">
                 </div>
                 <div class="form-group">
                     <label for="signupPassword">Password</label>
-                    <input type="password" id="signupPassword" required minlength="8" placeholder="••••••••">
+                    <input type="password" id="signupPassword" autocomplete="new-password" required minlength="8" placeholder="At least 8 characters">
+                    <p class="form-hint">Use 8+ characters with at least one letter and one number.</p>
                 </div>
-                <div class="form-error" id="signupError"></div>
-                <button type="submit" class="btn-submit">Create Account</button>
+                <div class="form-error" id="signupError" role="alert" aria-live="assertive"></div>
+                <button type="submit" class="btn btn-primary btn-block">Create account</button>
             </form>
             <p class="modal-footer">
                 Already have an account? <a href="#" data-action="switch-modal" data-from="signupModal" data-to="loginModal">Login</a>
@@ -173,50 +186,50 @@
     </div>
 
     <!-- Verify Email Modal -->
-    <div class="modal" id="verifyModal">
+    <div class="modal" id="verifyModal" role="dialog" aria-modal="true" aria-labelledby="verifyTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="verifyModal"></div>
         <div class="modal-content">
-            <button class="modal-close" data-action="hide-modal" data-target="verifyModal">×</button>
-            <h2>Verify Email</h2>
-            <p class="modal-desc">Enter the 6-digit code sent to your email.</p>
+            <button class="modal-close" data-action="hide-modal" data-target="verifyModal" aria-label="Close">×</button>
+            <h2 id="verifyTitle">Verify email</h2>
+            <p class="modal-desc">Enter the 6-digit code we sent to your inbox.</p>
             <form id="verifyForm">
                 <div class="code-input-group">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="0">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="1">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="2">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="3">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="4">
-                    <input type="text" class="code-input" maxlength="1" pattern="[0-9]" required data-code-index="5">
+                    <input type="text" inputmode="numeric" class="code-input" maxlength="1" pattern="[0-9]" required aria-label="Digit 1" data-code-index="0">
+                    <input type="text" inputmode="numeric" class="code-input" maxlength="1" pattern="[0-9]" required aria-label="Digit 2" data-code-index="1">
+                    <input type="text" inputmode="numeric" class="code-input" maxlength="1" pattern="[0-9]" required aria-label="Digit 3" data-code-index="2">
+                    <input type="text" inputmode="numeric" class="code-input" maxlength="1" pattern="[0-9]" required aria-label="Digit 4" data-code-index="3">
+                    <input type="text" inputmode="numeric" class="code-input" maxlength="1" pattern="[0-9]" required aria-label="Digit 5" data-code-index="4">
+                    <input type="text" inputmode="numeric" class="code-input" maxlength="1" pattern="[0-9]" required aria-label="Digit 6" data-code-index="5">
                 </div>
-                <div class="form-error" id="verifyError"></div>
+                <div class="form-error" id="verifyError" role="alert" aria-live="assertive"></div>
                 <div class="form-success hidden" id="verifySuccess">✅ Email verified successfully!</div>
-                <button type="submit" class="btn-submit">Verify Account</button>
+                <button type="submit" class="btn btn-primary btn-block">Verify account</button>
             </form>
             <p class="modal-footer" id="resendSection">
                 Didn't receive it?
-                <a href="#" id="resendLink" data-action="resend-code">Resend Code</a>
+                <a href="#" id="resendLink" data-action="resend-code">Resend code</a>
                 <span id="resendTimer" class="resend-timer hidden"></span>
             </p>
         </div>
     </div>
 
     <!-- Forgot Password Modal -->
-    <div class="modal" id="forgotModal">
+    <div class="modal" id="forgotModal" role="dialog" aria-modal="true" aria-labelledby="forgotTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="forgotModal"></div>
         <div class="modal-content">
-            <button class="modal-close" data-action="hide-modal" data-target="forgotModal">×</button>
-            <h2>Reset Password</h2>
+            <button class="modal-close" data-action="hide-modal" data-target="forgotModal" aria-label="Close">×</button>
+            <h2 id="forgotTitle">Reset password</h2>
             <p class="modal-desc">Enter your email and we'll send you a reset link.</p>
             <form id="forgotForm">
                 <div class="form-group">
                     <label for="forgotEmail">Email</label>
-                    <input type="email" id="forgotEmail" required placeholder="you@example.com">
+                    <input type="email" id="forgotEmail" autocomplete="email" required placeholder="you@example.com">
                 </div>
-                <div class="form-error" id="forgotError"></div>
+                <div class="form-error" id="forgotError" role="alert" aria-live="assertive"></div>
                 <div class="form-success hidden" id="forgotSuccess">
-                    ✅ If this email exists, a reset link has been sent!
+                    ✅ If this email exists, a reset link has been sent.
                 </div>
-                <button type="submit" class="btn-submit">Send Reset Link</button>
+                <button type="submit" class="btn btn-primary btn-block">Send reset link</button>
             </form>
             <p class="modal-footer">
                 <a href="#" data-action="switch-modal" data-from="forgotModal" data-to="loginModal">← Back to login</a>
@@ -225,14 +238,14 @@
     </div>
 
     <!-- Profile Modal -->
-    <div class="modal" id="profileModal">
+    <div class="modal" id="profileModal" role="dialog" aria-modal="true" aria-labelledby="profileTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="profileModal"></div>
         <div class="modal-content modal-lg">
-            <button class="modal-close" data-action="hide-modal" data-target="profileModal">×</button>
-            <h2>Your Profile</h2>
-            
+            <button class="modal-close" data-action="hide-modal" data-target="profileModal" aria-label="Close">×</button>
+            <h2 id="profileTitle">Your profile</h2>
+
             <div class="profile-header">
-                <div class="profile-avatar" id="profileAvatar">U</div>
+                <div class="profile-avatar" id="profileAvatar" aria-hidden="true">U</div>
                 <div class="profile-info">
                     <div class="profile-name" id="profileName">User</div>
                     <div class="profile-email" id="profileEmail">user@example.com</div>
@@ -242,46 +255,46 @@
                 </div>
             </div>
 
-            <div class="profile-tabs">
-                <button class="tab-btn active" data-action="switch-tab" data-tab="edit">Edit Profile</button>
-                <button class="tab-btn" data-action="switch-tab" data-tab="password">Change Password</button>
+            <div class="profile-tabs" role="tablist">
+                <button class="tab-btn active" data-action="switch-tab" data-tab="edit" role="tab" aria-selected="true">Edit profile</button>
+                <button class="tab-btn" data-action="switch-tab" data-tab="password" role="tab" aria-selected="false">Change password</button>
             </div>
 
-            <!-- Edit Profile Tab -->
-            <div class="tab-content active" id="tabEdit">
+            <div class="tab-content active" id="tabEdit" role="tabpanel">
                 <form id="profileForm">
                     <div class="form-group">
                         <label for="profileNameInput">Name</label>
-                        <input type="text" id="profileNameInput" required placeholder="Your name">
+                        <input type="text" id="profileNameInput" autocomplete="name" required placeholder="Your name">
                     </div>
-                    <div class="form-error" id="profileError"></div>
+                    <div class="form-error" id="profileError" role="alert" aria-live="assertive"></div>
                     <div class="form-success hidden" id="profileSuccess">✅ Profile updated!</div>
-                    <button type="submit" class="btn-submit">Save Changes</button>
+                    <button type="submit" class="btn btn-primary btn-block">Save changes</button>
                 </form>
             </div>
 
-            <!-- Change Password Tab -->
-            <div class="tab-content" id="tabPassword">
+            <div class="tab-content" id="tabPassword" role="tabpanel">
                 <form id="passwordForm">
                     <div class="form-group">
-                        <label for="currentPassword">Current Password</label>
-                        <input type="password" id="currentPassword" required placeholder="••••••••">
+                        <label for="currentPassword">Current password</label>
+                        <input type="password" id="currentPassword" autocomplete="current-password" required placeholder="••••••••">
                     </div>
                     <div class="form-group">
-                        <label for="newPassword">New Password</label>
-                        <input type="password" id="newPassword" required minlength="8" placeholder="••••••••">
+                        <label for="newPassword">New password</label>
+                        <input type="password" id="newPassword" autocomplete="new-password" required minlength="8" placeholder="At least 8 characters">
                     </div>
                     <div class="form-group">
-                        <label for="confirmPassword">Confirm New Password</label>
-                        <input type="password" id="confirmPassword" required minlength="8" placeholder="••••••••">
+                        <label for="confirmPassword">Confirm new password</label>
+                        <input type="password" id="confirmPassword" autocomplete="new-password" required minlength="8" placeholder="••••••••">
                     </div>
-                    <div class="form-error" id="passwordError"></div>
+                    <div class="form-error" id="passwordError" role="alert" aria-live="assertive"></div>
                     <div class="form-success hidden" id="passwordSuccess">✅ Password changed!</div>
-                    <button type="submit" class="btn-submit">Change Password</button>
+                    <button type="submit" class="btn btn-primary btn-block">Change password</button>
                 </form>
             </div>
         </div>
     </div>
+
+    <div class="sr-only" id="announcer" aria-live="polite" aria-atomic="true"></div>
 
     <script src="app.js"></script>
 </body>
