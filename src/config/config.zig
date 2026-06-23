@@ -117,7 +117,11 @@ pub fn parseEnvContent(allocator: std.mem.Allocator, content: []const u8) !Strin
 
 pub fn parseEnvFile(allocator: std.mem.Allocator, filename: []const u8) !StringHashMap {
     const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
-        std.debug.print("❌ Cannot open {s}: {}\n", .{ filename, err });
+        // A missing .env is fine — config can come entirely from the
+        // environment. Only complain about unexpected open failures.
+        if (err != error.FileNotFound) {
+            std.debug.print("❌ Cannot open {s}: {}\n", .{ filename, err });
+        }
         return err;
     };
     defer file.close();
@@ -133,11 +137,47 @@ pub fn parseEnvFile(allocator: std.mem.Allocator, filename: []const u8) !StringH
 
 // ---------- Public API ----------
 
+// Recognized configuration keys. Process environment variables matching these
+// override the .env file, so the app is fully configurable without a file
+// (12-factor / containers).
+const ENV_KEYS = [_][]const u8{
+    "SURREAL_URL",     "SURREAL_NS",    "SURREAL_DB",    "SURREAL_USER", "SURREAL_PASS",
+    "SMTP_HOST",       "SMTP_PORT",     "SMTP_USER",     "SMTP_PASS",    "SMTP_FROM",
+    "SMTP_FROM_NAME",  "FROM_EMAIL",    "FROM_NAME",     "APP_BASE_URL", "TASK_REMINDERS_ENABLED",
+    "PORT",            "INTERFACE",     "CORS_ORIGIN",   "HSTS_MAX_AGE", "TRUST_PROXY",
+    "COOKIE_INSECURE", "METRICS_TOKEN", "LEGACY_SECRET", "LOG_LEVEL",
+};
+
+// Overlay recognized process environment variables onto the map. Runs once at
+// load() (single-threaded), so later config.get() calls stay race-free.
+fn overlayEnv(allocator: std.mem.Allocator, map: *StringHashMap) void {
+    for (ENV_KEYS) |key| {
+        const value = std.process.getEnvVarOwned(allocator, key) catch continue;
+        const owned_key = allocator.dupe(u8, key) catch {
+            allocator.free(value);
+            continue;
+        };
+        putOwned(map, allocator, owned_key, value) catch {
+            allocator.free(owned_key);
+            allocator.free(value);
+        };
+    }
+}
+
 pub fn load(allocator: std.mem.Allocator) !void {
     if (config != null) return; // Already loaded
-    config = try parseEnvFile(allocator, ".env");
+
+    // The .env file is optional: a container can supply everything via the
+    // environment. Start from an empty map if it's absent.
+    var map = parseEnvFile(allocator, ".env") catch |err| switch (err) {
+        error.FileNotFound => StringHashMap.init(allocator),
+        else => return err,
+    };
+    overlayEnv(allocator, &map);
+
+    config = map;
     config_allocator = allocator;
-    std.debug.print("✅ Config loaded from .env\n", .{});
+    std.debug.print("✅ Config loaded ({d} keys)\n", .{map.count()});
 }
 
 pub fn reload(allocator: std.mem.Allocator) !void {

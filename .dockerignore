@@ -1,0 +1,24 @@
+# VCS
+.git
+.github
+
+# Build outputs / caches
+zig-out
+zig-cache
+.zig-cache
+public/app.wasm
+
+# Secrets & local env
+.env
+.env.local
+
+# Docs & assets not needed in the image
+docs
+*.md
+scripts
+
+# Editor / OS noise
+.idea
+.vscode
+*.swp
+.DS_Store

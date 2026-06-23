@@ -27,10 +27,23 @@ pub fn main() !void {
 
     allocator = app.allocator();
 
-    // Initialize SurrealDB schema
-    db.initSchema(allocator) catch |err| {
-        log.warn("Could not initialize DB schema: {} (continuing anyway)", .{err});
-    };
+    // Initialize SurrealDB schema, waiting for the DB to accept connections.
+    // On a fresh `docker compose up` the database may not be ready the instant
+    // the app boots, so retry a bounded number of times before giving up.
+    {
+        const max_attempts: u8 = 20;
+        var attempt: u8 = 1;
+        while (true) : (attempt += 1) {
+            if (db.initSchema(allocator)) |_| break else |err| {
+                if (attempt >= max_attempts) {
+                    log.warn("DB schema init failed after {d} attempts: {} (continuing)", .{ attempt, err });
+                    break;
+                }
+                log.warn("DB not ready ({}); retry {d}/{d}…", .{ err, attempt, max_attempts });
+                std.Thread.sleep(1 * std.time.ns_per_s);
+            }
+        }
+    }
 
     // Initialize rate limiters
     rate_limiter.initAll(allocator);

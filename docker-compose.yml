@@ -1,0 +1,42 @@
+name: zig-tasks
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v3.1.5
+    command:
+      - start
+      - --bind
+      - 0.0.0.0:8000
+      - --user
+      - "${SURREAL_USER:-root}"
+      - --pass
+      - "${SURREAL_PASS:-root}"
+      - rocksdb:/data/database.db
+    volumes:
+      - surreal-data:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  app:
+    build: .
+    depends_on:
+      - surrealdb
+    environment:
+      SURREAL_URL: http://surrealdb:8000
+      SURREAL_NS: taskapp
+      SURREAL_DB: main
+      SURREAL_USER: "${SURREAL_USER:-root}"
+      SURREAL_PASS: "${SURREAL_PASS:-root}"
+      INTERFACE: 0.0.0.0
+      PORT: "9000"
+      CORS_ORIGIN: http://localhost:9000
+      # Local Docker runs over plain HTTP, so don't require Secure cookies.
+      COOKIE_INSECURE: "1"
+      # Optional: set SMTP_* here to enable verification / reset emails.
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+
+volumes:
+  surreal-data:
