@@ -50,14 +50,18 @@ pub fn build(b: *std.Build) void {
     wasm.entry = .disabled;
     wasm.root_module.export_symbol_names = &.{
         "init",
+        "clearAll",
         "addTask",
         "toggleTask",
         "deleteTask",
         "getTaskCount",
+        "getTaskId",
         "getTaskTitle",
         "getTaskTitleLen",
+        "getTaskDue",
+        "getTaskDueLen",
+        "getTaskPriority",
         "getTaskCompleted",
-        "getTaskId",
         "allocString",
         "freeString",
     };
