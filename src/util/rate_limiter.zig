@@ -133,6 +133,7 @@ pub var reset_password_limiter: ?RateLimiter = null;
 pub var resend_verification_limiter: ?RateLimiter = null;
 pub var task_write_limiter: ?RateLimiter = null;
 pub var workspace_invite_limiter: ?RateLimiter = null;
+pub var password_change_limiter: ?RateLimiter = null;
 
 /// Initialize all rate limiters
 pub fn initAll(allocator: std.mem.Allocator) void {
@@ -161,6 +162,9 @@ pub fn initAll(allocator: std.mem.Allocator) void {
     task_write_limiter = RateLimiter.init(allocator, .{ .max_requests = 60, .window_seconds = 60 });
     // Workspace invites trigger email. Keep the budget tight per inviting user.
     workspace_invite_limiter = RateLimiter.init(allocator, .{ .max_requests = 10, .window_seconds = 3600 });
+    // Password change verifies the current password — cap online guessing at
+    // 5 per 15 minutes per user even when the session is already valid.
+    password_change_limiter = RateLimiter.init(allocator, .{ .max_requests = 5, .window_seconds = 900 });
 
     std.debug.print("✅ Rate limiters initialized\n", .{});
 }
@@ -176,6 +180,7 @@ pub fn cleanupAll() void {
     if (resend_verification_limiter) |*l| l.cleanup();
     if (task_write_limiter) |*l| l.cleanup();
     if (workspace_invite_limiter) |*l| l.cleanup();
+    if (password_change_limiter) |*l| l.cleanup();
 }
 
 var cleanup_thread: ?std.Thread = null;
@@ -226,6 +231,7 @@ pub fn deinitAll() void {
     if (resend_verification_limiter) |*l| l.deinit();
     if (task_write_limiter) |*l| l.deinit();
     if (workspace_invite_limiter) |*l| l.deinit();
+    if (password_change_limiter) |*l| l.deinit();
 
     login_limiter = null;
     login_account_limiter = null;
@@ -236,4 +242,5 @@ pub fn deinitAll() void {
     resend_verification_limiter = null;
     task_write_limiter = null;
     workspace_invite_limiter = null;
+    password_change_limiter = null;
 }

@@ -5,6 +5,7 @@ const models = @import("../domain/models.zig");
 const auth = @import("../services/auth.zig");
 const validation = @import("../util/validation.zig");
 const http = @import("../util/http.zig");
+const rate_limiter = @import("../util/rate_limiter.zig");
 
 pub fn getProfile(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     const user_id = http.getCurrentUserId(req_alloc, r) orelse {
@@ -94,6 +95,16 @@ pub fn changePassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 401, "Not authenticated");
         return;
     };
+
+    // SECURITY: cap online brute-force of the current password (the session is
+    // already valid, but old_password is still a secret worth protecting).
+    if (rate_limiter.password_change_limiter) |*limiter| {
+        if (!limiter.isAllowed(user_id)) {
+            r.setHeader("Retry-After", "900") catch {};
+            try http.jsonError(r, 429, "Too many password change attempts. Please wait 15 minutes.");
+            return;
+        }
+    }
 
     const request = http.parseBody(req_alloc, r, models.ChangePasswordRequest) catch {
         try http.jsonError(r, 400, "Invalid JSON body");
