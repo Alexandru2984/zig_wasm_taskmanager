@@ -94,12 +94,24 @@ fn validHeaderValue(value: []const u8) bool {
     return true;
 }
 
+// http://localhost or http://127.0.0.1, optionally followed by ":port" or
+// "/path". SECURITY: a bare startsWith would also accept hostile origins like
+// http://localhost.attacker.com, so the char after the host must terminate it.
+fn isLocalhostHttpOrigin(origin: []const u8) bool {
+    const hosts = [_][]const u8{ "http://localhost", "http://127.0.0.1" };
+    for (hosts) |host| {
+        if (std.mem.startsWith(u8, origin, host)) {
+            const rest = origin[host.len..];
+            if (rest.len == 0 or rest[0] == ':' or rest[0] == '/') return true;
+        }
+    }
+    return false;
+}
+
 fn validateCorsOrigin(origin: []const u8) bool {
     if (!validHeaderValue(origin)) return false;
     if (std.mem.eql(u8, origin, "*")) return false;
-    return std.mem.startsWith(u8, origin, "https://") or
-        std.mem.startsWith(u8, origin, "http://localhost") or
-        std.mem.startsWith(u8, origin, "http://127.0.0.1");
+    return std.mem.startsWith(u8, origin, "https://") or isLocalhostHttpOrigin(origin);
 }
 
 fn handleRequest(r: zap.Request) anyerror!void {
