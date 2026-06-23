@@ -6,6 +6,7 @@
 let wasm = null;
 let wasmMemory = null;
 let currentUser = null;
+let suppressRender = false;
 
 const FOCUSABLE =
     'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -154,42 +155,134 @@ function showLoggedOut() {
     closeDropdown();
 }
 
-// ============ ANONYMOUS TASK STORAGE (localStorage) ============
+// ============ ANONYMOUS TASKS (Zig/WASM owns the model) ============
+// While logged out, the WebAssembly module written in Zig is the source of
+// truth for tasks. We mirror a snapshot to localStorage so they survive a
+// reload. If the WASM module fails to load, we fall back to plain localStorage.
 
-function getLocalTasks() {
+function wasmReady() {
+    return wasm !== null && wasmMemory !== null;
+}
+
+function wasmStr(s) {
+    const bytes = new TextEncoder().encode(s || '');
+    const ptr = wasm.allocString(bytes.length);
+    if (bytes.length) new Uint8Array(wasmMemory.buffer, ptr, bytes.length).set(bytes);
+    return { ptr, len: bytes.length };
+}
+
+function wasmReadStr(ptr, len) {
+    return len ? new TextDecoder().decode(new Uint8Array(wasmMemory.buffer, ptr, len)) : '';
+}
+
+function priorityToCode(p) {
+    return p === 'high' ? 1 : p === 'low' ? 2 : 0;
+}
+
+function priorityFromCode(c) {
+    return c === 1 ? 'high' : c === 2 ? 'low' : 'normal';
+}
+
+function wasmAddTask(title, dueDate, priority) {
+    const t = wasmStr(title);
+    const d = wasmStr(dueDate || '');
+    const id = wasm.addTask(t.ptr, t.len, d.ptr, d.len, priorityToCode(priority));
+    wasm.freeString();
+    return id;
+}
+
+function wasmGetTasks() {
+    const out = [];
+    const count = wasm.getTaskCount();
+    for (let i = 0; i < count; i++) {
+        const id = wasm.getTaskId(i);
+        if (!id) continue;
+        out.push({
+            id,
+            title: wasmReadStr(wasm.getTaskTitle(id), wasm.getTaskTitleLen(id)),
+            completed: wasm.getTaskCompleted(id),
+            due_date: wasmReadStr(wasm.getTaskDue(id), wasm.getTaskDueLen(id)) || null,
+            priority: priorityFromCode(wasm.getTaskPriority(id))
+        });
+    }
+    return out;
+}
+
+function readSnapshot() {
     try {
-        const stored = localStorage.getItem('localTasks');
-        return stored ? JSON.parse(stored) : [];
+        const s = localStorage.getItem('localTasks');
+        return s ? JSON.parse(s) : [];
     } catch (_) {
         return [];
     }
 }
 
-function saveLocalTasks(tasks) {
+function writeSnapshot(tasks) {
     try {
-        localStorage.setItem('localTasks', JSON.stringify(tasks));
+        localStorage.setItem('localTasks', JSON.stringify(tasks.map(t => ({
+            title: t.title, completed: t.completed, due_date: t.due_date, priority: t.priority
+        }))));
     } catch (_) { /* ignore */ }
 }
 
-function addLocalTask(title, dueDate = null, priority = 'normal') {
-    const tasks = getLocalTasks();
-    const newTask = { id: Date.now(), title, completed: false, due_date: dueDate, priority };
-    tasks.push(newTask);
-    saveLocalTasks(tasks);
-    return newTask;
+function persistAnon() {
+    writeSnapshot(wasmGetTasks());
 }
 
-function toggleLocalTask(id) {
-    const tasks = getLocalTasks();
-    const task = tasks.find(t => t.id === id);
-    if (task) {
-        task.completed = !task.completed;
-        saveLocalTasks(tasks);
+// Replay the saved snapshot into the WASM store once, on startup.
+function hydrateAnon() {
+    if (!wasmReady()) return;
+    suppressRender = true;
+    wasm.clearAll();
+    for (const t of readSnapshot()) {
+        const id = wasmAddTask(t.title, t.due_date, t.priority);
+        if (id && t.completed) wasm.toggleTask(id);
     }
+    suppressRender = false;
 }
 
-function deleteLocalTask(id) {
-    saveLocalTasks(getLocalTasks().filter(t => t.id !== id));
+function getAnonTasks() {
+    if (wasmReady()) return wasmGetTasks();
+    return readSnapshot().map((t, i) => ({ id: i, ...t }));
+}
+
+function anonAdd(title, dueDate, priority) {
+    suppressRender = true;
+    if (wasmReady()) {
+        wasmAddTask(title, dueDate, priority);
+        persistAnon();
+    } else {
+        const snap = readSnapshot();
+        snap.push({ title, completed: false, due_date: dueDate, priority });
+        writeSnapshot(snap);
+    }
+    suppressRender = false;
+}
+
+function anonToggle(id) {
+    suppressRender = true;
+    if (wasmReady()) {
+        wasm.toggleTask(Number(id));
+        persistAnon();
+    } else {
+        const snap = readSnapshot();
+        const item = snap[Number(id)];
+        if (item) { item.completed = !item.completed; writeSnapshot(snap); }
+    }
+    suppressRender = false;
+}
+
+function anonDelete(id) {
+    suppressRender = true;
+    if (wasmReady()) {
+        wasm.deleteTask(Number(id));
+        persistAnon();
+    } else {
+        const snap = readSnapshot();
+        snap.splice(Number(id), 1);
+        writeSnapshot(snap);
+    }
+    suppressRender = false;
 }
 
 // ============ MODALS ============
@@ -566,7 +659,7 @@ async function loadTasks() {
             tasks = [];
         }
     } else {
-        tasks = getLocalTasks();
+        tasks = getAnonTasks();
     }
     renderTasks(tasks);
 }
@@ -684,7 +777,7 @@ async function addTask(title, dueDate = null, priority = 'normal') {
             if (response.ok) loadTasks();
         } catch (error) { /* ignore */ }
     } else {
-        addLocalTask(title, dueDate, priority);
+        anonAdd(title, dueDate, priority);
         loadTasks();
     }
 }
@@ -700,7 +793,7 @@ async function toggleTask(id) {
             loadTasks();
         } catch (error) { /* ignore */ }
     } else {
-        toggleLocalTask(id);
+        anonToggle(id);
         loadTasks();
     }
 }
@@ -716,7 +809,7 @@ async function deleteTask(id) {
             loadTasks();
         } catch (error) { /* ignore */ }
     } else {
-        deleteLocalTask(id);
+        anonDelete(id);
         loadTasks();
     }
 }
@@ -731,7 +824,7 @@ async function initWasm() {
                     const bytes = new Uint8Array(wasmMemory.buffer, ptr, len);
                     console.log('[WASM]', new TextDecoder().decode(bytes));
                 },
-                js_renderTasks: () => loadTasks()
+                js_renderTasks: () => { if (!suppressRender) loadTasks(); }
             }
         };
         const response = await fetch('/app.wasm');
@@ -741,6 +834,7 @@ async function initWasm() {
         wasm = result.instance.exports;
         wasmMemory = wasm.memory;
         wasm.init();
+        hydrateAnon();
     } catch (error) {
         console.log('Running without WASM');
     }
