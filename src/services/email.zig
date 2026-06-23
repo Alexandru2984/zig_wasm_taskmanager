@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const config = @import("../config/config.zig");
+const app = @import("../app.zig");
 
 const MAX_RETRIES: u8 = 3;
 const RETRY_DELAYS_MS = [_]u64{ 1000, 2000, 5000 };
@@ -433,4 +434,126 @@ fn sendHtmlEmail(allocator: std.mem.Allocator, to_email: []const u8, to_name: []
 
     try sendEmailRequest(allocator, email_cfg, to_email, payload);
     std.debug.print("HTML email sent successfully to: {s}\n", .{maskEmail(&mask_buf, to_email)});
+}
+
+// ============== ASYNC MAILER QUEUE ==============
+// SECURITY: account emails (signup confirmation, password reset, resend) are
+// dispatched off the request path. Sending SMTP inline made an authenticated
+// account's request measurably slower than an unknown one, leaking which
+// emails exist despite the deliberately uniform response bodies. Handlers now
+// enqueue and return immediately; a worker thread does the slow SMTP work.
+
+const MailKind = enum { confirmation, password_reset };
+
+const MailJob = struct {
+    kind: MailKind,
+    to_email: []u8,
+    name: []u8, // confirmation only; empty slice for password_reset
+    secret: []u8, // verification code or reset token
+};
+
+var mail_mutex: std.Thread.Mutex = .{};
+var mail_cond: std.Thread.Condition = .{};
+var mail_queue: std.ArrayListUnmanaged(MailJob) = .{};
+var mail_thread: ?std.Thread = null;
+var mail_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+fn freeJob(job: MailJob) void {
+    const a = app.allocator();
+    a.free(job.to_email);
+    a.free(job.name);
+    a.free(job.secret);
+}
+
+/// Dupe all job fields with the global allocator so they outlive the request
+/// arena. Frees any partial allocation if a later dupe fails.
+fn buildJob(kind: MailKind, to_email: []const u8, name: []const u8, secret: []const u8) ?MailJob {
+    const a = app.allocator();
+    const e = a.dupe(u8, to_email) catch return null;
+    const n = a.dupe(u8, name) catch {
+        a.free(e);
+        return null;
+    };
+    const s = a.dupe(u8, secret) catch {
+        a.free(e);
+        a.free(n);
+        return null;
+    };
+    return MailJob{ .kind = kind, .to_email = e, .name = n, .secret = s };
+}
+
+fn enqueue(job: MailJob) void {
+    mail_mutex.lock();
+    defer mail_mutex.unlock();
+    mail_queue.append(app.allocator(), job) catch {
+        // Out of memory: drop the job rather than leak it.
+        freeJob(job);
+        return;
+    };
+    mail_cond.signal();
+}
+
+pub fn enqueueConfirmation(to_email: []const u8, name: []const u8, code: []const u8) void {
+    if (buildJob(.confirmation, to_email, name, code)) |job| enqueue(job);
+}
+
+pub fn enqueuePasswordReset(to_email: []const u8, token: []const u8) void {
+    if (buildJob(.password_reset, to_email, "", token)) |job| enqueue(job);
+}
+
+fn dispatch(base: std.mem.Allocator, job: MailJob) void {
+    var arena = std.heap.ArenaAllocator.init(base);
+    defer arena.deinit();
+    const a = arena.allocator();
+    switch (job.kind) {
+        .confirmation => sendConfirmationEmail(a, job.to_email, job.name, job.secret) catch |err|
+            std.debug.print("Async confirmation email failed: {}\n", .{err}),
+        .password_reset => sendPasswordResetEmail(a, job.to_email, job.secret) catch |err|
+            std.debug.print("Async reset email failed: {}\n", .{err}),
+    }
+}
+
+fn mailerLoop() void {
+    const base = app.allocator();
+    while (mail_running.load(.acquire)) {
+        mail_mutex.lock();
+        while (mail_running.load(.acquire) and mail_queue.items.len == 0) {
+            mail_cond.wait(&mail_mutex);
+        }
+        if (!mail_running.load(.acquire)) {
+            mail_mutex.unlock();
+            break;
+        }
+        const job = mail_queue.orderedRemove(0);
+        mail_mutex.unlock();
+
+        // SMTP send happens outside the lock so enqueue never blocks on it.
+        dispatch(base, job);
+        freeJob(job);
+    }
+
+    // Shutdown: free any jobs still queued without blocking on SMTP.
+    mail_mutex.lock();
+    for (mail_queue.items) |job| freeJob(job);
+    mail_queue.deinit(base);
+    mail_mutex.unlock();
+}
+
+pub fn startMailerThread() !void {
+    if (mail_thread != null) return;
+    mail_running.store(true, .release);
+    mail_thread = try std.Thread.spawn(.{}, mailerLoop, .{});
+    std.debug.print("✅ Mailer thread started\n", .{});
+}
+
+pub fn stopMailerThread() void {
+    if (mail_thread) |thread| {
+        mail_mutex.lock();
+        mail_running.store(false, .release);
+        mail_cond.signal();
+        mail_mutex.unlock();
+        thread.join();
+        mail_thread = null;
+        std.debug.print("🛑 Mailer thread stopped\n", .{});
+    }
 }

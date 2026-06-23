@@ -15,6 +15,7 @@ const system_handler = @import("handlers/system.zig");
 const activity_handler = @import("handlers/activity.zig");
 const workspaces_handler = @import("handlers/workspaces.zig");
 const reminders = @import("services/reminders.zig");
+const email = @import("services/email.zig");
 
 // Global allocator (will use GPA from app module)
 var allocator: std.mem.Allocator = undefined;
@@ -50,6 +51,13 @@ pub fn main() !void {
         log.warn("Failed to start reminder thread: {}", .{err});
     };
     defer reminders.stopReminderThread();
+
+    // Background mailer: account emails are enqueued by handlers and sent here
+    // so SMTP latency never sits on the request path.
+    email.startMailerThread() catch |err| {
+        log.warn("Failed to start mailer thread: {}", .{err});
+    };
+    defer email.stopMailerThread();
 
     // Read server config from .env (with defaults)
     const port_str = config.get("PORT") orelse "9000";

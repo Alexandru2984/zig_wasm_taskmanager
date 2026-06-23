@@ -106,10 +106,8 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     }
     const user = parsed_created.value[0].result[0];
 
-    // Send confirmation email
-    email.sendConfirmationEmail(req_alloc, user.email, user.name, verification_code) catch |err| {
-        std.debug.print("Failed to send confirmation email: {}\n", .{err});
-    };
+    // Send confirmation email off the request path (see email.enqueue* docs).
+    email.enqueueConfirmation(user.email, user.name, verification_code);
 
     // Create session
     const token = db.createSession(req_alloc, user.id) catch {
@@ -359,11 +357,10 @@ pub fn handleForgotPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void 
 
         _ = db.setResetToken(req_alloc, user.id, token, expires) catch {};
 
-        // SECURITY: never log the token (journal readers could lift it) and
-        // never log the full email (GDPR / user enumeration via systemd logs).
-        email.sendPasswordResetEmail(req_alloc, user.email, token) catch |err| {
-            std.debug.print("Failed to send reset email: {}\n", .{err});
-        };
+        // SECURITY: enqueue rather than send inline so the response time does
+        // not reveal whether the email exists. Never log the token or the full
+        // email (journal readers / GDPR / enumeration via systemd logs).
+        email.enqueuePasswordReset(user.email, token);
     }
 
     // Always return success to prevent email enumeration
@@ -536,10 +533,8 @@ pub fn handleResendVerification(r: zap.Request, req_alloc: std.mem.Allocator) !v
         return;
     };
 
-    // Send email
-    email.sendConfirmationEmail(req_alloc, user.email, user.name, verification_code) catch |err| {
-        std.debug.print("Failed to send verification email: {}\n", .{err});
-    };
+    // Send email off the request path (see email.enqueue* docs).
+    email.enqueueConfirmation(user.email, user.name, verification_code);
 
     db.logActivity(req_alloc, user_id, "resend_verification", "user", user_id) catch |err| {
         std.debug.print("Failed to log resend verification activity: {}\n", .{err});
