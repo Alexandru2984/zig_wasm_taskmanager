@@ -475,13 +475,16 @@ fn sendHtmlEmail(allocator: std.mem.Allocator, to_email: []const u8, to_name: []
 // emails exist despite the deliberately uniform response bodies. Handlers now
 // enqueue and return immediately; a worker thread does the slow SMTP work.
 
-const MailKind = enum { confirmation, password_reset };
+const MailKind = enum { confirmation, password_reset, workspace_invite };
 
 const MailJob = struct {
     kind: MailKind,
     to_email: []u8,
-    name: []u8, // confirmation only; empty slice for password_reset
-    secret: []u8, // verification code or reset token
+    /// Recipient name for a confirmation; the workspace name for an invite.
+    /// Empty for a password reset.
+    name: []u8,
+    /// Verification code, reset token, or invite token.
+    secret: []u8,
 };
 
 var mail_mutex: std.Thread.Mutex = .{};
@@ -533,6 +536,17 @@ pub fn enqueuePasswordReset(to_email: []const u8, token: []const u8) void {
     if (buildJob(.password_reset, to_email, "", token)) |job| enqueue(job);
 }
 
+/// Workspace invitations go through the same queue as every other account
+/// email. They used to be sent inline, on the request path, with three retries
+/// behind a 30-second curl timeout: a failing address held the connection for
+/// eight seconds in practice and up to ninety in the worst case, long enough
+/// for the reverse proxy to give up and for Cloudflare to replace the response
+/// with its own error page — so the message the handler carefully wrote never
+/// reached the browser at all.
+pub fn enqueueWorkspaceInvite(to_email: []const u8, workspace_name: []const u8, token: []const u8) void {
+    if (buildJob(.workspace_invite, to_email, workspace_name, token)) |job| enqueue(job);
+}
+
 fn dispatch(base: std.mem.Allocator, job: MailJob) void {
     var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
@@ -542,6 +556,8 @@ fn dispatch(base: std.mem.Allocator, job: MailJob) void {
             std.debug.print("Async confirmation email failed: {}\n", .{err}),
         .password_reset => sendPasswordResetEmail(a, job.to_email, job.secret) catch |err|
             std.debug.print("Async reset email failed: {}\n", .{err}),
+        .workspace_invite => sendWorkspaceInviteEmail(a, job.to_email, job.name, job.secret) catch |err|
+            std.debug.print("Async workspace invite email failed: {}\n", .{err}),
     }
 }
 

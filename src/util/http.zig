@@ -211,6 +211,56 @@ pub fn verifyCsrfToken(allocator: std.mem.Allocator, r: zap.Request) bool {
     return acc == 0;
 }
 
+fn hexDigit(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+/// Percent-decode one path segment.
+///
+/// Record ids look like `tasks:abc123`, and a colon is a reserved character, so
+/// any correct client percent-encodes it — `encodeURIComponent` certainly does.
+/// The router slices ids straight out of the raw path, so without this the
+/// server compared `tasks%3Aabc123` against the database and found nothing,
+/// reporting it as a failure to verify ownership.
+///
+/// `+` is left alone: it means a space in a query string, never in a path.
+/// A malformed escape returns null rather than being passed through, so a
+/// truncated or hand-mangled id is rejected instead of silently altered.
+pub fn percentDecode(allocator: std.mem.Allocator, input: []const u8) !?[]u8 {
+    if (std.mem.indexOfScalar(u8, input, '%') == null) return null;
+
+    var out = try std.ArrayListUnmanaged(u8).initCapacity(allocator, input.len);
+    errdefer out.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] == '%') {
+            if (i + 2 >= input.len) return error.InvalidEncoding;
+            const hi = hexDigit(input[i + 1]) orelse return error.InvalidEncoding;
+            const lo = hexDigit(input[i + 2]) orelse return error.InvalidEncoding;
+            try out.append(allocator, hi * 16 + lo);
+            i += 3;
+        } else {
+            try out.append(allocator, input[i]);
+            i += 1;
+        }
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+/// percentDecode, but returns the original slice when there is nothing to
+/// decode, so callers do not have to branch. Returns null on a malformed
+/// escape sequence, which callers should surface as a 400.
+pub fn decodePathSegment(allocator: std.mem.Allocator, segment: []const u8) ?[]const u8 {
+    const decoded = percentDecode(allocator, segment) catch return null;
+    return decoded orelse segment;
+}
+
 /// Maximum JSON body size accepted by any endpoint.
 /// Our largest legitimate body is a few hundred bytes (signup); 64 KB is a
 /// generous cap that still stops "POST {10 MB of junk}" DoS attempts.
@@ -284,4 +334,32 @@ pub fn jsonError(r: zap.Request, status: u32, message: []const u8) !void {
     try std.json.Stringify.value(err_obj, .{}, &adapter.new_interface);
     try adapter.new_interface.flush();
     try r.sendBody(list.items);
+}
+
+// ---------- Tests ----------
+
+test "percentDecode leaves an unescaped segment alone" {
+    const a = std.testing.allocator;
+    try std.testing.expectEqual(@as(?[]u8, null), try percentDecode(a, "tasks:abc123"));
+}
+
+test "percentDecode restores an encoded record id" {
+    const a = std.testing.allocator;
+    const out = (try percentDecode(a, "tasks%3Aabc123")).?;
+    defer a.free(out);
+    try std.testing.expectEqualStrings("tasks:abc123", out);
+}
+
+test "percentDecode rejects malformed escapes" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.InvalidEncoding, percentDecode(a, "tasks%3"));
+    try std.testing.expectError(error.InvalidEncoding, percentDecode(a, "tasks%zz"));
+}
+
+test "percentDecode does not treat + as a space" {
+    const a = std.testing.allocator;
+    // A path segment is not a query string; `+` is a literal there.
+    const out = (try percentDecode(a, "a+b%3Ac")).?;
+    defer a.free(out);
+    try std.testing.expectEqualStrings("a+b:c", out);
 }

@@ -266,6 +266,60 @@ pub fn validateDueDate(value: []const u8) bool {
     return true;
 }
 
+/// Days since the Unix epoch for a civil date. Howard Hinnant's days_from_civil,
+/// which is exact for any proleptic Gregorian date and needs no leap-year
+/// special cases at the call site.
+fn daysFromCivil(y: i64, m: i64, d: i64) i64 {
+    const y_adj = y - @as(i64, if (m <= 2) 1 else 0);
+    const era = @divFloor(if (y_adj >= 0) y_adj else y_adj - 399, 400);
+    const yoe = y_adj - era * 400;
+    const mp = @mod(m + 9, 12);
+    const doy = @divTrunc(153 * mp + 2, 5) + d - 1;
+    const doe = yoe * 365 + @divTrunc(yoe, 4) - @divTrunc(yoe, 100) + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/// Unix timestamp for a due date already accepted by validateDueDate.
+/// The value is treated as UTC, matching how it is stored.
+pub fn dueDateToTimestamp(value: []const u8) ?i64 {
+    if (!validateDueDate(value)) return null;
+    const year = std.fmt.parseInt(i64, value[0..4], 10) catch return null;
+    const month = std.fmt.parseInt(i64, value[5..7], 10) catch return null;
+    const day = std.fmt.parseInt(i64, value[8..10], 10) catch return null;
+    const hour = std.fmt.parseInt(i64, value[11..13], 10) catch return null;
+    const minute = std.fmt.parseInt(i64, value[14..16], 10) catch return null;
+    return daysFromCivil(year, month, day) * 86400 + hour * 3600 + minute * 60;
+}
+
+/// The database asserts due_date >= created_at, so a past date is refused at
+/// the storage layer. Catching it here turns what was an opaque write failure
+/// into a message that says what to change.
+///
+/// The allowance is generous on purpose: a client's clock can differ from the
+/// server's, and "now" moves between the user picking a time and the request
+/// arriving.
+pub fn isDueDateInPast(value: []const u8, now: i64) bool {
+    const ts = dueDateToTimestamp(value) orelse return false;
+    return ts < now - 300;
+}
+
+test "dueDateToTimestamp matches known epochs" {
+    // 1970-01-01T00:00 is the epoch itself.
+    try std.testing.expectEqual(@as(?i64, 0), dueDateToTimestamp("1970-01-01T00:00"));
+    // 2000-03-01T00:00 — just past a leap day in a leap century.
+    try std.testing.expectEqual(@as(?i64, 951868800), dueDateToTimestamp("2000-03-01T00:00"));
+    try std.testing.expectEqual(@as(?i64, 1735689600), dueDateToTimestamp("2025-01-01T00:00Z"));
+    try std.testing.expectEqual(@as(?i64, null), dueDateToTimestamp("not-a-date"));
+}
+
+test "isDueDateInPast tolerates small clock skew" {
+    const now: i64 = 1735689600; // 2025-01-01T00:00Z
+    try std.testing.expect(isDueDateInPast("2024-12-31T00:00Z", now));
+    try std.testing.expect(!isDueDateInPast("2025-06-01T00:00Z", now));
+    // Inside the 5-minute allowance, so not treated as past.
+    try std.testing.expect(!isDueDateInPast("2024-12-31T23:58Z", now));
+}
+
 test "validateDueDate" {
     try std.testing.expect(validateDueDate("2025-12-25T12:00"));
     try std.testing.expect(validateDueDate("2025-12-25T12:00:30"));

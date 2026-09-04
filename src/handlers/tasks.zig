@@ -76,6 +76,10 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
             try http.jsonError(r, 400, "Invalid due_date format");
             return;
         }
+        if (validation.isDueDateInPast(dd, std.time.timestamp())) {
+            try http.jsonError(r, 400, "Due date must be in the future");
+            return;
+        }
     }
 
     const priority = request.priority orelse "normal";
@@ -107,12 +111,16 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     const workspace_id_allocated = request.workspace_id == null;
     defer if (workspace_id_allocated) req_alloc.free(workspace_id);
 
-    if (!try db.canWriteWorkspace(req_alloc, user_id, workspace_id)) {
+    const writable = db.canWriteWorkspace(req_alloc, user_id, workspace_id) catch {
+        try http.jsonError(r, 500, "Failed to verify workspace access");
+        return;
+    };
+    if (!writable) {
         try http.jsonError(r, 403, "Forbidden: workspace is read-only or unavailable");
         return;
     }
 
-    const db_result = try db.createTask(req_alloc, .{
+    const db_result = db.createTask(req_alloc, .{
         .user_id = user_id,
         .workspace_id = workspace_id,
         .title = request.title,
@@ -120,7 +128,11 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         .notes = request.notes orelse "",
         .tags = request.tags orelse &.{},
         .due_date = request.due_date,
-    });
+    }) catch |err| {
+        log.warn("Failed to create task: {}", .{err});
+        try http.jsonError(r, 500, "Failed to create task");
+        return;
+    };
     defer req_alloc.free(db_result);
 
     const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Task), req_alloc, db_result, .{ .ignore_unknown_fields = true });
@@ -212,9 +224,15 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
     // An empty due_date is the documented way to clear one, so it skips the
     // format check that a real value must pass.
     if (request.due_date) |dd| {
-        if (dd.len > 0 and !validation.validateDueDate(dd)) {
-            try http.jsonError(r, 400, "Invalid due_date format");
-            return;
+        if (dd.len > 0) {
+            if (!validation.validateDueDate(dd)) {
+                try http.jsonError(r, 400, "Invalid due_date format");
+                return;
+            }
+            if (validation.isDueDateInPast(dd, std.time.timestamp())) {
+                try http.jsonError(r, 400, "Due date must be in the future");
+                return;
+            }
         }
     }
     if (request.notes) |notes| {

@@ -26,6 +26,7 @@ test {
     _ = @import("util/rate_limiter.zig");
     _ = @import("db/http_client.zig");
     _ = @import("services/auth.zig");
+    _ = @import("util/http.zig");
 }
 
 // Global allocator (will use GPA from app module)
@@ -168,10 +169,30 @@ fn handleRequest(r: zap.Request) anyerror!void {
 
     const path = r.path orelse "/";
 
+    // SECURITY / CORRECTNESS: catch anything a handler lets escape.
+    //
+    // zap's default behaviour when the request callback returns an error is to
+    // log it and finish the response as it stands — which, for a handler that
+    // failed before writing anything, is HTTP 200 with an empty body. A client
+    // then reads "200" as success for an operation that did not happen. That
+    // was observable: creating a task with a due date the database rejects
+    // answered 200 and created nothing.
+    //
+    // Handlers should still translate their own expected failures into precise
+    // status codes. This is the backstop for the ones that do not.
     if (std.mem.startsWith(u8, path, "/api/")) {
-        try handleApi(r, path, req_alloc);
+        handleApi(r, path, req_alloc) catch |err| {
+            log.err("Unhandled error serving {s}: {}", .{ path, err });
+            r.setStatus(.internal_server_error);
+            r.setHeader("Content-Type", "application/json") catch {};
+            r.sendBody("{\"error\": \"Internal server error\"}") catch {};
+        };
     } else {
-        try serveStatic(r, path, req_alloc);
+        serveStatic(r, path, req_alloc) catch |err| {
+            log.err("Unhandled error serving {s}: {}", .{ path, err });
+            r.setStatus(.internal_server_error);
+            r.sendBody("500 Internal Server Error") catch {};
+        };
     }
 }
 
@@ -301,7 +322,10 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
     }
 
     if (std.mem.startsWith(u8, path, "/api/sessions/")) {
-        const session_id = path["/api/sessions/".len..];
+        const session_id = http.decodePathSegment(req_alloc, path["/api/sessions/".len..]) orelse {
+            try http.jsonError(r, 400, "Invalid session ID");
+            return;
+        };
         if (!std.mem.eql(u8, req_method, "DELETE")) {
             r.setHeader("Allow", "DELETE") catch {};
             r.setStatus(.method_not_allowed);
@@ -375,7 +399,10 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         const InvitesSuffix = "/invites";
 
         if (std.mem.endsWith(u8, rest, MembersSuffix)) {
-            const workspace_id = rest[0 .. rest.len - MembersSuffix.len];
+            const workspace_id = http.decodePathSegment(req_alloc, rest[0 .. rest.len - MembersSuffix.len]) orelse {
+                try http.jsonError(r, 400, "Invalid workspace ID");
+                return;
+            };
             if (workspace_id.len == 0 or !std.mem.startsWith(u8, workspace_id, "workspaces:")) {
                 try http.jsonError(r, 400, "Invalid workspace ID");
                 return;
@@ -395,7 +422,10 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         }
 
         if (std.mem.endsWith(u8, rest, InvitesSuffix)) {
-            const workspace_id = rest[0 .. rest.len - InvitesSuffix.len];
+            const workspace_id = http.decodePathSegment(req_alloc, rest[0 .. rest.len - InvitesSuffix.len]) orelse {
+                try http.jsonError(r, 400, "Invalid workspace ID");
+                return;
+            };
             if (workspace_id.len == 0 or !std.mem.startsWith(u8, workspace_id, "workspaces:")) {
                 try http.jsonError(r, 400, "Invalid workspace ID");
                 return;
@@ -433,12 +463,16 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
             try r.sendBody("{\"error\": \"Method not allowed\"}");
         }
     } else if (std.mem.startsWith(u8, path, "/api/tasks/")) {
-        const task_id = path[11..];
-        if (task_id.len == 0) {
+        const raw_task_id = path["/api/tasks/".len..];
+        if (raw_task_id.len == 0) {
             r.setStatus(.bad_request);
             try r.sendBody("{\"error\": \"Invalid ID\"}");
             return;
         }
+        const task_id = http.decodePathSegment(req_alloc, raw_task_id) orelse {
+            try http.jsonError(r, 400, "Invalid ID");
+            return;
+        };
 
         if (r.method) |method| {
             if (std.mem.eql(u8, method, "PUT")) {

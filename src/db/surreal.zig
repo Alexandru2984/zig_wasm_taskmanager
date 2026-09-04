@@ -404,8 +404,11 @@ pub fn getWorkspaceById(allocator: std.mem.Allocator, workspace_id: []const u8) 
 }
 
 pub fn listWorkspacesForUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
+    // ORDER BY, so the switcher lists workspaces in a stable order. Without it
+    // the order came back however the index happened to yield rows, and the
+    // selected entry could appear to jump between reloads.
     return queryWithVars(allocator,
-        \\SELECT workspace_id.id AS id, workspace_id.name AS name, role, workspace_id.created_at AS created_at FROM workspace_members WHERE user_id = $user_id;
+        \\SELECT workspace_id.id AS id, workspace_id.name AS name, role, workspace_id.created_at AS created_at FROM workspace_members WHERE user_id = $user_id ORDER BY created_at ASC;
     , .{ .user_id = user_id });
 }
 

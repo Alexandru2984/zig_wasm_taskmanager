@@ -190,14 +190,15 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
     }
     const invite = parsed_invite.value[0].result[0];
 
-    email.sendWorkspaceInviteEmail(req_alloc, invite_email, workspace.name, token[0..]) catch |err| {
-        log.warn("Failed to send workspace invite: {}", .{err});
-        db.deleteWorkspaceInviteById(req_alloc, invite.id) catch |delete_err| {
-            log.warn("Failed to delete unsent workspace invite: {}", .{delete_err});
-        };
-        try http.jsonError(r, 502, "Failed to send invite email");
-        return;
-    };
+    // Dispatched off the request path. The previous inline send meant an
+    // unreachable address blocked the response for as long as SMTP took to give
+    // up, and answered 502 — a status Cloudflare replaces with its own error
+    // page, so the handler's message never arrived.
+    //
+    // The invite row now survives a delivery failure instead of being deleted.
+    // It is listed as pending, so an admin can see that it exists and revoke or
+    // reissue it, which is more useful than silently having nothing.
+    email.enqueueWorkspaceInvite(invite_email, workspace.name, token[0..]);
     db.logActivity(req_alloc, user_id, "invite_workspace_member", "workspace", workspace_id) catch |err| {
         log.warn("Failed to log invite activity: {}", .{err});
     };
