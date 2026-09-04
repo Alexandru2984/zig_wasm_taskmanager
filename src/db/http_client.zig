@@ -218,6 +218,50 @@ fn writeEscapedString(writer: anytype, value: []const u8) !void {
     try writer.writeAll("\";\n");
 }
 
+/// A value that names a database record rather than being ordinary text.
+///
+/// SurrealDB 1.x coerced a plain string into a record id almost anywhere one
+/// was expected. 3.x does so only in `SELECT ... FROM $x`; everywhere else a
+/// string stays a string. `UPDATE $id` and `SET link = $id` raise an error,
+/// which is at least loud — but `WHERE link = $id` simply matches nothing and
+/// reports success, which is not. An authorization check written that way
+/// fails closed and an ownership query returns an empty list, so the symptom
+/// is "everything is gone", not "something is wrong".
+///
+/// Wrapping the value in this type makes the distinction explicit at the call
+/// site and emits `type::record("…")`, so the database is told what the value
+/// means instead of being left to guess.
+pub const RecordId = struct { value: []const u8 };
+
+/// Mark a bind value as a record id. See RecordId.
+pub fn rec(id: []const u8) RecordId {
+    return .{ .value = id };
+}
+
+/// A record id is `table:key`. Anything else is refused before it reaches the
+/// database: `type::record()` would reject it anyway, but failing here keeps a
+/// malformed id from costing a round trip and gives a single place to reason
+/// about what shapes are accepted.
+fn validRecordId(value: []const u8) bool {
+    const colon = std.mem.indexOfScalar(u8, value, ':') orelse return false;
+    if (colon == 0 or colon + 1 >= value.len) return false;
+
+    for (value[0..colon]) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '_';
+        if (!ok) return false;
+    }
+    // The key half is far more permissive in SurrealQL (it can be quoted, or a
+    // number, or a ULID), but every id this application creates or accepts is
+    // alphanumeric with underscores and dashes.
+    for (value[colon + 1 ..]) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '_' or c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 /// Same escaping as writeEscapedString, but without the trailing `;\n` that
 /// terminates a LET statement — used for elements inside an array literal.
 fn writeEscapedElement(writer: anytype, value: []const u8) !void {
@@ -255,7 +299,21 @@ fn buildVarsQuery(allocator: std.mem.Allocator, query_template: []const u8, vars
 
         try writer.print("LET ${s} = ", .{field.name});
 
-        if (FieldType == []const u8 or FieldType == []u8) {
+        if (FieldType == RecordId) {
+            if (!validRecordId(value.value)) return error.InvalidRecordId;
+            try writer.writeAll("type::record(");
+            try writeEscapedElement(writer, value.value);
+            try writer.writeAll(");\n");
+        } else if (FieldType == ?RecordId) {
+            if (value) |v| {
+                if (!validRecordId(v.value)) return error.InvalidRecordId;
+                try writer.writeAll("type::record(");
+                try writeEscapedElement(writer, v.value);
+                try writer.writeAll(");\n");
+            } else {
+                try writer.writeAll("NONE;\n");
+            }
+        } else if (FieldType == []const u8 or FieldType == []u8) {
             try writeEscapedString(writer, value);
         } else if (@typeInfo(FieldType) == .int or @typeInfo(FieldType) == .comptime_int) {
             try writer.print("{d};\n", .{value});
@@ -391,6 +449,35 @@ test "buildVarsQuery escapes control bytes" {
     const q = try buildVarsQuery(allocator, "Q", .{ .v = ctrl });
     defer allocator.free(q);
     try std.testing.expect(std.mem.indexOf(u8, q, "\\u0001") != null);
+}
+
+test "buildVarsQuery binds a record id as type::record" {
+    const allocator = std.testing.allocator;
+    const q = try buildVarsQuery(allocator, "SELECT * FROM $id;", .{ .id = rec("users:abc123") });
+    defer allocator.free(q);
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $id = type::record(\"users:abc123\");") != null);
+}
+
+test "buildVarsQuery refuses a malformed record id" {
+    const allocator = std.testing.allocator;
+    // No table part, no key part, and a table name that is not an identifier.
+    try std.testing.expectError(error.InvalidRecordId, buildVarsQuery(allocator, "Q", .{ .id = rec("users") }));
+    try std.testing.expectError(error.InvalidRecordId, buildVarsQuery(allocator, "Q", .{ .id = rec("users:") }));
+    try std.testing.expectError(error.InvalidRecordId, buildVarsQuery(allocator, "Q", .{ .id = rec(":abc") }));
+    try std.testing.expectError(error.InvalidRecordId, buildVarsQuery(allocator, "Q", .{ .id = rec("us\"ers:abc") }));
+    // A record range would let one statement touch many rows.
+    try std.testing.expectError(error.InvalidRecordId, buildVarsQuery(allocator, "Q", .{ .id = rec("tasks:a..z") }));
+}
+
+test "buildVarsQuery binds an optional record id" {
+    const allocator = std.testing.allocator;
+    const q = try buildVarsQuery(allocator, "Q", .{
+        .some = @as(?RecordId, rec("tasks:t1")),
+        .none = @as(?RecordId, null),
+    });
+    defer allocator.free(q);
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $some = type::record(\"tasks:t1\");") != null);
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $none = NONE;") != null);
 }
 
 test "buildVarsQuery escapes string array elements" {

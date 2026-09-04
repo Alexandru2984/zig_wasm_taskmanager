@@ -11,22 +11,27 @@
 
 services:
   surrealdb:
-    image: surrealdb/surrealdb@sha256:f4e80018e035fc8f9f4354e5bd9521b22aa8484c336654858cc01ce630bb8f36
-    container_name: surrealdb-taskmanager
+    image: surrealdb/surrealdb:v3.2.4
+    container_name: surrealdb-taskmanager-v3
     restart: unless-stopped
+    # The 3.x image runs as a non-root user that cannot create the RocksDB
+    # directory inside a fresh bind mount.
+    user: root
     entrypoint: ["/surreal"]
     command:
       - start
-      - --auth
       - --log
       - info
+      # `--auth` was removed in 3.x: authentication is always on, and passing
+      # the flag now makes the server refuse to start.
       - --user
       - "${SURREAL_USER:?SURREAL_USER must be set in .env}"
       - --pass
       - "${SURREAL_PASS:?SURREAL_PASS must be set in .env}"
-      - file:/data/database.db
+      # `file:` was an alias for rocksdb: and is gone in 3.x.
+      - rocksdb:/data/database.db
     volumes:
-      - /var/lib/surrealdb-taskmanager:/data
+      - /var/lib/surrealdb-taskmanager-v3:/data
     # Bound to loopback only: the database is reachable from the host app and
     # nothing else. nginx never proxies to it.
     ports:

@@ -31,6 +31,19 @@ pub fn hashTokenHex(token: []const u8) [64]u8 {
     return hashToken(token);
 }
 
+/// Letters, digits and underscore only. Used to gate the namespace and
+/// database names before they are written into a DEFINE statement, which is
+/// the one place this application builds SurrealQL from configuration.
+fn isPlainIdentifier(value: []const u8) bool {
+    if (value.len == 0 or value.len > 64) return false;
+    for (value) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 fn hashToken(token: []const u8) [64]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(token, &digest, .{});
@@ -56,6 +69,12 @@ pub fn query(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
 pub fn queryWithVars(allocator: std.mem.Allocator, sql: []const u8, vars: anytype) ![]u8 {
     return http_client.executeQueryWithVars(allocator, sql, vars);
 }
+
+/// Mark a bind value as a record id rather than text. Required for every value
+/// that names a row: since SurrealDB 3 a plain string is not a record id, and
+/// `WHERE link = $string` matches nothing without reporting an error.
+pub const rec = http_client.rec;
+pub const RecordId = http_client.RecordId;
 
 const MigrationRow = struct {
     version: []const u8,
@@ -91,88 +110,130 @@ fn runMigration(allocator: std.mem.Allocator, version: []const u8, sql: []const 
 pub fn initSchema(allocator: std.mem.Allocator) !void {
     std.debug.print("🗄️ Initializing SurrealDB schema...\n", .{});
 
+    // SurrealDB 1.x created a namespace and database implicitly on first use.
+    // 3.x does not: every statement against an unknown namespace fails with
+    // "The namespace '…' does not exist", so a fresh deployment could not even
+    // run its migrations. These are idempotent, so they cost one statement on
+    // every boot and remove a manual setup step.
+    {
+        const cfg = try getDbConfig();
+        const bootstrap = try std.fmt.allocPrint(allocator,
+            \\DEFINE NAMESPACE IF NOT EXISTS {s};
+            \\USE NS {s};
+            \\DEFINE DATABASE IF NOT EXISTS {s};
+        , .{ cfg.ns, cfg.ns, cfg.db });
+        defer allocator.free(bootstrap);
+
+        // The namespace and database names come from configuration, not from a
+        // request, and SurrealQL has no bind form for them — they are part of
+        // the statement, not values in it. Refuse anything that is not a plain
+        // identifier rather than interpolating it blindly.
+        if (!isPlainIdentifier(cfg.ns) or !isPlainIdentifier(cfg.db)) {
+            std.debug.print("❌ SURREAL_NS/SURREAL_DB must be plain identifiers\n", .{});
+            return error.InvalidDbConfig;
+        }
+
+        // Best-effort. SurrealDB 1.x has no `IF NOT EXISTS` on DEFINE NAMESPACE
+        // and reports "already exists" as an error, and 1.x creates both
+        // implicitly anyway. Treating a failure here as fatal would refuse to
+        // boot against exactly the version that does not need this. If the
+        // namespace really is missing, the migration statements that follow
+        // fail loudly and the retry loop reports it.
+        if (query(allocator, bootstrap)) |bootstrap_result| {
+            allocator.free(bootstrap_result);
+        } else |err| {
+            std.debug.print("ℹ️  Namespace bootstrap skipped ({}); continuing\n", .{err});
+        }
+    }
+
+    // `IF NOT EXISTS` on every DEFINE. SurrealDB 1.x treated a repeated DEFINE
+    // as a no-op; 3.x rejects it with "already exists", which made the
+    // unguarded bootstrap below fail on every boot after the first. The
+    // alternative spelling, `DEFINE TABLE OVERWRITE`, redefines the table
+    // rather than leaving it alone, so it is the wrong tool for an idempotent
+    // startup path.
     const migrations_schema =
-        \\DEFINE TABLE schema_migrations SCHEMAFULL;
-        \\DEFINE FIELD version ON schema_migrations TYPE string;
-        \\DEFINE FIELD applied_at ON schema_migrations TYPE datetime DEFAULT time::now();
-        \\DEFINE INDEX schema_migrations_version_idx ON schema_migrations COLUMNS version UNIQUE;
+        \\DEFINE TABLE IF NOT EXISTS schema_migrations SCHEMAFULL;
+        \\DEFINE FIELD IF NOT EXISTS version ON schema_migrations TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS applied_at ON schema_migrations TYPE datetime DEFAULT time::now();
+        \\DEFINE INDEX IF NOT EXISTS schema_migrations_version_idx ON schema_migrations COLUMNS version UNIQUE;
     ;
     const migrations_result = try query(allocator, migrations_schema);
     defer allocator.free(migrations_result);
 
     // Define users table
     try runMigration(allocator, "001_core_schema",
-        \\DEFINE TABLE users SCHEMAFULL;
-        \\DEFINE FIELD email ON users TYPE string;
-        \\DEFINE FIELD password_hash ON users TYPE string;
-        \\DEFINE FIELD name ON users TYPE string;
-        \\DEFINE FIELD avatar ON users TYPE option<string>;
-        \\DEFINE FIELD email_verified ON users TYPE bool DEFAULT false;
-        \\DEFINE FIELD verification_token ON users TYPE option<string>;
-        \\DEFINE FIELD verification_expires ON users TYPE option<int>;
-        \\DEFINE FIELD verification_attempts ON users TYPE int DEFAULT 0;
-        \\DEFINE FIELD reset_token ON users TYPE option<string>;
-        \\DEFINE FIELD reset_expires ON users TYPE option<int>;
-        \\DEFINE INDEX email_idx ON users COLUMNS email UNIQUE;
+        \\DEFINE TABLE IF NOT EXISTS users SCHEMAFULL;
+        \\DEFINE FIELD IF NOT EXISTS email ON users TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS password_hash ON users TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS name ON users TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS avatar ON users TYPE option<string>;
+        \\DEFINE FIELD IF NOT EXISTS email_verified ON users TYPE bool DEFAULT false;
+        \\DEFINE FIELD IF NOT EXISTS verification_token ON users TYPE option<string>;
+        \\DEFINE FIELD IF NOT EXISTS verification_expires ON users TYPE option<int>;
+        \\DEFINE FIELD IF NOT EXISTS verification_attempts ON users TYPE int DEFAULT 0;
+        \\DEFINE FIELD IF NOT EXISTS reset_token ON users TYPE option<string>;
+        \\DEFINE FIELD IF NOT EXISTS reset_expires ON users TYPE option<int>;
+        \\DEFINE INDEX IF NOT EXISTS email_idx ON users COLUMNS email UNIQUE;
     );
 
     // Define tasks table
     try runMigration(allocator, "002_tasks_schema",
-        \\DEFINE TABLE tasks SCHEMAFULL;
-        \\DEFINE FIELD user_id ON tasks TYPE record<users>;
-        \\DEFINE FIELD title ON tasks TYPE string;
-        \\DEFINE FIELD completed ON tasks TYPE bool DEFAULT false;
-        \\DEFINE FIELD created_at ON tasks TYPE datetime DEFAULT time::now();
-        \\DEFINE FIELD due_date ON tasks TYPE option<datetime> ASSERT $value == NONE OR $value >= created_at;
-        \\DEFINE FIELD priority ON tasks TYPE string DEFAULT "normal";
-        \\DEFINE FIELD reminder_sent ON tasks TYPE bool DEFAULT false;
-        \\DEFINE FIELD reminder_sent_at ON tasks TYPE option<datetime>;
+        \\DEFINE TABLE IF NOT EXISTS tasks SCHEMAFULL;
+        \\DEFINE FIELD IF NOT EXISTS user_id ON tasks TYPE record<users>;
+        \\DEFINE FIELD IF NOT EXISTS title ON tasks TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS completed ON tasks TYPE bool DEFAULT false;
+        \\DEFINE FIELD IF NOT EXISTS created_at ON tasks TYPE datetime DEFAULT time::now();
+        \\DEFINE FIELD IF NOT EXISTS due_date ON tasks TYPE option<datetime> ASSERT $value == NONE OR $value >= created_at;
+        \\DEFINE FIELD IF NOT EXISTS priority ON tasks TYPE string DEFAULT "normal";
+        \\DEFINE FIELD IF NOT EXISTS reminder_sent ON tasks TYPE bool DEFAULT false;
+        \\DEFINE FIELD IF NOT EXISTS reminder_sent_at ON tasks TYPE option<datetime>;
     );
 
     // Define sessions table for secure token storage
     try runMigration(allocator, "003_sessions_schema",
-        \\DEFINE TABLE sessions SCHEMAFULL;
-        \\DEFINE FIELD token ON sessions TYPE string;
-        \\DEFINE FIELD user_id ON sessions TYPE record<users>;
-        \\DEFINE FIELD created_at ON sessions TYPE datetime DEFAULT time::now();
-        \\DEFINE FIELD expires_at ON sessions TYPE datetime;
-        \\DEFINE INDEX session_token_idx ON sessions COLUMNS token UNIQUE;
+        \\DEFINE TABLE IF NOT EXISTS sessions SCHEMAFULL;
+        \\DEFINE FIELD IF NOT EXISTS token ON sessions TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS user_id ON sessions TYPE record<users>;
+        \\DEFINE FIELD IF NOT EXISTS created_at ON sessions TYPE datetime DEFAULT time::now();
+        \\DEFINE FIELD IF NOT EXISTS expires_at ON sessions TYPE datetime;
+        \\DEFINE INDEX IF NOT EXISTS session_token_idx ON sessions COLUMNS token UNIQUE;
     );
 
     try runMigration(allocator, "004_activity_schema",
-        \\DEFINE TABLE activity_events SCHEMAFULL;
-        \\DEFINE FIELD user_id ON activity_events TYPE record<users>;
-        \\DEFINE FIELD action ON activity_events TYPE string;
-        \\DEFINE FIELD entity_type ON activity_events TYPE string;
-        \\DEFINE FIELD entity_id ON activity_events TYPE string DEFAULT "";
-        \\DEFINE FIELD created_at ON activity_events TYPE datetime DEFAULT time::now();
+        \\DEFINE TABLE IF NOT EXISTS activity_events SCHEMAFULL;
+        \\DEFINE FIELD IF NOT EXISTS user_id ON activity_events TYPE record<users>;
+        \\DEFINE FIELD IF NOT EXISTS action ON activity_events TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS entity_type ON activity_events TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS entity_id ON activity_events TYPE string DEFAULT "";
+        \\DEFINE FIELD IF NOT EXISTS created_at ON activity_events TYPE datetime DEFAULT time::now();
     );
 
     try runMigration(allocator, "005_workspaces_schema",
-        \\DEFINE TABLE workspaces SCHEMAFULL;
-        \\DEFINE FIELD name ON workspaces TYPE string;
-        \\DEFINE FIELD owner_id ON workspaces TYPE record<users>;
-        \\DEFINE FIELD created_at ON workspaces TYPE datetime DEFAULT time::now();
-        \\DEFINE TABLE workspace_members SCHEMAFULL;
-        \\DEFINE FIELD workspace_id ON workspace_members TYPE record<workspaces>;
-        \\DEFINE FIELD user_id ON workspace_members TYPE record<users>;
-        \\DEFINE FIELD role ON workspace_members TYPE string ASSERT $value INSIDE ["owner", "admin", "member", "viewer"];
-        \\DEFINE FIELD created_at ON workspace_members TYPE datetime DEFAULT time::now();
-        \\DEFINE INDEX workspace_members_unique_idx ON workspace_members COLUMNS workspace_id, user_id UNIQUE;
-        \\DEFINE FIELD workspace_id ON tasks TYPE option<record<workspaces>>;
+        \\DEFINE TABLE IF NOT EXISTS workspaces SCHEMAFULL;
+        \\DEFINE FIELD IF NOT EXISTS name ON workspaces TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS owner_id ON workspaces TYPE record<users>;
+        \\DEFINE FIELD IF NOT EXISTS created_at ON workspaces TYPE datetime DEFAULT time::now();
+        \\DEFINE TABLE IF NOT EXISTS workspace_members SCHEMAFULL;
+        \\DEFINE FIELD IF NOT EXISTS workspace_id ON workspace_members TYPE record<workspaces>;
+        \\DEFINE FIELD IF NOT EXISTS user_id ON workspace_members TYPE record<users>;
+        \\DEFINE FIELD IF NOT EXISTS role ON workspace_members TYPE string ASSERT $value INSIDE ["owner", "admin", "member", "viewer"];
+        \\DEFINE FIELD IF NOT EXISTS created_at ON workspace_members TYPE datetime DEFAULT time::now();
+        \\DEFINE INDEX IF NOT EXISTS workspace_members_unique_idx ON workspace_members COLUMNS workspace_id, user_id UNIQUE;
+        \\DEFINE FIELD IF NOT EXISTS workspace_id ON tasks TYPE option<record<workspaces>>;
     );
 
     try runMigration(allocator, "006_workspace_invites_schema",
-        \\DEFINE TABLE workspace_invites SCHEMAFULL;
-        \\DEFINE FIELD workspace_id ON workspace_invites TYPE record<workspaces>;
-        \\DEFINE FIELD email ON workspace_invites TYPE string;
-        \\DEFINE FIELD role ON workspace_invites TYPE string ASSERT $value INSIDE ["admin", "member", "viewer"];
-        \\DEFINE FIELD token ON workspace_invites TYPE string;
-        \\DEFINE FIELD invited_by ON workspace_invites TYPE record<users>;
-        \\DEFINE FIELD expires_at ON workspace_invites TYPE int;
-        \\DEFINE FIELD accepted_at ON workspace_invites TYPE option<int>;
-        \\DEFINE FIELD created_at ON workspace_invites TYPE datetime DEFAULT time::now();
-        \\DEFINE INDEX workspace_invites_token_idx ON workspace_invites COLUMNS token UNIQUE;
+        \\DEFINE TABLE IF NOT EXISTS workspace_invites SCHEMAFULL;
+        \\DEFINE FIELD IF NOT EXISTS workspace_id ON workspace_invites TYPE record<workspaces>;
+        \\DEFINE FIELD IF NOT EXISTS email ON workspace_invites TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS role ON workspace_invites TYPE string ASSERT $value INSIDE ["admin", "member", "viewer"];
+        \\DEFINE FIELD IF NOT EXISTS token ON workspace_invites TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS invited_by ON workspace_invites TYPE record<users>;
+        \\DEFINE FIELD IF NOT EXISTS expires_at ON workspace_invites TYPE int;
+        \\DEFINE FIELD IF NOT EXISTS accepted_at ON workspace_invites TYPE option<int>;
+        \\DEFINE FIELD IF NOT EXISTS created_at ON workspace_invites TYPE datetime DEFAULT time::now();
+        \\DEFINE INDEX IF NOT EXISTS workspace_invites_token_idx ON workspace_invites COLUMNS token UNIQUE;
     );
 
     // SECURITY: the CSRF token used to be a standalone random value that was
@@ -181,7 +242,7 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
     // satisfy that. Binding it to the session makes forgery require the
     // session token itself, which is HttpOnly and unreadable from script.
     try runMigration(allocator, "007_session_csrf",
-        \\DEFINE FIELD csrf_hash ON sessions TYPE string DEFAULT "";
+        \\DEFINE FIELD IF NOT EXISTS csrf_hash ON sessions TYPE string DEFAULT "";
     );
 
     // Bring rows written before email normalisation into the canonical form,
@@ -194,9 +255,9 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
     );
 
     try runMigration(allocator, "009_task_notes_and_tags",
-        \\DEFINE FIELD notes ON tasks TYPE string DEFAULT "";
-        \\DEFINE FIELD tags ON tasks TYPE array<string> DEFAULT [];
-        \\DEFINE FIELD updated_at ON tasks TYPE option<datetime>;
+        \\DEFINE FIELD IF NOT EXISTS notes ON tasks TYPE string DEFAULT "";
+        \\DEFINE FIELD IF NOT EXISTS tags ON tasks TYPE array<string> DEFAULT [];
+        \\DEFINE FIELD IF NOT EXISTS updated_at ON tasks TYPE option<datetime>;
     );
 
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
@@ -227,19 +288,19 @@ pub fn getUserById(allocator: std.mem.Allocator, id: []const u8) ![]u8 {
     // id is a full SurrealDB record ID like "users:abc123"
     return queryWithVars(allocator,
         \\SELECT * FROM $record_id;
-    , .{ .record_id = id });
+    , .{ .record_id = rec(id) });
 }
 
 pub fn updateUserName(allocator: std.mem.Allocator, user_id: []const u8, name: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\UPDATE $record_id SET name = $name;
-    , .{ .record_id = user_id, .name = name });
+    , .{ .record_id = rec(user_id), .name = name });
 }
 
 pub fn updateUserPassword(allocator: std.mem.Allocator, user_id: []const u8, password_hash: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\UPDATE $record_id SET password_hash = $password_hash;
-    , .{ .record_id = user_id, .password_hash = password_hash });
+    , .{ .record_id = rec(user_id), .password_hash = password_hash });
 }
 
 /// Atomic reset: set new password hash AND clear reset_token/expires in one
@@ -251,20 +312,20 @@ pub fn resetUserPasswordAndClearToken(
 ) ![]u8 {
     return queryWithVars(allocator,
         \\UPDATE $record_id SET password_hash = $password_hash, reset_token = NONE, reset_expires = NONE;
-    , .{ .record_id = user_id, .password_hash = password_hash });
+    , .{ .record_id = rec(user_id), .password_hash = password_hash });
 }
 
 pub fn setResetToken(allocator: std.mem.Allocator, user_id: []const u8, token: []const u8, expires: i64) ![]u8 {
     const token_hash = hashToken(token);
     return queryWithVars(allocator,
         \\UPDATE $record_id SET reset_token = $reset_tkn, reset_expires = $expires;
-    , .{ .record_id = user_id, .reset_tkn = token_hash, .expires = expires });
+    , .{ .record_id = rec(user_id), .reset_tkn = token_hash, .expires = expires });
 }
 
 pub fn clearResetToken(allocator: std.mem.Allocator, user_id: []const u8) !void {
     const result = try queryWithVars(allocator,
         \\UPDATE $record_id SET reset_token = NONE, reset_expires = NONE;
-    , .{ .record_id = user_id });
+    , .{ .record_id = rec(user_id) });
     allocator.free(result);
 }
 
@@ -273,7 +334,7 @@ pub fn setVerificationToken(allocator: std.mem.Allocator, user_id: []const u8, t
     const token_hash = hashToken(token);
     return queryWithVars(allocator,
         \\UPDATE $record_id SET verification_token = $verification_tkn, verification_expires = $expires, verification_attempts = 0;
-    , .{ .record_id = user_id, .verification_tkn = token_hash, .expires = expires });
+    , .{ .record_id = rec(user_id), .verification_tkn = token_hash, .expires = expires });
 }
 
 pub fn getUserByResetToken(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
@@ -295,7 +356,7 @@ pub fn verifyUserEmailAtomic(
     const code_hash = hashToken(code);
     const result = try queryWithVars(allocator,
         \\UPDATE $record_id SET email_verified = true, verification_token = NONE, verification_expires = NONE, verification_attempts = 0 WHERE verification_token = $code AND (verification_expires = NONE OR verification_expires >= $now_ts) RETURN AFTER;
-    , .{ .record_id = user_id, .code = code_hash, .now_ts = now_ts });
+    , .{ .record_id = rec(user_id), .code = code_hash, .now_ts = now_ts });
     defer allocator.free(result);
 
     // If no row updated, UPDATE returns []. Parse and check.
@@ -315,7 +376,7 @@ pub fn bumpVerificationAttempts(
 ) !u32 {
     const result = try queryWithVars(allocator,
         \\UPDATE $record_id SET verification_attempts = (verification_attempts OR 0) + 1, verification_token = IF (verification_attempts OR 0) + 1 >= $max THEN NONE ELSE verification_token END, verification_expires = IF (verification_attempts OR 0) + 1 >= $max THEN NONE ELSE verification_expires END RETURN AFTER;
-    , .{ .record_id = user_id, .max = @as(i64, @intCast(max_attempts)) });
+    , .{ .record_id = rec(user_id), .max = @as(i64, @intCast(max_attempts)) });
     defer allocator.free(result);
 
     const parsed = std.json.parseFromSlice(
@@ -343,7 +404,7 @@ const WorkspaceListRow = struct {
 pub fn ensurePersonalWorkspace(allocator: std.mem.Allocator, user_id: []const u8, user_name: []const u8) ![]const u8 {
     const existing = try queryWithVars(allocator,
         \\SELECT workspace_id FROM workspace_members WHERE user_id = $user_id LIMIT 1;
-    , .{ .user_id = user_id });
+    , .{ .user_id = rec(user_id) });
     defer allocator.free(existing);
 
     const ExistingRow = struct { workspace_id: []const u8 };
@@ -371,7 +432,7 @@ pub fn ensurePersonalWorkspace(allocator: std.mem.Allocator, user_id: []const u8
 
     const update_tasks = try queryWithVars(allocator,
         \\UPDATE tasks SET workspace_id = $workspace_id WHERE user_id = $user_id AND workspace_id = NONE;
-    , .{ .workspace_id = workspace_id, .user_id = user_id });
+    , .{ .workspace_id = rec(workspace_id), .user_id = rec(user_id) });
     allocator.free(update_tasks);
 
     return try allocator.dupe(u8, workspace_id);
@@ -380,7 +441,7 @@ pub fn ensurePersonalWorkspace(allocator: std.mem.Allocator, user_id: []const u8
 pub fn createWorkspace(allocator: std.mem.Allocator, owner_id: []const u8, name: []const u8) ![]u8 {
     const workspace_result = try queryWithVars(allocator,
         \\CREATE workspaces SET name = $name, owner_id = $owner_id, created_at = time::now();
-    , .{ .name = name, .owner_id = owner_id });
+    , .{ .name = name, .owner_id = rec(owner_id) });
     errdefer allocator.free(workspace_result);
 
     const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Workspace), allocator, workspace_result, .{ .ignore_unknown_fields = true });
@@ -391,7 +452,7 @@ pub fn createWorkspace(allocator: std.mem.Allocator, owner_id: []const u8, name:
 
     const member_result = try queryWithVars(allocator,
         \\CREATE workspace_members SET workspace_id = $workspace_id, user_id = $owner_id, role = "owner", created_at = time::now();
-    , .{ .workspace_id = workspace.id, .owner_id = owner_id });
+    , .{ .workspace_id = rec(workspace.id), .owner_id = rec(owner_id) });
     allocator.free(member_result);
 
     return workspace_result;
@@ -400,7 +461,7 @@ pub fn createWorkspace(allocator: std.mem.Allocator, owner_id: []const u8, name:
 pub fn getWorkspaceById(allocator: std.mem.Allocator, workspace_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\SELECT * FROM $workspace_id;
-    , .{ .workspace_id = workspace_id });
+    , .{ .workspace_id = rec(workspace_id) });
 }
 
 pub fn listWorkspacesForUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
@@ -409,13 +470,13 @@ pub fn listWorkspacesForUser(allocator: std.mem.Allocator, user_id: []const u8) 
     // selected entry could appear to jump between reloads.
     return queryWithVars(allocator,
         \\SELECT workspace_id.id AS id, workspace_id.name AS name, role, workspace_id.created_at AS created_at FROM workspace_members WHERE user_id = $user_id ORDER BY created_at ASC;
-    , .{ .user_id = user_id });
+    , .{ .user_id = rec(user_id) });
 }
 
 pub fn getWorkspaceRole(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8) !?[]const u8 {
     const result = try queryWithVars(allocator,
         \\SELECT role FROM workspace_members WHERE user_id = $user_id AND workspace_id = $workspace_id LIMIT 1;
-    , .{ .user_id = user_id, .workspace_id = workspace_id });
+    , .{ .user_id = rec(user_id), .workspace_id = rec(workspace_id) });
     defer allocator.free(result);
 
     const RoleRow = struct { role: []const u8 };
@@ -429,7 +490,7 @@ pub fn getWorkspaceRole(allocator: std.mem.Allocator, user_id: []const u8, works
 pub fn isUserEmailVerified(allocator: std.mem.Allocator, user_id: []const u8) !bool {
     const result = try queryWithVars(allocator,
         \\SELECT email_verified FROM $record_id;
-    , .{ .record_id = user_id });
+    , .{ .record_id = rec(user_id) });
     defer allocator.free(result);
 
     const VerificationRow = struct { email_verified: bool = false };
@@ -480,7 +541,7 @@ pub fn canAdminWorkspace(allocator: std.mem.Allocator, user_id: []const u8, work
 pub fn listWorkspaceMembers(allocator: std.mem.Allocator, workspace_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\SELECT id, user_id.id AS user_id, user_id.email AS email, user_id.name AS name, role, created_at FROM workspace_members WHERE workspace_id = $workspace_id;
-    , .{ .workspace_id = workspace_id });
+    , .{ .workspace_id = rec(workspace_id) });
 }
 
 pub fn createWorkspaceInvite(
@@ -496,11 +557,11 @@ pub fn createWorkspaceInvite(
     return queryWithVars(allocator,
         \\CREATE workspace_invites SET workspace_id = $workspace_id, email = $email, role = $role, token = $invite_token, invited_by = $invited_by, expires_at = $expires_at, accepted_at = NONE, created_at = time::now();
     , .{
-        .workspace_id = workspace_id,
+        .workspace_id = rec(workspace_id),
         .email = email,
         .role = role,
         .invite_token = token_hash,
-        .invited_by = invited_by,
+        .invited_by = rec(invited_by),
         .expires_at = expires_at,
     });
 }
@@ -508,7 +569,7 @@ pub fn createWorkspaceInvite(
 pub fn hasPendingWorkspaceInvite(allocator: std.mem.Allocator, workspace_id: []const u8, email: []const u8, now_ts: i64) !bool {
     const result = try queryWithVars(allocator,
         \\SELECT id FROM workspace_invites WHERE workspace_id = $workspace_id AND email = $email AND accepted_at = NONE AND expires_at >= $now_ts LIMIT 1;
-    , .{ .workspace_id = workspace_id, .email = email, .now_ts = now_ts });
+    , .{ .workspace_id = rec(workspace_id), .email = email, .now_ts = now_ts });
     defer allocator.free(result);
 
     const ExistingInvite = struct { id: []const u8 };
@@ -527,21 +588,21 @@ pub fn getWorkspaceInviteByToken(allocator: std.mem.Allocator, token: []const u8
 pub fn deleteWorkspaceInviteById(allocator: std.mem.Allocator, invite_id: []const u8) !void {
     const result = try queryWithVars(allocator,
         \\DELETE $invite_id;
-    , .{ .invite_id = invite_id });
+    , .{ .invite_id = rec(invite_id) });
     allocator.free(result);
 }
 
 pub fn addWorkspaceMember(allocator: std.mem.Allocator, workspace_id: []const u8, user_id: []const u8, role: []const u8) !void {
     const result = try queryWithVars(allocator,
         \\CREATE workspace_members SET workspace_id = $workspace_id, user_id = $user_id, role = $role, created_at = time::now();
-    , .{ .workspace_id = workspace_id, .user_id = user_id, .role = role });
+    , .{ .workspace_id = rec(workspace_id), .user_id = rec(user_id), .role = role });
     allocator.free(result);
 }
 
 pub fn markWorkspaceInviteAccepted(allocator: std.mem.Allocator, invite_id: []const u8, accepted_at: i64) !void {
     const result = try queryWithVars(allocator,
         \\UPDATE $invite_id SET accepted_at = $accepted_at;
-    , .{ .invite_id = invite_id, .accepted_at = accepted_at });
+    , .{ .invite_id = rec(invite_id), .accepted_at = accepted_at });
     allocator.free(result);
 }
 
@@ -550,7 +611,7 @@ pub fn markWorkspaceInviteAccepted(allocator: std.mem.Allocator, invite_id: []co
 pub fn updateWorkspaceMemberRole(allocator: std.mem.Allocator, workspace_id: []const u8, user_id: []const u8, role: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\UPDATE workspace_members SET role = $role WHERE workspace_id = $workspace_id AND user_id = $user_id RETURN AFTER;
-    , .{ .workspace_id = workspace_id, .user_id = user_id, .role = role });
+    , .{ .workspace_id = rec(workspace_id), .user_id = rec(user_id), .role = role });
 }
 
 /// Remove a member from a workspace. RETURN BEFORE yields the deleted row(s),
@@ -558,13 +619,13 @@ pub fn updateWorkspaceMemberRole(allocator: std.mem.Allocator, workspace_id: []c
 pub fn removeWorkspaceMember(allocator: std.mem.Allocator, workspace_id: []const u8, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\DELETE workspace_members WHERE workspace_id = $workspace_id AND user_id = $user_id RETURN BEFORE;
-    , .{ .workspace_id = workspace_id, .user_id = user_id });
+    , .{ .workspace_id = rec(workspace_id), .user_id = rec(user_id) });
 }
 
 pub fn listPendingWorkspaceInvites(allocator: std.mem.Allocator, workspace_id: []const u8, now_ts: i64) ![]u8 {
     return queryWithVars(allocator,
         \\SELECT id, email, role, expires_at, created_at FROM workspace_invites WHERE workspace_id = $workspace_id AND accepted_at = NONE AND expires_at >= $now_ts ORDER BY created_at DESC;
-    , .{ .workspace_id = workspace_id, .now_ts = now_ts });
+    , .{ .workspace_id = rec(workspace_id), .now_ts = now_ts });
 }
 
 /// Revoke a pending invite, scoped to its workspace so an admin can't delete
@@ -572,7 +633,7 @@ pub fn listPendingWorkspaceInvites(allocator: std.mem.Allocator, workspace_id: [
 pub fn deleteWorkspaceInviteScoped(allocator: std.mem.Allocator, invite_id: []const u8, workspace_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\DELETE workspace_invites WHERE id = $invite_id AND workspace_id = $workspace_id RETURN BEFORE;
-    , .{ .invite_id = invite_id, .workspace_id = workspace_id });
+    , .{ .invite_id = rec(invite_id), .workspace_id = rec(workspace_id) });
 }
 
 // ============== TASK OPERATIONS ==============
@@ -609,8 +670,8 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
     }
 
     return queryWithVars(allocator, sql, .{
-        .user_id = task.user_id,
-        .workspace_id = task.workspace_id,
+        .user_id = rec(task.user_id),
+        .workspace_id = rec(task.workspace_id),
         .title = task.title,
         .priority = task.priority,
         .notes = task.notes,
@@ -622,7 +683,7 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
 pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\SELECT * FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE);
-    , .{ .user_id = user_id });
+    , .{ .user_id = rec(user_id) });
 }
 
 /// Partial update of a task. Only the fields the caller actually supplied are
@@ -681,7 +742,7 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
     }
 
     return queryWithVars(allocator, sql, .{
-        .record_id = task_id,
+        .record_id = rec(task_id),
         .title = patch.title orelse "",
         .priority = patch.priority orelse "normal",
         .notes = patch.notes orelse "",
@@ -704,13 +765,13 @@ fn normalizeDueDate(allocator: std.mem.Allocator, due_date: []const u8) ![]u8 {
 pub fn toggleTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\UPDATE $record_id SET completed = !completed;
-    , .{ .record_id = task_id });
+    , .{ .record_id = rec(task_id) });
 }
 
 pub fn deleteTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\DELETE $record_id;
-    , .{ .record_id = task_id });
+    , .{ .record_id = rec(task_id) });
 }
 
 pub fn getDueTasksForReminders(allocator: std.mem.Allocator) ![]u8 {
@@ -722,7 +783,7 @@ pub fn getDueTasksForReminders(allocator: std.mem.Allocator) ![]u8 {
 pub fn markTaskReminderSent(allocator: std.mem.Allocator, task_id: []const u8) !void {
     const result = try queryWithVars(allocator,
         \\UPDATE $record_id SET reminder_sent = true, reminder_sent_at = time::now();
-    , .{ .record_id = task_id });
+    , .{ .record_id = rec(task_id) });
     allocator.free(result);
 }
 
@@ -732,7 +793,7 @@ pub fn markTaskReminderSent(allocator: std.mem.Allocator, task_id: []const u8) !
 pub fn listUserSessions(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\SELECT id, token, created_at, expires_at FROM sessions WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 100;
-    , .{ .user_id = user_id });
+    , .{ .user_id = rec(user_id) });
 }
 
 /// Revoke one session by record id, scoped to its owner so a valid session
@@ -740,14 +801,14 @@ pub fn listUserSessions(allocator: std.mem.Allocator, user_id: []const u8) ![]u8
 pub fn deleteSessionScoped(allocator: std.mem.Allocator, session_id: []const u8, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\DELETE sessions WHERE id = $session_id AND user_id = $user_id RETURN BEFORE;
-    , .{ .session_id = session_id, .user_id = user_id });
+    , .{ .session_id = rec(session_id), .user_id = rec(user_id) });
 }
 
 /// Revoke every session for a user except the one making the request.
 pub fn deleteOtherUserSessions(allocator: std.mem.Allocator, user_id: []const u8, keep_token_hash: []const u8) !void {
     const result = try queryWithVars(allocator,
         \\DELETE sessions WHERE user_id = $user_id AND token != $keep;
-    , .{ .user_id = user_id, .keep = keep_token_hash });
+    , .{ .user_id = rec(user_id), .keep = keep_token_hash });
     allocator.free(result);
 }
 
@@ -757,7 +818,7 @@ pub fn deleteOtherUserSessions(allocator: std.mem.Allocator, user_id: []const u8
 pub fn exportUserTasks(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\SELECT id, title, notes, tags, completed, priority, due_date, created_at, updated_at, workspace_id FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE) ORDER BY created_at DESC;
-    , .{ .user_id = user_id });
+    , .{ .user_id = rec(user_id) });
 }
 
 /// Delete a user and everything that belongs to them.
@@ -778,7 +839,7 @@ pub fn deleteUserAccount(allocator: std.mem.Allocator, user_id: []const u8) !voi
         \\DELETE activity_events WHERE user_id = $record_id;
         \\DELETE sessions WHERE user_id = $record_id;
         \\DELETE $record_id;
-    , .{ .record_id = user_id });
+    , .{ .record_id = rec(user_id) });
     allocator.free(result);
 }
 
@@ -793,14 +854,14 @@ pub fn logActivity(
 ) !void {
     const result = try queryWithVars(allocator,
         \\CREATE activity_events SET user_id = $user_id, action = $action, entity_type = $entity_type, entity_id = <string>$entity_id, created_at = time::now();
-    , .{ .user_id = user_id, .action = action, .entity_type = entity_type, .entity_id = entity_id });
+    , .{ .user_id = rec(user_id), .action = action, .entity_type = entity_type, .entity_id = entity_id });
     allocator.free(result);
 }
 
 pub fn getActivityByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\SELECT * FROM activity_events WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 50;
-    , .{ .user_id = user_id });
+    , .{ .user_id = rec(user_id) });
 }
 
 // ============== TASK OWNERSHIP ==============
@@ -808,7 +869,7 @@ pub fn getActivityByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u
 pub fn getTaskOwner(allocator: std.mem.Allocator, task_id: []const u8) !?[]const u8 {
     const result = try queryWithVars(allocator,
         \\SELECT user_id, workspace_id FROM $record_id;
-    , .{ .record_id = task_id });
+    , .{ .record_id = rec(task_id) });
     defer allocator.free(result);
 
     const TaskOwner = struct {
@@ -829,7 +890,7 @@ pub fn getTaskOwner(allocator: std.mem.Allocator, task_id: []const u8) !?[]const
 pub fn canWriteTask(allocator: std.mem.Allocator, task_id: []const u8, user_id: []const u8) !bool {
     const result = try queryWithVars(allocator,
         \\SELECT user_id, workspace_id FROM $record_id;
-    , .{ .record_id = task_id });
+    , .{ .record_id = rec(task_id) });
     defer allocator.free(result);
 
     const TaskAccess = struct {
@@ -898,8 +959,8 @@ pub fn createSession(allocator: std.mem.Allocator, user_id: []const u8) !NewSess
     const expires_ms = std.time.milliTimestamp() + (7 * 24 * 60 * 60 * 1000);
 
     const result = try queryWithVars(allocator,
-        \\CREATE sessions SET token = $session_token, user_id = $user_id, csrf_hash = $csrf_hash, expires_at = time::from::millis($expires_ms);
-    , .{ .session_token = token_hash, .user_id = user_id, .csrf_hash = csrf_hash, .expires_ms = expires_ms });
+        \\CREATE sessions SET token = $session_token, user_id = $user_id, csrf_hash = $csrf_hash, expires_at = time::from_millis($expires_ms);
+    , .{ .session_token = token_hash, .user_id = rec(user_id), .csrf_hash = csrf_hash, .expires_ms = expires_ms });
     defer allocator.free(result);
 
     return .{ .token = token, .csrf = csrf };
@@ -970,7 +1031,7 @@ pub fn deleteSession(allocator: std.mem.Allocator, token: []const u8) !void {
 pub fn deleteUserSessions(allocator: std.mem.Allocator, user_id: []const u8) !void {
     const result = try queryWithVars(allocator,
         \\DELETE FROM sessions WHERE user_id = $user_id;
-    , .{ .user_id = user_id });
+    , .{ .user_id = rec(user_id) });
     allocator.free(result);
 }
 
@@ -978,7 +1039,7 @@ pub fn deleteUserSessions(allocator: std.mem.Allocator, user_id: []const u8) !vo
 pub fn cleanupExpiredSessions(allocator: std.mem.Allocator) !void {
     const current_ms = std.time.milliTimestamp();
     const result = try queryWithVars(allocator,
-        \\DELETE FROM sessions WHERE expires_at < time::from::millis($current_ms);
+        \\DELETE FROM sessions WHERE expires_at < time::from_millis($current_ms);
     , .{ .current_ms = current_ms });
     allocator.free(result);
 }
