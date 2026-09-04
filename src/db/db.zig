@@ -66,9 +66,11 @@ pub const bumpVerificationAttempts = impl.bumpVerificationAttempts;
 
 // Task operations
 pub const createTask = impl.createTask;
-pub const createTaskWithDueDate = impl.createTaskWithDueDate;
+pub const NewTask = impl.NewTask;
 pub const getTasksByUser = impl.getTasksByUser;
 pub const toggleTask = impl.toggleTask;
+pub const updateTask = impl.updateTask;
+pub const TaskPatch = impl.TaskPatch;
 pub const deleteTask = impl.deleteTask;
 pub const getTaskOwner = impl.getTaskOwner;
 pub const verifyTaskOwnership = impl.verifyTaskOwnership;

@@ -218,6 +218,25 @@ fn writeEscapedString(writer: anytype, value: []const u8) !void {
     try writer.writeAll("\";\n");
 }
 
+/// Same escaping as writeEscapedString, but without the trailing `;\n` that
+/// terminates a LET statement — used for elements inside an array literal.
+fn writeEscapedElement(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x00 => return error.InvalidInput,
+            0x01...0x08, 0x0B, 0x0C, 0x0E...0x1F, 0x7F => try writer.print("\\u{x:0>4}", .{c}),
+            else => try writer.writeByte(c),
+        }
+    }
+    try writer.writeByte('"');
+}
+
 /// Build the full SurrealQL string for a parameterized query: a `LET $x = ...`
 /// prefix per bind variable, followed by the template. Kept separate from
 /// execution so the escaping can be unit-tested without a live database.
@@ -244,10 +263,29 @@ fn buildVarsQuery(allocator: std.mem.Allocator, query_template: []const u8, vars
             try writer.print("{s};\n", .{if (value) "true" else "false"});
         } else if (@typeInfo(FieldType) == .optional) {
             if (value) |v| {
-                try writeEscapedString(writer, v);
+                const Child = @TypeOf(v);
+                if (Child == []const u8 or Child == []u8) {
+                    try writeEscapedString(writer, v);
+                } else if (@typeInfo(Child) == .int) {
+                    try writer.print("{d};\n", .{v});
+                } else if (@typeInfo(Child) == .bool) {
+                    try writer.print("{s};\n", .{if (v) "true" else "false"});
+                } else {
+                    @compileError("queryWithVars: unsupported optional bind type " ++ @typeName(Child));
+                }
             } else {
                 try writer.writeAll("NONE;\n");
             }
+        } else if (FieldType == []const []const u8) {
+            // Array of strings (task tags). Each element goes through the same
+            // escaper as a scalar string, so an element cannot terminate its
+            // own literal and break out into the surrounding query.
+            try writer.writeByte('[');
+            for (value, 0..) |item, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeEscapedElement(writer, item);
+            }
+            try writer.writeAll("];\n");
         } else if (FieldType == [64]u8) {
             // Fixed-size array (session token) — hex only by construction, but
             // validate defensively: if anything non-hex shows up, refuse.
@@ -353,6 +391,43 @@ test "buildVarsQuery escapes control bytes" {
     const q = try buildVarsQuery(allocator, "Q", .{ .v = ctrl });
     defer allocator.free(q);
     try std.testing.expect(std.mem.indexOf(u8, q, "\\u0001") != null);
+}
+
+test "buildVarsQuery escapes string array elements" {
+    const allocator = std.testing.allocator;
+    const tags: []const []const u8 = &.{ "work", "a\" OR true --" };
+    const q = try buildVarsQuery(allocator, "Q", .{ .tags = tags });
+    defer allocator.free(q);
+    // The quote inside the second element must be escaped so it cannot close
+    // its literal and let the rest of the element become query text.
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $tags = [\"work\", \"a\\\" OR true --\"];") != null);
+}
+
+test "buildVarsQuery emits an empty array literal, not NONE" {
+    const allocator = std.testing.allocator;
+    const tags: []const []const u8 = &.{};
+    const q = try buildVarsQuery(allocator, "Q", .{ .tags = tags });
+    defer allocator.free(q);
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $tags = [];") != null);
+}
+
+test "buildVarsQuery rejects NUL inside an array element" {
+    const allocator = std.testing.allocator;
+    const tags: []const []const u8 = &.{"a\x00b"};
+    try std.testing.expectError(error.InvalidInput, buildVarsQuery(allocator, "Q", .{ .tags = tags }));
+}
+
+test "buildVarsQuery encodes optional bools and ints" {
+    const allocator = std.testing.allocator;
+    const q = try buildVarsQuery(allocator, "Q", .{
+        .done = @as(?bool, true),
+        .n = @as(?i64, 7),
+        .missing = @as(?bool, null),
+    });
+    defer allocator.free(q);
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $done = true;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $n = 7;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, q, "LET $missing = NONE;") != null);
 }
 
 test "buildVarsQuery encodes ints, bools and NONE optionals" {

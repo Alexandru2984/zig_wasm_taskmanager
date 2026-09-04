@@ -27,6 +27,9 @@ pub const Task = struct {
     due_date: ?[]const u8 = null,
     priority: []const u8 = "normal",
     reminder_sent: bool = false,
+    notes: []const u8 = "",
+    tags: []const []const u8 = &.{},
+    updated_at: ?[]const u8 = null,
 };
 
 pub const Session = struct {
@@ -80,6 +83,8 @@ pub const CreateTaskRequest = struct {
     workspace_id: ?[]const u8 = null,
     due_date: ?[]const u8 = null,
     priority: ?[]const u8 = null,
+    notes: ?[]const u8 = null,
+    tags: ?[]const []const u8 = null,
 };
 
 pub const TaskResponse = struct {
@@ -91,6 +96,21 @@ pub const TaskResponse = struct {
     due_date: ?[]const u8 = null,
     priority: []const u8 = "normal",
     reminder_sent: bool = false,
+    notes: []const u8 = "",
+    tags: []const []const u8 = &.{},
+    updated_at: ?[]const u8 = null,
+};
+
+/// Partial task update. Every field is optional; omitting one leaves the
+/// stored value untouched. `due_date: ""` clears the date, which is why it is
+/// a string rather than a nullable date.
+pub const UpdateTaskRequest = struct {
+    title: ?[]const u8 = null,
+    priority: ?[]const u8 = null,
+    notes: ?[]const u8 = null,
+    completed: ?bool = null,
+    tags: ?[]const []const u8 = null,
+    due_date: ?[]const u8 = null,
 };
 
 pub const Workspace = struct {

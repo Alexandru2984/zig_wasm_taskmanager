@@ -193,6 +193,12 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\UPDATE workspace_invites SET email = string::lowercase(email) WHERE email != string::lowercase(email);
     );
 
+    try runMigration(allocator, "009_task_notes_and_tags",
+        \\DEFINE FIELD notes ON tasks TYPE string DEFAULT "";
+        \\DEFINE FIELD tags ON tasks TYPE array<string> DEFAULT [];
+        \\DEFINE FIELD updated_at ON tasks TYPE option<datetime>;
+    );
+
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
 }
 
@@ -568,38 +574,128 @@ pub fn deleteWorkspaceInviteScoped(allocator: std.mem.Allocator, invite_id: []co
 
 // ============== TASK OPERATIONS ==============
 
-pub fn createTask(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8, title: []const u8, priority: []const u8) ![]u8 {
-    return queryWithVars(allocator,
-        \\CREATE tasks SET user_id = $user_id, workspace_id = $workspace_id, title = $title, priority = $priority, completed = false, reminder_sent = false, created_at = time::now();
-    , .{ .user_id = user_id, .workspace_id = workspace_id, .title = title, .priority = priority });
-}
+/// Everything needed to insert a task. Replaces the createTask /
+/// createTaskWithDueDate pair, which duplicated the whole statement to vary
+/// one column and left tags and notes with no way in at all.
+pub const NewTask = struct {
+    user_id: []const u8,
+    workspace_id: []const u8,
+    title: []const u8,
+    priority: []const u8 = "normal",
+    notes: []const u8 = "",
+    tags: []const []const u8 = &.{},
+    due_date: ?[]const u8 = null,
+};
 
-pub fn createTaskWithDueDate(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8, title: []const u8, due_date: []const u8, priority: []const u8) ![]u8 {
-    // Ensure due_date has proper format (add :00Z if needed for SurrealDB)
-    // HTML datetime-local gives "2025-12-25T12:00" but SurrealDB needs "2025-12-25T12:00:00Z"
-    var formatted_date: []const u8 = due_date;
-    var needs_free = false;
+pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
+    // Only the due-date column varies, and only between two compile-time
+    // fragments; every value is still bound.
+    const has_due = task.due_date != null and task.due_date.?.len > 0;
+    const sql = if (has_due)
+        \\CREATE tasks SET user_id = $user_id, workspace_id = $workspace_id, title = $title, priority = $priority, notes = $notes, tags = $tags, completed = false, reminder_sent = false, created_at = time::now(), due_date = <datetime>$due_date;
+    else
+        \\CREATE tasks SET user_id = $user_id, workspace_id = $workspace_id, title = $title, priority = $priority, notes = $notes, tags = $tags, completed = false, reminder_sent = false, created_at = time::now();
+    ;
 
-    if (!std.mem.endsWith(u8, due_date, "Z")) {
-        if (std.mem.count(u8, due_date, ":") == 1) {
-            formatted_date = try std.fmt.allocPrint(allocator, "{s}:00Z", .{due_date});
-            needs_free = true;
-        } else {
-            formatted_date = try std.fmt.allocPrint(allocator, "{s}Z", .{due_date});
-            needs_free = true;
-        }
+    var due_owned: ?[]u8 = null;
+    defer if (due_owned) |d| allocator.free(d);
+    var due_bind: []const u8 = "";
+    if (has_due) {
+        due_owned = try normalizeDueDate(allocator, task.due_date.?);
+        due_bind = due_owned.?;
     }
-    defer if (needs_free) allocator.free(formatted_date);
 
-    return queryWithVars(allocator,
-        \\CREATE tasks SET user_id = $user_id, workspace_id = $workspace_id, title = $title, priority = $priority, completed = false, reminder_sent = false, created_at = time::now(), due_date = <datetime>$due_date;
-    , .{ .user_id = user_id, .workspace_id = workspace_id, .title = title, .priority = priority, .due_date = formatted_date });
+    return queryWithVars(allocator, sql, .{
+        .user_id = task.user_id,
+        .workspace_id = task.workspace_id,
+        .title = task.title,
+        .priority = task.priority,
+        .notes = task.notes,
+        .tags = task.tags,
+        .due_date = due_bind,
+    });
 }
 
 pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
         \\SELECT * FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE);
     , .{ .user_id = user_id });
+}
+
+/// Partial update of a task. Only the fields the caller actually supplied are
+/// written; everything else keeps its stored value.
+///
+/// The SET clause is assembled here rather than written out in full because
+/// SurrealQL has no "update only if not null" form. Every fragment appended is
+/// a compile-time string from this function — the field names never come from
+/// the request — and every value travels as a bound variable, so the assembly
+/// adds no injection surface.
+pub const TaskPatch = struct {
+    title: ?[]const u8 = null,
+    priority: ?[]const u8 = null,
+    notes: ?[]const u8 = null,
+    completed: ?bool = null,
+    tags: ?[]const []const u8 = null,
+    /// Non-null and non-empty sets a due date; non-null and empty clears it.
+    /// Null leaves the stored value alone — which is why this cannot simply be
+    /// an optional string with null meaning "clear".
+    due_date: ?[]const u8 = null,
+};
+
+pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: TaskPatch) ![]u8 {
+    var sets = std.ArrayListUnmanaged(u8){};
+    defer sets.deinit(allocator);
+    const w = sets.writer(allocator);
+
+    try w.writeAll("updated_at = time::now()");
+    if (patch.title != null) try w.writeAll(", title = $title");
+    if (patch.priority != null) try w.writeAll(", priority = $priority");
+    if (patch.notes != null) try w.writeAll(", notes = $notes");
+    if (patch.completed != null) try w.writeAll(", completed = $completed");
+    if (patch.tags != null) try w.writeAll(", tags = $tags");
+    if (patch.due_date) |dd| {
+        if (dd.len == 0) {
+            try w.writeAll(", due_date = NONE");
+        } else {
+            try w.writeAll(", due_date = <datetime>$due_date");
+        }
+    }
+
+    const sql = try std.fmt.allocPrint(allocator, "UPDATE $record_id SET {s} RETURN AFTER;", .{sets.items});
+    defer allocator.free(sql);
+
+    // due_date is normalised to a form SurrealDB accepts before binding.
+    // datetime-local gives "2025-12-25T12:00"; the database wants seconds and
+    // a zone.
+    var due_owned: ?[]u8 = null;
+    defer if (due_owned) |d| allocator.free(d);
+    var due_bind: []const u8 = "";
+    if (patch.due_date) |dd| {
+        if (dd.len > 0) {
+            due_owned = try normalizeDueDate(allocator, dd);
+            due_bind = due_owned.?;
+        }
+    }
+
+    return queryWithVars(allocator, sql, .{
+        .record_id = task_id,
+        .title = patch.title orelse "",
+        .priority = patch.priority orelse "normal",
+        .notes = patch.notes orelse "",
+        .completed = patch.completed orelse false,
+        .tags = patch.tags orelse &[_][]const u8{},
+        .due_date = due_bind,
+    });
+}
+
+/// "2025-12-25T12:00" -> "2025-12-25T12:00:00Z". Already-zoned values pass
+/// through. Caller owns the result.
+fn normalizeDueDate(allocator: std.mem.Allocator, due_date: []const u8) ![]u8 {
+    if (std.mem.endsWith(u8, due_date, "Z")) return allocator.dupe(u8, due_date);
+    if (std.mem.count(u8, due_date, ":") == 1) {
+        return std.fmt.allocPrint(allocator, "{s}:00Z", .{due_date});
+    }
+    return std.fmt.allocPrint(allocator, "{s}Z", .{due_date});
 }
 
 pub fn toggleTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {

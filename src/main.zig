@@ -394,7 +394,7 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
 
         if (r.method) |method| {
             if (std.mem.eql(u8, method, "PUT")) {
-                try tasks_handler.toggleTask(r, task_id, req_alloc);
+                try tasks_handler.updateTask(r, task_id, req_alloc);
             } else if (std.mem.eql(u8, method, "DELETE")) {
                 try tasks_handler.deleteTask(r, task_id, req_alloc);
             } else {
