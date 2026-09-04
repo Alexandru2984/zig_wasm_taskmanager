@@ -649,7 +649,10 @@ select {
 }
 
 .search-wrap input {
-    padding-left: var(--s6);
+    /* Wide enough to clear the icon: an emoji glyph is broader than a text
+     * character of the same font-size, and at 2rem the placeholder collided
+     * with it. */
+    padding-left: 2.75rem;
 }
 
 .search-icon {

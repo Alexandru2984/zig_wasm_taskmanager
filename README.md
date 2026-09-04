@@ -17,12 +17,17 @@ systemd-sandboxed VPS deployment.
   workspaces, memberships, and tasks.
 - Argon2id password hashing and server-side sessions carried by HttpOnly
   cookies.
+- Full task editing: title, notes, tags, priority and due date, edited inline;
+  plus search across titles/notes/tags, filters (active, done, overdue, high
+  priority) and five sort orders.
 - Multi-workspace task tenancy with owner/admin/member/viewer roles, member
   listing, and email invite acceptance.
 - Email verification and password reset through SMTP, dispatched on a background
   queue so response time never reveals whether an address exists.
 - Optional email reminders for overdue incomplete tasks.
-- Activity log API for account and task actions.
+- Activity log for account and task actions, with a UI to read it.
+- Session management: see where you are signed in and revoke a device.
+- JSON data export and account deletion, both reachable from the app.
 - Per-route rate limiting, strict CORS, CSP, HSTS, safe static-file serving,
   CSRF protection, and protected metrics.
 - One-command Docker Compose stack (app + SurrealDB) and 12-factor configuration
@@ -42,9 +47,9 @@ More: [docs/PORTFOLIO.md](docs/PORTFOLIO.md)
 
 ## Screenshots
 
-| Login Page | Dashboard |
-| --- | --- |
-| ![Login](docs/screenshot-login.png) | ![Dashboard](docs/screenshot-dashboard.png) |
+| Dashboard | Login | Mobile |
+| --- | --- | --- |
+| ![Dashboard](docs/screenshot-dashboard.png) | ![Login](docs/screenshot-login.png) | ![Mobile](docs/screenshot-mobile.png) |
 
 ## Quick Start
 
@@ -132,8 +137,13 @@ Main endpoint groups:
 
 - `/api/auth/*`: signup, login, logout, verification, password reset
 - `/api/profile*`: profile and password changes
-- `/api/workspaces`: workspace listing, creation, members, and invites
-- `/api/tasks*`: task CRUD with priority and due-date metadata
+- `/api/workspaces`: workspace listing and creation; members (list, change
+  role, remove) and invitations (create, list, revoke, accept)
+- `/api/tasks*`: task CRUD with priority, due date, notes and tags; `PUT`
+  applies a partial update, or toggles completion when the body is empty
+- `/api/sessions*`: list and revoke sessions
+- `/api/export`: everything the account holds, as one JSON document
+- `/api/account`: delete the account, re-authenticating first
 - `/api/activity`: authenticated activity log
 - `/api/health`, `/api/ready`, `/api/metrics`: operational endpoints
 
@@ -145,12 +155,20 @@ Current controls include:
 
 - Argon2id password hashing
 - server-side sessions with HttpOnly cookies and hashed DB tokens
-- double-submit CSRF protection for cookie-authenticated writes
+- CSRF tokens bound to the session they were issued with — the token's hash is
+  stored on the session row, so forging one requires reading the HttpOnly
+  session cookie
+- `__Host-` cookie prefixes, which the browser refuses unless the cookie is
+  Secure, Path=/ and has no Domain, making it unsettable by sibling subdomains
 - workspace membership checks for task reads/writes
 - reset-token invalidation and session invalidation after password reset/password change
 - authenticated email verification with per-user attempt caps
 - background email dispatch so reset/verify response time can't be used to enumerate accounts
 - route-specific rate limiting; the per-account login limit counts only failed attempts, and password changes are throttled
+- nginx `limit_req` zones in front of the in-process limiters, which survive a restart
+- the origin answers only Cloudflare edge addresses, so the WAF cannot be skipped by finding the server's IP
+- email addresses normalised to lowercase, so one mailbox cannot hold two accounts
+- account deletion requires the password again, not merely a live session
 - strict CSP/HSTS/security headers
 - SurrealQL variable binding for user input, unit-tested for injection escaping
 - path traversal protection for static assets
