@@ -723,6 +723,62 @@ pub fn markTaskReminderSent(allocator: std.mem.Allocator, task_id: []const u8) !
     allocator.free(result);
 }
 
+/// Sessions belonging to a user, newest first, for the "where am I signed in"
+/// list. The token hash is returned so the caller can mark which row is the
+/// request's own session; the token itself is not recoverable.
+pub fn listUserSessions(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\SELECT id, token, created_at, expires_at FROM sessions WHERE user_id = $user_id ORDER BY created_at DESC LIMIT 100;
+    , .{ .user_id = user_id });
+}
+
+/// Revoke one session by record id, scoped to its owner so a valid session
+/// cannot be used to delete somebody else's by guessing an id.
+pub fn deleteSessionScoped(allocator: std.mem.Allocator, session_id: []const u8, user_id: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\DELETE sessions WHERE id = $session_id AND user_id = $user_id RETURN BEFORE;
+    , .{ .session_id = session_id, .user_id = user_id });
+}
+
+/// Revoke every session for a user except the one making the request.
+pub fn deleteOtherUserSessions(allocator: std.mem.Allocator, user_id: []const u8, keep_token_hash: []const u8) !void {
+    const result = try queryWithVars(allocator,
+        \\DELETE sessions WHERE user_id = $user_id AND token != $keep;
+    , .{ .user_id = user_id, .keep = keep_token_hash });
+    allocator.free(result);
+}
+
+/// Everything a user owns, for the data export. Kept as one query per table so
+/// the caller can stream them into a single JSON document without loading a
+/// join result it would only have to take apart again.
+pub fn exportUserTasks(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\SELECT id, title, notes, tags, completed, priority, due_date, created_at, updated_at, workspace_id FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE) ORDER BY created_at DESC;
+    , .{ .user_id = user_id });
+}
+
+/// Delete a user and everything that belongs to them.
+///
+/// Order matters: rows referencing the user go first, so no dangling
+/// record<users> link is ever left behind. Workspaces the user owns are
+/// removed along with their membership rows and invites — the owner cannot be
+/// removed from a workspace by any other route, so deleting the account is the
+/// only way a workspace loses its owner, and an ownerless workspace would be
+/// unmanageable by anyone.
+pub fn deleteUserAccount(allocator: std.mem.Allocator, user_id: []const u8) !void {
+    const result = try queryWithVars(allocator,
+        \\LET $owned = (SELECT VALUE id FROM workspaces WHERE owner_id = $record_id);
+        \\DELETE tasks WHERE user_id = $record_id OR workspace_id IN $owned;
+        \\DELETE workspace_invites WHERE invited_by = $record_id OR workspace_id IN $owned;
+        \\DELETE workspace_members WHERE user_id = $record_id OR workspace_id IN $owned;
+        \\DELETE workspaces WHERE owner_id = $record_id;
+        \\DELETE activity_events WHERE user_id = $record_id;
+        \\DELETE sessions WHERE user_id = $record_id;
+        \\DELETE $record_id;
+    , .{ .record_id = user_id });
+    allocator.free(result);
+}
+
 // ============== ACTIVITY LOG ==============
 
 pub fn logActivity(

@@ -217,6 +217,42 @@ pub const ActivityResponse = struct {
     created_at: []const u8,
 };
 
+// --- Account & data ---
+
+pub const SessionResponse = struct {
+    id: []const u8,
+    created_at: []const u8,
+    expires_at: []const u8,
+    /// True for the session making the request, so the UI can label it and
+    /// refuse to offer "revoke" for the device you are holding.
+    current: bool = false,
+};
+
+pub const DeleteAccountRequest = struct {
+    password: []const u8,
+};
+
+pub const ExportTask = struct {
+    id: []const u8,
+    title: []const u8,
+    notes: []const u8 = "",
+    tags: []const []const u8 = &.{},
+    completed: bool = false,
+    priority: []const u8 = "normal",
+    due_date: ?[]const u8 = null,
+    created_at: []const u8,
+    updated_at: ?[]const u8 = null,
+    workspace_id: ?[]const u8 = null,
+};
+
+pub const ExportDocument = struct {
+    exported_at: i64,
+    account: UserProfile,
+    tasks: []const ExportTask,
+    workspaces: []const WorkspaceResponse,
+    activity: []const ActivityResponse,
+};
+
 // --- Common ---
 
 pub const ErrorResponse = struct {

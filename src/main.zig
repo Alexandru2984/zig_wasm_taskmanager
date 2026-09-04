@@ -14,6 +14,7 @@ const profile_handler = @import("handlers/profile.zig");
 const system_handler = @import("handlers/system.zig");
 const activity_handler = @import("handlers/activity.zig");
 const workspaces_handler = @import("handlers/workspaces.zig");
+const account_handler = @import("handlers/account.zig");
 const reminders = @import("services/reminders.zig");
 const email = @import("services/email.zig");
 
@@ -283,6 +284,53 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
             return;
         }
         try profile_handler.changePassword(r, req_alloc);
+        return;
+    }
+
+    if (std.mem.eql(u8, path, "/api/sessions")) {
+        if (std.mem.eql(u8, req_method, "GET")) {
+            try account_handler.listSessions(r, req_alloc);
+        } else if (std.mem.eql(u8, req_method, "DELETE")) {
+            try account_handler.revokeOtherSessions(r, req_alloc);
+        } else {
+            r.setHeader("Allow", "GET, DELETE") catch {};
+            r.setStatus(.method_not_allowed);
+            try r.sendBody("{\"error\": \"Method not allowed\"}");
+        }
+        return;
+    }
+
+    if (std.mem.startsWith(u8, path, "/api/sessions/")) {
+        const session_id = path["/api/sessions/".len..];
+        if (!std.mem.eql(u8, req_method, "DELETE")) {
+            r.setHeader("Allow", "DELETE") catch {};
+            r.setStatus(.method_not_allowed);
+            try r.sendBody("{\"error\": \"Method not allowed\"}");
+            return;
+        }
+        try account_handler.revokeSession(r, session_id, req_alloc);
+        return;
+    }
+
+    if (std.mem.eql(u8, path, "/api/export")) {
+        if (!std.mem.eql(u8, req_method, "GET")) {
+            r.setHeader("Allow", "GET") catch {};
+            r.setStatus(.method_not_allowed);
+            try r.sendBody("{\"error\": \"Method not allowed\"}");
+            return;
+        }
+        try account_handler.exportData(r, req_alloc);
+        return;
+    }
+
+    if (std.mem.eql(u8, path, "/api/account")) {
+        if (!std.mem.eql(u8, req_method, "DELETE")) {
+            r.setHeader("Allow", "DELETE") catch {};
+            r.setStatus(.method_not_allowed);
+            try r.sendBody("{\"error\": \"Method not allowed\"}");
+            return;
+        }
+        try account_handler.deleteAccount(r, req_alloc);
         return;
     }
 
