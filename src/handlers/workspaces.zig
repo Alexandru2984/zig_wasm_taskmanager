@@ -286,3 +286,178 @@ pub fn acceptInvite(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "invite accepted" });
 }
+
+// Number of rows in a RETURN AFTER/BEFORE result, used to tell "no such member"
+// apart from a successful change.
+fn affectedRows(req_alloc: std.mem.Allocator, db_result: []const u8) usize {
+    const Row = struct { id: []const u8 };
+    const parsed = std.json.parseFromSlice([]models.SurrealResponse(Row), req_alloc, db_result, .{ .ignore_unknown_fields = true }) catch return 0;
+    defer parsed.deinit();
+    if (parsed.value.len == 0) return 0;
+    return parsed.value[0].result.len;
+}
+
+pub fn changeMemberRole(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem.Allocator) !void {
+    const user_id = http.getCurrentUserId(req_alloc, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    if (!try db.canAdminWorkspace(req_alloc, user_id, workspace_id)) {
+        try http.jsonError(r, 403, "Forbidden");
+        return;
+    }
+
+    const request = http.parseBody(req_alloc, r, models.ChangeMemberRoleRequest) catch {
+        try http.jsonError(r, 400, "Invalid JSON body");
+        return;
+    };
+    if (!std.mem.startsWith(u8, request.user_id, "users:")) {
+        try http.jsonError(r, 400, "Invalid user ID");
+        return;
+    }
+    // SECURITY: roles are an allow-list and never include "owner" — ownership
+    // is fixed and can't be granted or revoked through this endpoint.
+    if (!validation.validateWorkspaceInviteRole(request.role)) {
+        try http.jsonError(r, 400, "Invalid role");
+        return;
+    }
+
+    const target_role = db.getWorkspaceRole(req_alloc, request.user_id, workspace_id) catch {
+        try http.jsonError(r, 500, "Failed to load member");
+        return;
+    } orelse {
+        try http.jsonError(r, 404, "Member not found");
+        return;
+    };
+    defer req_alloc.free(target_role);
+    if (std.mem.eql(u8, target_role, "owner")) {
+        try http.jsonError(r, 403, "The workspace owner's role can't be changed");
+        return;
+    }
+
+    const upd = db.updateWorkspaceMemberRole(req_alloc, workspace_id, request.user_id, request.role) catch {
+        try http.jsonError(r, 500, "Failed to update role");
+        return;
+    };
+    defer req_alloc.free(upd);
+    if (affectedRows(req_alloc, upd) == 0) {
+        try http.jsonError(r, 404, "Member not found");
+        return;
+    }
+
+    db.logActivity(req_alloc, user_id, "change_member_role", "workspace", workspace_id) catch |err| {
+        log.warn("Failed to log role change activity: {}", .{err});
+    };
+    try http.jsonSuccess(r, models.SuccessResponse{ .status = "role updated" });
+}
+
+pub fn removeMember(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem.Allocator) !void {
+    const user_id = http.getCurrentUserId(req_alloc, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    if (!try db.canAdminWorkspace(req_alloc, user_id, workspace_id)) {
+        try http.jsonError(r, 403, "Forbidden");
+        return;
+    }
+
+    const request = http.parseBody(req_alloc, r, models.RemoveMemberRequest) catch {
+        try http.jsonError(r, 400, "Invalid JSON body");
+        return;
+    };
+    if (!std.mem.startsWith(u8, request.user_id, "users:")) {
+        try http.jsonError(r, 400, "Invalid user ID");
+        return;
+    }
+
+    const target_role = db.getWorkspaceRole(req_alloc, request.user_id, workspace_id) catch {
+        try http.jsonError(r, 500, "Failed to load member");
+        return;
+    } orelse {
+        try http.jsonError(r, 404, "Member not found");
+        return;
+    };
+    defer req_alloc.free(target_role);
+    // SECURITY: the owner can never be removed, so a workspace always keeps an
+    // admin who can manage it.
+    if (std.mem.eql(u8, target_role, "owner")) {
+        try http.jsonError(r, 403, "The workspace owner can't be removed");
+        return;
+    }
+
+    const del = db.removeWorkspaceMember(req_alloc, workspace_id, request.user_id) catch {
+        try http.jsonError(r, 500, "Failed to remove member");
+        return;
+    };
+    defer req_alloc.free(del);
+    if (affectedRows(req_alloc, del) == 0) {
+        try http.jsonError(r, 404, "Member not found");
+        return;
+    }
+
+    db.logActivity(req_alloc, user_id, "remove_workspace_member", "workspace", workspace_id) catch |err| {
+        log.warn("Failed to log member removal activity: {}", .{err});
+    };
+    try http.jsonSuccess(r, models.SuccessResponse{ .status = "member removed" });
+}
+
+pub fn listInvites(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem.Allocator) !void {
+    const user_id = http.getCurrentUserId(req_alloc, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    if (!try db.canAdminWorkspace(req_alloc, user_id, workspace_id)) {
+        try http.jsonError(r, 403, "Forbidden");
+        return;
+    }
+
+    const now = std.time.timestamp();
+    const db_result = db.listPendingWorkspaceInvites(req_alloc, workspace_id, now) catch {
+        try http.jsonError(r, 500, "Failed to load invites");
+        return;
+    };
+    defer req_alloc.free(db_result);
+
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.PendingInviteResponse), req_alloc, db_result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (parsed.value.len == 0) {
+        try http.jsonSuccess(r, [0]models.PendingInviteResponse{});
+        return;
+    }
+    try http.jsonSuccess(r, parsed.value[0].result);
+}
+
+pub fn revokeInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem.Allocator) !void {
+    const user_id = http.getCurrentUserId(req_alloc, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    if (!try db.canAdminWorkspace(req_alloc, user_id, workspace_id)) {
+        try http.jsonError(r, 403, "Forbidden");
+        return;
+    }
+
+    const request = http.parseBody(req_alloc, r, models.RevokeInviteRequest) catch {
+        try http.jsonError(r, 400, "Invalid JSON body");
+        return;
+    };
+    if (!std.mem.startsWith(u8, request.invite_id, "workspace_invites:")) {
+        try http.jsonError(r, 400, "Invalid invite ID");
+        return;
+    }
+
+    const del = db.deleteWorkspaceInviteScoped(req_alloc, request.invite_id, workspace_id) catch {
+        try http.jsonError(r, 500, "Failed to revoke invite");
+        return;
+    };
+    defer req_alloc.free(del);
+    if (affectedRows(req_alloc, del) == 0) {
+        try http.jsonError(r, 404, "Invite not found");
+        return;
+    }
+
+    db.logActivity(req_alloc, user_id, "revoke_workspace_invite", "workspace", workspace_id) catch |err| {
+        log.warn("Failed to log invite revocation activity: {}", .{err});
+    };
+    try http.jsonSuccess(r, models.SuccessResponse{ .status = "invite revoked" });
+}

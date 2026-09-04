@@ -332,13 +332,17 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
                 try http.jsonError(r, 400, "Invalid workspace ID");
                 return;
             }
-            if (!std.mem.eql(u8, req_method, "GET")) {
-                r.setHeader("Allow", "GET") catch {};
+            if (std.mem.eql(u8, req_method, "GET")) {
+                try workspaces_handler.listMembers(r, workspace_id, req_alloc);
+            } else if (std.mem.eql(u8, req_method, "PUT")) {
+                try workspaces_handler.changeMemberRole(r, workspace_id, req_alloc);
+            } else if (std.mem.eql(u8, req_method, "DELETE")) {
+                try workspaces_handler.removeMember(r, workspace_id, req_alloc);
+            } else {
+                r.setHeader("Allow", "GET, PUT, DELETE") catch {};
                 r.setStatus(.method_not_allowed);
                 try r.sendBody("{\"error\": \"Method not allowed\"}");
-                return;
             }
-            try workspaces_handler.listMembers(r, workspace_id, req_alloc);
             return;
         }
 
@@ -348,13 +352,17 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
                 try http.jsonError(r, 400, "Invalid workspace ID");
                 return;
             }
-            if (!std.mem.eql(u8, req_method, "POST")) {
-                r.setHeader("Allow", "POST") catch {};
+            if (std.mem.eql(u8, req_method, "POST")) {
+                try workspaces_handler.createInvite(r, workspace_id, req_alloc);
+            } else if (std.mem.eql(u8, req_method, "GET")) {
+                try workspaces_handler.listInvites(r, workspace_id, req_alloc);
+            } else if (std.mem.eql(u8, req_method, "DELETE")) {
+                try workspaces_handler.revokeInvite(r, workspace_id, req_alloc);
+            } else {
+                r.setHeader("Allow", "GET, POST, DELETE") catch {};
                 r.setStatus(.method_not_allowed);
                 try r.sendBody("{\"error\": \"Method not allowed\"}");
-                return;
             }
-            try workspaces_handler.createInvite(r, workspace_id, req_alloc);
             return;
         }
     }

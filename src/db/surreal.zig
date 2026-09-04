@@ -511,6 +511,36 @@ pub fn markWorkspaceInviteAccepted(allocator: std.mem.Allocator, invite_id: []co
     allocator.free(result);
 }
 
+/// Change a member's role. Scoped by workspace_id + user_id and returns the
+/// updated row(s), so an empty result means the user wasn't a member.
+pub fn updateWorkspaceMemberRole(allocator: std.mem.Allocator, workspace_id: []const u8, user_id: []const u8, role: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\UPDATE workspace_members SET role = $role WHERE workspace_id = $workspace_id AND user_id = $user_id RETURN AFTER;
+    , .{ .workspace_id = workspace_id, .user_id = user_id, .role = role });
+}
+
+/// Remove a member from a workspace. RETURN BEFORE yields the deleted row(s),
+/// so an empty result means there was nothing to remove.
+pub fn removeWorkspaceMember(allocator: std.mem.Allocator, workspace_id: []const u8, user_id: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\DELETE workspace_members WHERE workspace_id = $workspace_id AND user_id = $user_id RETURN BEFORE;
+    , .{ .workspace_id = workspace_id, .user_id = user_id });
+}
+
+pub fn listPendingWorkspaceInvites(allocator: std.mem.Allocator, workspace_id: []const u8, now_ts: i64) ![]u8 {
+    return queryWithVars(allocator,
+        \\SELECT id, email, role, expires_at, created_at FROM workspace_invites WHERE workspace_id = $workspace_id AND accepted_at = NONE AND expires_at >= $now_ts ORDER BY created_at DESC;
+    , .{ .workspace_id = workspace_id, .now_ts = now_ts });
+}
+
+/// Revoke a pending invite, scoped to its workspace so an admin can't delete
+/// another workspace's invite by guessing its id. RETURN BEFORE reports a match.
+pub fn deleteWorkspaceInviteScoped(allocator: std.mem.Allocator, invite_id: []const u8, workspace_id: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\DELETE workspace_invites WHERE id = $invite_id AND workspace_id = $workspace_id RETURN BEFORE;
+    , .{ .invite_id = invite_id, .workspace_id = workspace_id });
+}
+
 // ============== TASK OPERATIONS ==============
 
 pub fn createTask(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8, title: []const u8, priority: []const u8) ![]u8 {

@@ -145,6 +145,27 @@ pub const CreateWorkspaceInviteRequest = struct {
     role: []const u8,
 };
 
+pub const ChangeMemberRoleRequest = struct {
+    user_id: []const u8,
+    role: []const u8,
+};
+
+pub const RemoveMemberRequest = struct {
+    user_id: []const u8,
+};
+
+pub const RevokeInviteRequest = struct {
+    invite_id: []const u8,
+};
+
+pub const PendingInviteResponse = struct {
+    id: []const u8,
+    email: []const u8,
+    role: []const u8,
+    expires_at: i64,
+    created_at: []const u8,
+};
+
 pub const AcceptWorkspaceInviteRequest = struct {
     token: []const u8,
 };
