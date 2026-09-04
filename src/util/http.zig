@@ -216,15 +216,23 @@ pub fn verifyCsrfToken(allocator: std.mem.Allocator, r: zap.Request) bool {
 /// generous cap that still stops "POST {10 MB of junk}" DoS attempts.
 pub const MAX_BODY_SIZE: usize = 64 * 1024;
 
-/// Parse JSON body into a struct. Caller must pass the request arena as
-/// `allocator` so all unescaped strings live exactly as long as the request.
+/// Parse a JSON body into a struct, allocating into the request arena.
+///
+/// This used to call parseFromSlice and then `defer parsed.deinit()` before
+/// returning parsed.value — freeing everything the parser had allocated and
+/// handing back pointers into it. It looked fine only because std.json points
+/// simple strings straight at the source buffer, which outlives the call.
+/// Anything the parser genuinely had to allocate dangled: a title containing
+/// an escape like \" or \n, and every array field.
+///
+/// parseFromSliceLeaky allocates into the caller's allocator with no arena of
+/// its own, which is exactly right here — the request arena already frees the
+/// whole allocation at the end of the request.
 pub fn parseBody(allocator: std.mem.Allocator, r: zap.Request, comptime T: type) !T {
     const body = r.body orelse return error.NoBody;
     if (body.len > MAX_BODY_SIZE) return error.BodyTooLarge;
 
-    const parsed = try std.json.parseFromSlice(T, allocator, body, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    return parsed.value;
+    return std.json.parseFromSliceLeaky(T, allocator, body, .{ .ignore_unknown_fields = true });
 }
 
 // ==========================================
