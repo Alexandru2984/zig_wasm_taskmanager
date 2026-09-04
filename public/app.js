@@ -97,8 +97,12 @@ function getCookie(name) {
         ?.slice(prefix.length) || '';
 }
 
+// The CSRF cookie is named `__Host-csrf_token` in production. The prefix is a
+// browser-enforced guarantee that no other host under the parent domain could
+// have written it. Plain-HTTP local development cannot use the prefix (it
+// requires Secure), so fall back to the bare name there.
 function csrfHeaders(headers = {}) {
-    const token = getCookie('csrf_token');
+    const token = getCookie('__Host-csrf_token') || getCookie('csrf_token');
     return token ? { ...headers, 'X-CSRF-Token': token } : headers;
 }
 

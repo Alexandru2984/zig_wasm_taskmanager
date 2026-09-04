@@ -165,12 +165,11 @@ pub fn changePassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 500, "Failed to invalidate sessions");
         return;
     };
-    const new_token = db.createSession(req_alloc, user_id) catch {
+    const new_session = db.createSession(req_alloc, user_id) catch {
         try http.jsonError(r, 500, "Failed to refresh session");
         return;
     };
-    defer req_alloc.free(new_token);
-    http.setAuthCookie(r, new_token);
+    http.setAuthCookie(r, new_session);
     db.logActivity(req_alloc, user_id, "change_password", "user", user_id) catch |err| {
         log.warn("Failed to log password activity: {}", .{err});
     };

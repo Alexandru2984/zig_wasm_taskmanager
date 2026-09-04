@@ -4,11 +4,30 @@ const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
 const config = @import("../config/config.zig");
 
-const SESSION_COOKIE = "session_token";
-const CSRF_COOKIE = "csrf_token";
+// SECURITY: the `__Host-` prefix is enforced by the browser, not by us. A
+// cookie carrying it is refused unless it is Secure, Path=/ and has no Domain
+// attribute — which is exactly the property we need here, because it makes the
+// cookie unsettable by any other host under micutu.com. Without it, a sibling
+// subdomain could write `csrf_token` on the parent domain and have it sent
+// along with ours.
+//
+// The prefix requires Secure, so plain-HTTP local development (COOKIE_INSECURE=1)
+// falls back to the unprefixed names. Production always gets the prefixed pair.
+const SESSION_COOKIE_SECURE = "__Host-session_token";
+const CSRF_COOKIE_SECURE = "__Host-csrf_token";
+const SESSION_COOKIE_PLAIN = "session_token";
+const CSRF_COOKIE_PLAIN = "csrf_token";
 
 fn cookieSecure() bool {
     return !std.mem.eql(u8, config.getOrDefault("COOKIE_INSECURE", "0"), "1");
+}
+
+fn sessionCookieName() []const u8 {
+    return if (cookieSecure()) SESSION_COOKIE_SECURE else SESSION_COOKIE_PLAIN;
+}
+
+fn csrfCookieName() []const u8 {
+    return if (cookieSecure()) CSRF_COOKIE_SECURE else CSRF_COOKIE_PLAIN;
 }
 
 // ==========================================
@@ -76,11 +95,16 @@ pub fn getCurrentUserId(allocator: std.mem.Allocator, r: zap.Request) ?[]const u
     return db.validateSession(allocator, token) catch null;
 }
 
-/// Set HttpOnly session cookie (secure against XSS)
-pub fn setAuthCookie(r: zap.Request, token: []const u8) void {
+/// Set the session pair for a freshly created session.
+///
+/// The session token is HttpOnly so script can never read it; the CSRF token
+/// deliberately is not, because the front end has to echo it back in a header.
+/// They are minted together by db.createSession and only their hashes are
+/// stored, so the CSRF value is meaningful only for this one session.
+pub fn setAuthCookie(r: zap.Request, session: db.NewSession) void {
     r.setCookie(.{
-        .name = SESSION_COOKIE,
-        .value = token,
+        .name = sessionCookieName(),
+        .value = session.token[0..],
         .http_only = true,
         // SECURITY: Mark Secure so the cookie is only sent over HTTPS.
         // All production deployments sit behind nginx+TLS; for pure-local
@@ -91,10 +115,9 @@ pub fn setAuthCookie(r: zap.Request, token: []const u8) void {
         .path = "/",
     }) catch {};
 
-    const csrf_token = db.generateSecureToken();
     r.setCookie(.{
-        .name = CSRF_COOKIE,
-        .value = csrf_token[0..],
+        .name = csrfCookieName(),
+        .value = session.csrf[0..],
         .http_only = false,
         .secure = cookieSecure(),
         .same_site = .Strict,
@@ -103,22 +126,33 @@ pub fn setAuthCookie(r: zap.Request, token: []const u8) void {
     }) catch {};
 }
 
-/// Clear session cookie (for logout)
+/// Clear session cookie (for logout).
+/// Clears both the prefixed and unprefixed names: a browser that still holds a
+/// cookie issued before the `__Host-` change would otherwise keep sending it.
 pub fn clearAuthCookie(r: zap.Request) void {
-    r.setCookie(.{
-        .name = SESSION_COOKIE,
-        .value = "",
-        .http_only = true,
-        .max_age_s = 0, // Expire immediately
-        .path = "/",
-    }) catch {};
-    r.setCookie(.{
-        .name = CSRF_COOKIE,
-        .value = "",
-        .http_only = false,
-        .max_age_s = 0,
-        .path = "/",
-    }) catch {};
+    const session_names = [_][]const u8{ SESSION_COOKIE_SECURE, SESSION_COOKIE_PLAIN };
+    const csrf_names = [_][]const u8{ CSRF_COOKIE_SECURE, CSRF_COOKIE_PLAIN };
+
+    for (session_names) |name| {
+        r.setCookie(.{
+            .name = name,
+            .value = "",
+            .http_only = true,
+            .secure = cookieSecure(),
+            .max_age_s = 0, // Expire immediately
+            .path = "/",
+        }) catch {};
+    }
+    for (csrf_names) |name| {
+        r.setCookie(.{
+            .name = name,
+            .value = "",
+            .http_only = false,
+            .secure = cookieSecure(),
+            .max_age_s = 0,
+            .path = "/",
+        }) catch {};
+    }
 }
 
 /// Validate double-submit CSRF protection for cookie-authenticated unsafe
@@ -135,23 +169,46 @@ fn findCookieValue(cookie_header: []const u8, name: []const u8) ?[]const u8 {
 
 pub fn getSessionTokenFromCookie(r: zap.Request) ?[]const u8 {
     const cookie_header = r.getHeader("cookie") orelse return null;
-    return findCookieValue(cookie_header, SESSION_COOKIE);
+    if (findCookieValue(cookie_header, sessionCookieName())) |v| return v;
+    // Accept a cookie issued before the `__Host-` rename so existing sessions
+    // survive the deploy instead of every user being silently logged out.
+    return findCookieValue(cookie_header, SESSION_COOKIE_PLAIN);
 }
 
-pub fn verifyCsrfToken(_: std.mem.Allocator, r: zap.Request) bool {
+/// Verify CSRF for a cookie-authenticated unsafe request.
+///
+/// SECURITY: this is no longer a bare double-submit check. The submitted token
+/// is hashed and compared against the hash stored on the session row that the
+/// session cookie resolves to, so a valid token cannot be minted by anyone who
+/// cannot read the session cookie itself. A sibling subdomain writing its own
+/// `csrf_token` on the parent domain now fails instead of passing.
+///
+/// Requests carrying no session cookie are not CSRFable — there is nothing to
+/// ride on — and Bearer clients do not send browser cookies at all.
+pub fn verifyCsrfToken(allocator: std.mem.Allocator, r: zap.Request) bool {
     if (r.getHeader("authorization")) |auth_header| {
         if (std.mem.startsWith(u8, auth_header, "Bearer ")) return true;
     }
 
-    const cookie_header = r.getHeader("cookie") orelse return true;
-    const session_cookie = findCookieValue(cookie_header, SESSION_COOKIE) orelse return true;
+    const session_cookie = getSessionTokenFromCookie(r) orelse return true;
     if (session_cookie.len == 0) return true;
 
-    const csrf_cookie = findCookieValue(cookie_header, CSRF_COOKIE) orelse return false;
     const csrf_header = r.getHeader("x-csrf-token") orelse r.getHeader("X-CSRF-Token") orelse return false;
+    if (csrf_header.len == 0) return false;
 
-    if (csrf_cookie.len == 0 or csrf_header.len == 0) return false;
-    return std.mem.eql(u8, csrf_cookie, csrf_header);
+    const info = (db.lookupSession(allocator, session_cookie) catch return false) orelse return false;
+    defer allocator.free(info.user_id);
+    defer allocator.free(info.csrf_hash);
+
+    // A session row predating migration 007 has an empty hash and cannot be
+    // verified. Fail closed: the user re-authenticates and gets a bound pair.
+    if (info.csrf_hash.len == 0) return false;
+
+    const submitted = db.hashTokenHex(csrf_header);
+    if (submitted.len != info.csrf_hash.len) return false;
+    var acc: u8 = 0;
+    for (submitted, info.csrf_hash) |x, y| acc |= x ^ y;
+    return acc == 0;
 }
 
 /// Maximum JSON body size accepted by any endpoint.

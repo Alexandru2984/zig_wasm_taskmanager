@@ -24,6 +24,13 @@ fn getDbConfig() !DbConfig {
     };
 }
 
+/// SHA-256 of a token, hex-encoded. Public as `hashTokenHex` so the HTTP layer
+/// can compare a submitted CSRF token against the hash stored on the session
+/// row without duplicating the encoding.
+pub fn hashTokenHex(token: []const u8) [64]u8 {
+    return hashToken(token);
+}
+
 fn hashToken(token: []const u8) [64]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(token, &digest, .{});
@@ -166,6 +173,15 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD accepted_at ON workspace_invites TYPE option<int>;
         \\DEFINE FIELD created_at ON workspace_invites TYPE datetime DEFAULT time::now();
         \\DEFINE INDEX workspace_invites_token_idx ON workspace_invites COLUMNS token UNIQUE;
+    );
+
+    // SECURITY: the CSRF token used to be a standalone random value that was
+    // never stored, so verification could only check "cookie equals header".
+    // Any sibling subdomain able to set a cookie on the parent domain could
+    // satisfy that. Binding it to the session makes forgery require the
+    // session token itself, which is HttpOnly and unreadable from script.
+    try runMigration(allocator, "007_session_csrf",
+        \\DEFINE FIELD csrf_hash ON sessions TYPE string DEFAULT "";
     );
 
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
@@ -693,35 +709,58 @@ pub fn generateSecureToken() [64]u8 {
     return hex_token;
 }
 
-/// Create a new session for a user, returns the session token
-/// Session expires in 7 days by default
-pub fn createSession(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
+/// A freshly minted session: the opaque token that goes in the HttpOnly
+/// cookie, and the CSRF token that goes in the script-readable one. Only
+/// hashes of either are stored, so a database read cannot recover them.
+pub const NewSession = struct {
+    token: [64]u8,
+    csrf: [64]u8,
+};
+
+/// Create a new session for a user. Session expires in 7 days by default.
+pub fn createSession(allocator: std.mem.Allocator, user_id: []const u8) !NewSession {
     const token = generateSecureToken();
     const token_hash = hashToken(token[0..]);
+
+    // SECURITY: the CSRF token is minted here and its hash stored on the same
+    // row, so it is only valid for this session. Verification recomputes the
+    // hash from the submitted header and compares against the row reached via
+    // the session cookie — an attacker who can set a cookie but cannot read
+    // the HttpOnly session token has nothing to submit.
+    const csrf = generateSecureToken();
+    const csrf_hash = hashToken(csrf[0..]);
 
     // Calculate expiration (7 days from now in milliseconds)
     const expires_ms = std.time.milliTimestamp() + (7 * 24 * 60 * 60 * 1000);
 
     const result = try queryWithVars(allocator,
-        \\CREATE sessions SET token = $session_token, user_id = $user_id, expires_at = time::from::millis($expires_ms);
-    , .{ .session_token = token_hash, .user_id = user_id, .expires_ms = expires_ms });
+        \\CREATE sessions SET token = $session_token, user_id = $user_id, csrf_hash = $csrf_hash, expires_at = time::from::millis($expires_ms);
+    , .{ .session_token = token_hash, .user_id = user_id, .csrf_hash = csrf_hash, .expires_ms = expires_ms });
     defer allocator.free(result);
 
-    // Return a copy of the token
-    return try allocator.dupe(u8, &token);
+    return .{ .token = token, .csrf = csrf };
 }
 
-/// Validate a session token and return the user_id if valid
-/// Returns null if token is invalid or expired
-pub fn validateSession(allocator: std.mem.Allocator, token: []const u8) !?[]u8 {
+/// A live session as stored: who it belongs to, and the hash of the CSRF
+/// token that was issued alongside it.
+pub const SessionInfo = struct {
+    user_id: []u8,
+    csrf_hash: []u8,
+};
+
+/// Look up a session token and return the owning user plus the stored CSRF
+/// hash, or null when the token is unknown or expired. Caller owns both
+/// slices.
+pub fn lookupSession(allocator: std.mem.Allocator, token: []const u8) !?SessionInfo {
     const token_hash = hashToken(token);
     const result = try queryWithVars(allocator,
-        \\SELECT user_id, time::unix(expires_at) * 1000 as expires_ms FROM sessions WHERE token = $session_token;
+        \\SELECT user_id, csrf_hash, time::unix(expires_at) * 1000 as expires_ms FROM sessions WHERE token = $session_token;
     , .{ .session_token = token_hash });
     defer allocator.free(result);
 
     const SessionResult = struct {
         user_id: []const u8,
+        csrf_hash: []const u8 = "",
         expires_ms: i64,
     };
 
@@ -740,7 +779,18 @@ pub fn validateSession(allocator: std.mem.Allocator, token: []const u8) !?[]u8 {
         return null;
     }
 
-    return try allocator.dupe(u8, session.user_id);
+    const user_id = try allocator.dupe(u8, session.user_id);
+    errdefer allocator.free(user_id);
+    const csrf_hash = try allocator.dupe(u8, session.csrf_hash);
+    return .{ .user_id = user_id, .csrf_hash = csrf_hash };
+}
+
+/// Validate a session token and return the user_id if valid
+/// Returns null if token is invalid or expired
+pub fn validateSession(allocator: std.mem.Allocator, token: []const u8) !?[]u8 {
+    const info = try lookupSession(allocator, token) orelse return null;
+    allocator.free(info.csrf_hash);
+    return info.user_id;
 }
 
 /// Delete a specific session (logout)

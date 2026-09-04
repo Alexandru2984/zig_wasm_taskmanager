@@ -104,7 +104,11 @@ pub const canWriteTask = impl.canWriteTask;
 
 // Session operations
 pub const generateSecureToken = impl.generateSecureToken;
+pub const hashTokenHex = impl.hashTokenHex;
+pub const NewSession = impl.NewSession;
+pub const SessionInfo = impl.SessionInfo;
 pub const createSession = impl.createSession;
+pub const lookupSession = impl.lookupSession;
 pub const validateSession = impl.validateSession;
 pub const deleteSession = impl.deleteSession;
 pub const deleteUserSessions = impl.deleteUserSessions;

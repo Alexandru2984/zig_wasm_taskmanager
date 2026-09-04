@@ -111,7 +111,7 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     email.enqueueConfirmation(user.email, user.name, verification_code);
 
     // Create session
-    const token = db.createSession(req_alloc, user.id) catch {
+    const session = db.createSession(req_alloc, user.id) catch {
         try http.jsonError(r, 500, "Failed to create session");
         return;
     };
@@ -124,7 +124,7 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     // SECURITY: session is carried ONLY via the HttpOnly cookie — the token is
     // NOT echoed in the response body, so an XSS that reads fetch responses
     // can't exfiltrate it.
-    http.setAuthCookie(r, token);
+    http.setAuthCookie(r, session);
     db.logActivity(req_alloc, user.id, "signup", "user", user.id) catch |err| {
         log.warn("Failed to log signup activity: {}", .{err});
     };
@@ -202,7 +202,7 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     }
 
     // Create session
-    const token = db.createSession(req_alloc, user.id) catch {
+    const session = db.createSession(req_alloc, user.id) catch {
         try http.jsonError(r, 500, "Failed to create session");
         return;
     };
@@ -213,7 +213,7 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     defer req_alloc.free(workspace_id);
 
     // SECURITY: session lives in the HttpOnly cookie only (see signup note).
-    http.setAuthCookie(r, token);
+    http.setAuthCookie(r, session);
     db.logActivity(req_alloc, user.id, "login", "session", "") catch |err| {
         log.warn("Failed to log login activity: {}", .{err});
     };
