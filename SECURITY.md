@@ -28,22 +28,48 @@ Primary attacker capabilities:
 | --- | --- |
 | Passwords | Argon2id with per-user random salt |
 | Sessions | Server-side SurrealDB sessions, 7-day expiry, hashed session tokens, HttpOnly cookie transport |
-| Cookies | `HttpOnly`, `SameSite=Strict`, `Secure` in production |
+| Cookies | `HttpOnly`, `SameSite=Strict`, `Secure`, and the `__Host-` prefix in production, which the browser refuses unless the cookie is Secure, Path=/ and carries no Domain — making it unsettable by any other host on the parent domain |
 | Password reset | Random 256-bit token, stored hashed, 1-hour expiry, token cleared atomically after use |
 | Email verification | Authenticated verification, hashed 6-digit code, expiry, per-user attempt cap |
 | Account enumeration | Uniform responses plus background email dispatch, so signup/login/reset/verify response times don't reveal whether an address exists |
 | Rate limiting | Separate buckets for signup, login IP/account, forgot/reset, verification, resend, task writes, password changes, and workspace invites; the per-account login bucket counts only failed attempts |
-| Request bodies | 64 KiB JSON body cap |
+| CSRF | Token minted with the session and stored hashed on the session row; verification compares the hash of the submitted header against it, so forging one requires reading the HttpOnly session cookie |
+| Request bodies | 64 KiB JSON body cap, enforced at nginx as well as in the app |
+| Passwords | Rejected if they appear in a common-password list or are a single repeated character or a straight run, in addition to the length and composition rules |
+| Path parameters | Percent-decoded before use, with a malformed escape rejected rather than passed through altered |
+| Error handling | Any error escaping a handler is answered as 500; previously it produced HTTP 200 with an empty body, which a client reads as success |
 | Input validation | Email/name/password/task title/date validation before database writes |
 | Database access | SurrealQL variable binding helper for user-controlled values (unit-tested for quote/control-byte escaping; unsupported bind types are rejected at compile time); Surreal `ERR` results are treated as failed queries |
 | Password change | Re-authenticates the current password, rejects reuse, invalidates other sessions, and is rate-limited |
 | XSS defense | DOM rendering uses `textContent`; strict CSP for HTML responses |
 | Static files | realpath-based public-directory containment and sensitive-file deny list |
-| Security headers | CSP, HSTS, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy` |
+| Security headers | One authoritative set emitted by nginx — CSP (no `unsafe-inline` for script or style), HSTS, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`, COOP, CORP — covering responses the app never produces, such as a 502 during a restart |
+| Origin exposure | The origin answers only to Cloudflare edge addresses and loopback; a direct request to the server's own address is refused, so the WAF and rate limiting cannot be skipped by finding the origin IP |
+| Rate limiting (edge) | nginx `limit_req` zones in front of the app's own limiters, keyed on the real visitor address and surviving a restart, which the in-process buckets do not |
+| Email addresses | Normalized to lowercase before storage and lookup, so one mailbox cannot hold two accounts and a rate-limit bucket cannot be reset by changing capitalisation |
+| Account deletion | Requires the password again, not merely a live session, and removes every row referencing the user |
 | Email | SMTP via mailcow; secrets stay in `.env`; curl config and payload files are private temp files |
 | Workspace invites | Invite tokens are stored hashed, deduplicated while pending, and gated behind verified inviter/recipient emails |
 | Metrics | `/api/metrics` disabled unless `METRICS_TOKEN` is configured |
 | Deployment | systemd sandboxing, non-root user, no Linux capabilities, private `/tmp`, read-only home/system views |
+
+## Known Limitations
+
+- SurrealDB 1.5.6 is several major versions behind. The application connects
+  with root credentials, so any escape from the query builder would have the
+  whole database in reach. Upgrading, and giving the app a scoped database
+  user, is the single largest outstanding item.
+- Bind variables are emitted as `LET $x = "…"` prefixes with hand-written
+  escaping rather than a native parameter protocol, because SurrealDB's HTTP
+  `/sql` endpoint takes no separate variables. The escaper is unit-tested and
+  was probed against the live database — bare table names, record ranges and
+  quote-breakout attempts all fail closed — but it remains a hand-rolled
+  escaper in front of a database.
+- The common-password check is a short explicit list, not a breach corpus.
+  Have I Been Pwned's range API is the real answer and needs an outbound
+  request per signup.
+- Rate-limit state inside the application lives in process memory. The nginx
+  zones in front of it cover a restart; the per-account login budget does not.
 
 ## Operational Notes
 

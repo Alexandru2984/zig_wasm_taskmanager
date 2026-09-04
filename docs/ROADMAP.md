@@ -13,18 +13,30 @@ work visible for interviews and portfolio review.
 
 ## 2. Security Posture
 
-- Extend workspace RBAC with role changes and member removal.
-- Add lockout/backoff visibility for auth endpoints.
+- Upgrade SurrealDB from 1.5.6 and give the app a scoped database user
+  instead of root. Largest outstanding item.
+- Check new passwords against Have I Been Pwned's range API rather than the
+  short built-in list.
 - Add audit events for password resets and login failures.
+- Persist rate-limit state so the per-account login budget survives a restart,
+  as the nginx zones already do.
 - Keep deployment hardening documented and reproducible.
+
+Done: workspace RBAC with role changes and member removal; CSRF bound to the
+session; `__Host-` cookies; origin restricted to Cloudflare; edge rate limits;
+email normalisation; account deletion with re-authentication.
 
 ## 3. Product Features
 
-- Add workspace selector and member management UI.
-- Add labels for task grouping.
 - Add Kanban status columns.
 - Add recurring tasks with a conservative recurrence model.
-- Add JSON/CSV export.
+- Add CSV export alongside the existing JSON export.
+- Add task assignment within a workspace.
+- Add a service worker so the app opens offline.
+
+Done: workspace selector and member management UI; invitation accept flow;
+task editing with notes, tags, due dates and priorities; search, filters and
+sorting; session management; JSON export; installable web manifest.
 
 ## 4. Demo Readiness
 

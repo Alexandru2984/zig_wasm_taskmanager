@@ -256,6 +256,46 @@ paths:
                   $ref: "#/components/schemas/WorkspaceMember"
         "403":
           description: Requires owner or admin role
+    put:
+      summary: Change a member's role
+      description: >-
+        The owner's role cannot be changed, and "owner" is not an assignable
+        role, so ownership can never be granted through this endpoint.
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeMemberRoleRequest"
+      responses:
+        "200":
+          description: Role updated
+        "403":
+          description: Requires owner or admin role, or the target is the owner
+        "404":
+          description: Not a member of this workspace
+    delete:
+      summary: Remove a member
+      description: >-
+        The owner cannot be removed, so a workspace always keeps someone able
+        to administer it.
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RemoveMemberRequest"
+      responses:
+        "200":
+          description: Member removed
+        "403":
+          description: Requires owner or admin role, or the target is the owner
+        "404":
+          description: Not a member of this workspace
   /api/workspaces/{id}/invites:
     post:
       summary: Invite a user to a workspace
@@ -269,9 +309,39 @@ paths:
               $ref: "#/components/schemas/CreateWorkspaceInviteRequest"
       responses:
         "201":
-          description: Invite created
+          description: >-
+            Invite created. The email is queued and sent in the background, so
+            a 201 means the invitation exists, not that it has been delivered.
+        "403":
+          description: Requires owner or admin role, and a verified inviter email
+        "409":
+          description: A pending invite already exists for this address
+    get:
+      summary: List pending invitations
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: Pending invitations
         "403":
           description: Requires owner or admin role
+    delete:
+      summary: Revoke a pending invitation
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeInviteRequest"
+      responses:
+        "200":
+          description: Invitation revoked
+        "403":
+          description: Requires owner or admin role
+        "404":
+          description: No such invitation in this workspace
   /api/tasks:
     get:
       summary: List tasks for the current user
@@ -293,14 +363,26 @@ paths:
           description: Not authenticated
   /api/tasks/{id}:
     put:
-      summary: Toggle task completion
+      summary: Update a task, or toggle it when the body is empty
+      description: >-
+        With a body, each field present is written and each field omitted keeps
+        its stored value. `due_date: ""` clears the date; omitting it leaves it
+        alone. With no body, completion is toggled.
       parameters:
         - $ref: "#/components/parameters/TaskId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTaskRequest"
       responses:
         "200":
           description: Updated task
+        "400":
+          description: Invalid field, or a due date in the past
         "403":
-          description: Task does not belong to current user
+          description: Not your task, or the workspace is read-only
     delete:
       summary: Delete a task
       parameters:
@@ -310,6 +392,82 @@ paths:
           description: Task deleted
         "403":
           description: Task does not belong to current user
+  /api/sessions:
+    get:
+      summary: List active sessions for the current user
+      description: >-
+        Session tokens are stored hashed and never leave the database. The
+        caller's own session is identified by hashing the presented cookie, and
+        is marked with `current`.
+      responses:
+        "200":
+          description: Session list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Session"
+        "401":
+          description: Not authenticated
+    delete:
+      summary: Revoke every session except the caller's
+      responses:
+        "200":
+          description: Other sessions revoked
+        "401":
+          description: Not authenticated
+  /api/sessions/{id}:
+    delete:
+      summary: Revoke one session
+      description: >-
+        Scoped to the caller, so a session belonging to another user answers
+        404 rather than 403 — distinguishing the two would confirm that the
+        session exists.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "sessions:abc123"
+      responses:
+        "200":
+          description: Session revoked
+        "404":
+          description: No such session for this user
+  /api/export:
+    get:
+      summary: Export everything the account holds
+      description: >-
+        Returns the account, its tasks, workspaces and activity as one JSON
+        document, with Content-Disposition set so a browser saves it.
+      responses:
+        "200":
+          description: Export document
+        "401":
+          description: Not authenticated
+  /api/account:
+    delete:
+      summary: Delete the account and everything it owns
+      description: >-
+        Irreversible. Requires the account password again: a live session is
+        not sufficient authority for an action with no undo. Workspaces the
+        user owns are deleted with them, since the owner cannot be removed by
+        any other route and an ownerless workspace could never be administered.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteAccountRequest"
+      responses:
+        "200":
+          description: Account deleted
+        "403":
+          description: Incorrect password
+        "429":
+          description: Too many attempts
   /api/activity:
     get:
       summary: List recent activity for the current user
@@ -381,8 +539,94 @@ components:
         priority:
           type: string
           enum: [low, normal, high]
+        notes:
+          type: string
+          maxLength: 5000
+        tags:
+          type: array
+          maxItems: 12
+          items:
+            type: string
+            maxLength: 32
         reminder_sent:
           type: boolean
+    UpdateTaskRequest:
+      type: object
+      description: >-
+        Every field is optional. A field that is present is written; a field
+        that is absent keeps its stored value.
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        priority:
+          type: string
+          enum: [low, normal, high]
+        notes:
+          type: string
+          maxLength: 5000
+        completed:
+          type: boolean
+        tags:
+          type: array
+          maxItems: 12
+          items:
+            type: string
+            maxLength: 32
+        due_date:
+          type: string
+          description: >-
+            An empty string clears the due date. Omitting the field leaves it
+            unchanged, which is why this is not a nullable date. A value must
+            be in the future.
+    ChangeMemberRoleRequest:
+      type: object
+      required: [user_id, role]
+      properties:
+        user_id:
+          type: string
+          example: "users:abc123"
+        role:
+          type: string
+          enum: [admin, member, viewer]
+          description: '"owner" is deliberately not assignable.'
+    RemoveMemberRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          example: "users:abc123"
+    RevokeInviteRequest:
+      type: object
+      required: [invite_id]
+      properties:
+        invite_id:
+          type: string
+          example: "workspace_invites:abc123"
+    DeleteAccountRequest:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+          description: The account password, required again to confirm.
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "sessions:abc123"
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        current:
+          type: boolean
+          description: True for the session making the request.
     ActivityEvent:
       type: object
       properties:
@@ -402,6 +646,12 @@ components:
             - invite_workspace_member
             - accept_workspace_invite
             - create_task
+            - update_task
+            - change_member_role
+            - remove_workspace_member
+            - revoke_workspace_invite
+            - revoke_session
+            - revoke_sessions
             - toggle_task
             - delete_task
         entity_type:
