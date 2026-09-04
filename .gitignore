@@ -28,7 +28,14 @@ Thumbs.db
 surreal.db/
 
 # Environment
+# Ignore every .env variant — including timestamped backups like
+# .env.bak-mailcow-20260816T221809Z, which the old `.env` / `.env.local` pair
+# did NOT match and which a `git add -A` would have committed.
 .env
-.env.local
+.env.*
+!.env.example
 mail_settings.txt
 db_settings.txt
+
+# Local toolchain / scratch
+*.tar.xz
