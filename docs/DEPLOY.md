@@ -116,35 +116,54 @@ sudo systemctl status taskmanager
 
 ## 5. Nginx Reverse Proxy
 
-```bash
-sudo apt install nginx certbot python3-certbot-nginx -y
-sudo nano /etc/nginx/sites-available/taskmanager
-```
+The production configuration is versioned in `ops/nginx/` rather than written
+by hand on the server, so it can be reviewed, diffed and redeployed:
 
-```nginx
-server {
-    listen 80;
-    server_name yourdomain.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:9000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
+| File | Installs to | Purpose |
+| --- | --- | --- |
+| `task.micutu.com` | `sites-available/` | The vhost |
+| `task-security.conf` | `snippets/` | Security headers, single source of truth |
+| `task-rate-limit.conf` | `conf.d/` | `limit_req` / `limit_conn` zones (http level) |
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/taskmanager /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
+sudo cp ops/nginx/task-rate-limit.conf /etc/nginx/conf.d/
+sudo cp ops/nginx/task-security.conf   /etc/nginx/snippets/
+sudo cp ops/nginx/task.micutu.com      /etc/nginx/sites-available/
+sudo ln -sf /etc/nginx/sites-available/task.micutu.com /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
 
-# Get SSL certificate
-sudo certbot --nginx -d yourdomain.com
+# TLS
+sudo certbot --nginx -d task.micutu.com
 ```
+
+Four things this configuration does that a plain `proxy_pass` does not:
+
+**Only Cloudflare may reach the origin.** DNS points at Cloudflare, but the
+server still answers on its own address, so anyone who learns the origin IP can
+send `Host: task.micutu.com` directly and skip the WAF, bot management and DDoS
+absorption entirely. The vhost returns 403 unless the peer is a Cloudflare edge
+(or loopback, for local health checks), using the `$from_cloudflare_origin` map
+from `conf.d/cloudflare-origin-guard.conf`.
+
+**The real visitor IP reaches the app.** `conf.d/cloudflare-realip.conf` runs
+the real_ip module over Cloudflare's published ranges, so `$remote_addr` is the
+visitor rather than the edge before any rate-limit zone or log line sees it.
+`proxy_set_header` then overwrites `X-Real-IP` and clears `CF-Connecting-IP`, so
+a client cannot supply its own value; the app only trusts these headers from a
+peer listed in `TRUST_PROXY`.
+
+**Rate limits survive a deploy.** The app's own limiters live in process memory
+and reset on every restart. The nginx zones do not, and they reject a flood
+before it reaches a worker thread or opens a database connection.
+
+**One copy of every security header.** The app used to set its own headers while
+the shared `snippets/security-headers.conf` set a second, looser copy — two CSPs,
+and `X-Frame-Options: DENY` next to `SAMEORIGIN`. `task-security.conf` strips the
+upstream copies with `proxy_hide_header` and emits one authoritative set, which
+also covers responses the app never produces (502 during a restart, 413, 429).
+
+Static assets are served from disk by nginx with gzip and ETag revalidation;
+only `/api/` is proxied to Zig.
 
 ## 6. Verify Deployment
 
