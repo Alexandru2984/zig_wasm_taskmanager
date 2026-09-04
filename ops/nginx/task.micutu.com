@@ -100,6 +100,17 @@ server {
     root /home/micu/taskmanager/public;
     index index.html;
 
+    # nginx's mime.types has no entry for .webmanifest, so without this the
+    # manifest is served as application/octet-stream and the browser ignores it.
+    # A `types { }` block here would REPLACE the inherited map rather than
+    # extend it, turning every .css and .js into octet-stream too — hence a
+    # single exact-match location instead.
+    location = /site.webmanifest {
+        include snippets/task-security.conf;
+        default_type application/manifest+json;
+        add_header Cache-Control "no-cache" always;
+    }
+
     # No content hashing in asset filenames yet, so a long max-age would pin
     # a stale app.js after a deploy. no-cache still allows a conditional
     # request and a 304 with an empty body — nearly the same saving, with none

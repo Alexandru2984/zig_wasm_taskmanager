@@ -2,20 +2,55 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="A fast task manager with a Zig (Zap) backend and a WebAssembly front end written in Zig.">
-    <meta name="color-scheme" content="light dark">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+
+    <title>Zig Tasks — a fast, shared task manager</title>
+    <meta name="description" content="A fast task manager with shared workspaces, due dates, tags and priorities. Zig and Zap on the server, WebAssembly in the browser.">
+    <link rel="canonical" href="https://task.micutu.com/">
+
+    <meta name="color-scheme" content="dark light">
     <meta name="theme-color" content="#0b0c10" media="(prefers-color-scheme: dark)">
     <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
 
     <meta property="og:type" content="website">
-    <meta property="og:title" content="Zig Tasks">
-    <meta property="og:description" content="A fast task manager with a Zig backend and a WebAssembly front end.">
-    <meta property="og:image" content="favicon.svg">
+    <meta property="og:site_name" content="Zig Tasks">
+    <meta property="og:url" content="https://task.micutu.com/">
+    <meta property="og:title" content="Zig Tasks — a fast, shared task manager">
+    <meta property="og:description" content="Shared workspaces, due dates, tags and priorities. Zig and Zap on the server, WebAssembly in the browser.">
+    <meta property="og:image" content="https://task.micutu.com/og-image.svg">
+    <meta property="og:image:alt" content="Zig Tasks — a task manager built in Zig">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Zig Tasks — a fast, shared task manager">
+    <meta name="twitter:description" content="Shared workspaces, due dates, tags and priorities. Built in Zig.">
+    <meta name="twitter:image" content="https://task.micutu.com/og-image.svg">
 
-    <title>Zig Tasks — fast task manager in Zig</title>
-    <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css">
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/favicon.svg">
+    <link rel="manifest" href="/site.webmanifest">
+    <link rel="stylesheet" href="/style.css">
+
+    <!-- Structured data. The CSP forbids inline <script>, but this is
+         application/ld+json, which is data rather than script: the parser
+         never executes it, so script-src does not apply. -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebApplication",
+      "name": "Zig Tasks",
+      "url": "https://task.micutu.com/",
+      "applicationCategory": "ProductivityApplication",
+      "operatingSystem": "Any modern browser",
+      "description": "A task manager with shared workspaces, due dates, tags and priorities. Zig and Zap on the server, WebAssembly in the browser.",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "featureList": [
+        "Shared workspaces with roles",
+        "Due dates and reminders",
+        "Tags and priorities",
+        "Works signed out via WebAssembly",
+        "JSON data export"
+      ]
+    }
+    </script>
 </head>
 <body>
     <a class="skip-link" href="#taskInput">Skip to content</a>
@@ -25,19 +60,16 @@
             <span class="nav-logo" aria-hidden="true">🦎</span>
             <span class="nav-title">Zig Tasks</span>
         </div>
-        <div class="nav-menu">
-            <button class="icon-btn theme-toggle" id="themeToggle" type="button"
-                    aria-label="Switch theme" title="Switch theme">
+        <div class="nav-actions">
+            <button class="icon-btn" id="themeToggle" type="button" aria-label="Switch theme" title="Switch theme">
                 <span class="theme-icon" id="themeIcon" aria-hidden="true">🌙</span>
             </button>
 
-            <!-- Logged out -->
             <div class="nav-auth" id="authButtons">
-                <button class="btn btn-ghost" data-action="show-modal" data-target="loginModal">Login</button>
-                <button class="btn btn-primary" data-action="show-modal" data-target="signupModal">Sign Up</button>
+                <button class="btn btn-ghost btn-sm" data-action="show-modal" data-target="loginModal">Log in</button>
+                <button class="btn btn-primary btn-sm" data-action="show-modal" data-target="signupModal">Sign up</button>
             </div>
 
-            <!-- Logged in -->
             <div class="nav-user hidden" id="userMenu">
                 <div class="user-dropdown">
                     <button class="user-btn" id="userBtn" type="button"
@@ -47,15 +79,23 @@
                         <span class="dropdown-arrow" aria-hidden="true">▾</span>
                     </button>
                     <div class="dropdown-menu" id="dropdownMenu" role="menu" hidden>
-                        <div class="dropdown-header">
-                            <span class="user-email" id="userEmail">user@example.com</span>
-                        </div>
+                        <div class="dropdown-header"><span id="userEmail">user@example.com</span></div>
                         <hr>
                         <button class="dropdown-item" role="menuitem" data-action="show-modal" data-target="profileModal">
                             <span aria-hidden="true">👤</span> Profile
                         </button>
+                        <button class="dropdown-item" role="menuitem" data-action="open-workspace">
+                            <span aria-hidden="true">👥</span> Workspace &amp; members
+                        </button>
+                        <button class="dropdown-item" role="menuitem" data-action="open-activity">
+                            <span aria-hidden="true">📜</span> Activity
+                        </button>
+                        <button class="dropdown-item" role="menuitem" data-action="open-account">
+                            <span aria-hidden="true">🔐</span> Security &amp; data
+                        </button>
+                        <hr>
                         <button class="dropdown-item dropdown-item-danger" role="menuitem" data-action="logout">
-                            <span aria-hidden="true">🚪</span> Logout
+                            <span aria-hidden="true">🚪</span> Log out
                         </button>
                     </div>
                 </div>
@@ -66,70 +106,132 @@
     <div class="app-container">
         <header class="hero">
             <h1 class="hero-title">Organize your day</h1>
-            <p class="hero-subtitle">Zig backend · WebAssembly front end</p>
+            <p class="hero-subtitle" id="heroSubtitle">Zig backend · WebAssembly front end</p>
         </header>
 
-        <main class="main" id="main">
-            <form class="task-form" id="taskForm">
-                <div class="input-group">
-                    <input
-                        type="text"
-                        id="taskInput"
-                        class="task-input"
-                        placeholder="What needs to be done?"
-                        autocomplete="off"
-                        aria-label="Task title"
-                        maxlength="500"
-                        required
-                    >
-                    <select id="taskPriority" class="priority-select" aria-label="Task priority">
-                        <option value="normal">Normal</option>
-                        <option value="high">High</option>
-                        <option value="low">Low</option>
-                    </select>
-                    <div class="date-picker-wrapper">
-                        <button type="button" class="date-picker-btn" id="datePickerBtn"
-                                aria-label="Set due date" title="Set due date">
-                            <span aria-hidden="true">📅</span>
-                        </button>
-                        <input type="datetime-local" id="taskDueDate" class="task-due-input hidden-input"
-                               aria-label="Due date">
-                        <span class="date-preview" id="datePreview"></span>
-                        <button type="button" class="date-clear-btn" id="dateClearBtn"
-                                aria-label="Clear due date" title="Clear due date">×</button>
+        <main class="main card" id="main">
+            <!-- Workspace switcher — only meaningful when signed in -->
+            <div class="workspace-bar hidden" id="workspaceBar">
+                <label class="sr-only" for="workspaceSelect">Workspace</label>
+                <select id="workspaceSelect" class="workspace-select"></select>
+                <span class="workspace-role" id="workspaceRole">owner</span>
+                <button class="icon-btn" type="button" data-action="open-workspace"
+                        aria-label="Workspace settings" title="Workspace settings">⚙️</button>
+                <button class="icon-btn" type="button" data-action="new-workspace"
+                        aria-label="New workspace" title="New workspace">＋</button>
+            </div>
+
+            <form class="composer" id="taskForm">
+                <div class="composer-row">
+                    <input type="text" id="taskInput" class="composer-input"
+                           placeholder="What needs to be done?" autocomplete="off"
+                           aria-label="Task title" maxlength="500" required>
+                    <button class="icon-btn" type="button" id="composerToggle"
+                            aria-expanded="false" aria-controls="composerDetails"
+                            aria-label="More options" title="More options">⋯</button>
+                    <button type="submit" class="btn btn-primary">Add</button>
+                </div>
+
+                <div class="composer-details" id="composerDetails" hidden>
+                    <div class="composer-field">
+                        <label for="taskPriority">Priority</label>
+                        <select id="taskPriority">
+                            <option value="normal">Normal</option>
+                            <option value="high">High</option>
+                            <option value="low">Low</option>
+                        </select>
                     </div>
-                    <button type="submit" class="btn btn-primary btn-add">
-                        <span class="btn-icon" aria-hidden="true">+</span>
-                        <span class="btn-text">Add</span>
-                    </button>
+                    <div class="composer-field">
+                        <label for="taskDueDate">Due date</label>
+                        <input type="datetime-local" id="taskDueDate">
+                    </div>
+                    <div class="composer-field">
+                        <label for="taskTags">Tags</label>
+                        <input type="text" id="taskTags" placeholder="work, urgent" autocomplete="off" maxlength="200">
+                    </div>
                 </div>
             </form>
 
-            <div class="stats" id="stats">
-                <span class="stat"><span id="totalCount">0</span> tasks</span>
-                <span class="stat"><span id="completedCount">0</span> completed</span>
+            <div class="toolbar">
+                <div class="search-wrap">
+                    <span class="search-icon" aria-hidden="true">🔎</span>
+                    <label class="sr-only" for="searchInput">Search tasks</label>
+                    <input type="search" id="searchInput" placeholder="Search tasks, notes and tags" autocomplete="off">
+                </div>
+                <div class="toolbar-row">
+                    <div class="filter-chips" id="filterChips" role="group" aria-label="Filter tasks">
+                        <button type="button" class="chip" data-filter="all" aria-pressed="true">
+                            All <span class="chip-count" id="countAll">0</span>
+                        </button>
+                        <button type="button" class="chip" data-filter="active" aria-pressed="false">
+                            Active <span class="chip-count" id="countActive">0</span>
+                        </button>
+                        <button type="button" class="chip" data-filter="completed" aria-pressed="false">
+                            Done <span class="chip-count" id="countDone">0</span>
+                        </button>
+                        <button type="button" class="chip" data-filter="overdue" aria-pressed="false">
+                            Overdue <span class="chip-count" id="countOverdue">0</span>
+                        </button>
+                        <button type="button" class="chip" data-filter="high" aria-pressed="false">
+                            High <span class="chip-count" id="countHigh">0</span>
+                        </button>
+                    </div>
+                    <label class="sr-only" for="sortSelect">Sort by</label>
+                    <select id="sortSelect" class="sort-select">
+                        <option value="created_desc">Newest first</option>
+                        <option value="created_asc">Oldest first</option>
+                        <option value="due_asc">Due soonest</option>
+                        <option value="priority">Priority</option>
+                        <option value="title">Title A–Z</option>
+                    </select>
+                </div>
+                <div class="filter-chips hidden" id="tagChips" role="group" aria-label="Filter by tag"></div>
             </div>
 
-            <ul class="task-list" id="taskList" aria-label="Active tasks"></ul>
+            <div class="stats">
+                <span class="stat"><strong id="totalCount">0</strong> tasks</span>
+                <span class="stat"><strong id="completedCount">0</strong> completed</span>
+                <div class="progress" role="progressbar" aria-label="Completion" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress">
+                    <div class="progress-bar" id="progressBar"></div>
+                </div>
+            </div>
+
+            <div id="taskListSkeleton" class="hidden" aria-hidden="true">
+                <div class="skeleton skeleton-row"></div>
+                <div class="skeleton skeleton-row"></div>
+                <div class="skeleton skeleton-row"></div>
+            </div>
+
+            <ul class="task-list" id="taskList" aria-label="Tasks"></ul>
 
             <div class="empty-state" id="emptyState">
                 <div class="empty-icon" aria-hidden="true">📝</div>
-                <p>No tasks yet. Add one above to get started.</p>
+                <h3 id="emptyTitle">No tasks yet</h3>
+                <p id="emptyText">Add one above to get started.</p>
             </div>
 
             <section class="completed-section hidden" id="completedSection" aria-label="Completed tasks">
-                <h2 class="section-title"><span aria-hidden="true">✅</span> Completed</h2>
+                <h2 class="section-title">
+                    <button type="button" class="section-toggle" id="completedToggle" aria-expanded="true">
+                        <span aria-hidden="true">✅</span> Completed
+                        <span class="chip-count" id="completedSectionCount">0</span>
+                        <span aria-hidden="true" id="completedChevron">▾</span>
+                    </button>
+                </h2>
                 <ul class="task-list task-list-completed" id="completedTaskList"></ul>
             </section>
         </main>
 
         <footer class="footer">
-            <p>Built with <span class="heart" aria-hidden="true">⚡</span> in Zig</p>
-            <p class="tech">Zap server · WebAssembly front end</p>
+            <p>Built with <span aria-hidden="true">⚡</span> in Zig</p>
+            <p>Zap server · WebAssembly front end</p>
         </footer>
     </div>
 
-    <!-- Login Modal -->
+    <div class="toast-region" id="toastRegion" role="status" aria-live="polite"></div>
+    <div class="sr-only" id="announcer" aria-live="polite" aria-atomic="true"></div>
+
+    <!-- Login -->
     <div class="modal" id="loginModal" role="dialog" aria-modal="true" aria-labelledby="loginTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="loginModal"></div>
         <div class="modal-content">
@@ -145,18 +247,18 @@
                     <input type="password" id="loginPassword" autocomplete="current-password" required placeholder="••••••••">
                 </div>
                 <div class="form-error" id="loginError" role="alert" aria-live="assertive"></div>
-                <button type="submit" class="btn btn-primary btn-block">Login</button>
+                <button type="submit" class="btn btn-primary btn-block">Log in</button>
             </form>
             <p class="modal-footer">
                 <a href="#" data-action="switch-modal" data-from="loginModal" data-to="forgotModal">Forgot password?</a>
             </p>
             <p class="modal-footer">
-                Don't have an account? <a href="#" data-action="switch-modal" data-from="loginModal" data-to="signupModal">Sign up</a>
+                No account? <a href="#" data-action="switch-modal" data-from="loginModal" data-to="signupModal">Sign up</a>
             </p>
         </div>
     </div>
 
-    <!-- Signup Modal -->
+    <!-- Signup -->
     <div class="modal" id="signupModal" role="dialog" aria-modal="true" aria-labelledby="signupTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="signupModal"></div>
         <div class="modal-content">
@@ -165,7 +267,7 @@
             <form id="signupForm">
                 <div class="form-group">
                     <label for="signupName">Name</label>
-                    <input type="text" id="signupName" autocomplete="name" required placeholder="Jane Doe">
+                    <input type="text" id="signupName" autocomplete="name" required placeholder="Jane Doe" maxlength="100">
                 </div>
                 <div class="form-group">
                     <label for="signupEmail">Email</label>
@@ -174,23 +276,23 @@
                 <div class="form-group">
                     <label for="signupPassword">Password</label>
                     <input type="password" id="signupPassword" autocomplete="new-password" required minlength="8" placeholder="At least 8 characters">
-                    <p class="form-hint">Use 8+ characters with at least one letter and one number.</p>
+                    <p class="form-hint">8+ characters with a letter and a number. Common passwords are refused.</p>
                 </div>
                 <div class="form-error" id="signupError" role="alert" aria-live="assertive"></div>
                 <button type="submit" class="btn btn-primary btn-block">Create account</button>
             </form>
             <p class="modal-footer">
-                Already have an account? <a href="#" data-action="switch-modal" data-from="signupModal" data-to="loginModal">Login</a>
+                Already have an account? <a href="#" data-action="switch-modal" data-from="signupModal" data-to="loginModal">Log in</a>
             </p>
         </div>
     </div>
 
-    <!-- Verify Email Modal -->
+    <!-- Verify email -->
     <div class="modal" id="verifyModal" role="dialog" aria-modal="true" aria-labelledby="verifyTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="verifyModal"></div>
         <div class="modal-content">
             <button class="modal-close" data-action="hide-modal" data-target="verifyModal" aria-label="Close">×</button>
-            <h2 id="verifyTitle">Verify email</h2>
+            <h2 id="verifyTitle">Verify your email</h2>
             <p class="modal-desc">Enter the 6-digit code we sent to your inbox.</p>
             <form id="verifyForm">
                 <div class="code-input-group">
@@ -202,42 +304,40 @@
                     <input type="text" inputmode="numeric" class="code-input" maxlength="1" pattern="[0-9]" required aria-label="Digit 6" data-code-index="5">
                 </div>
                 <div class="form-error" id="verifyError" role="alert" aria-live="assertive"></div>
-                <div class="form-success hidden" id="verifySuccess">✅ Email verified successfully!</div>
-                <button type="submit" class="btn btn-primary btn-block">Verify account</button>
+                <div class="form-success hidden" id="verifySuccess">✅ Email verified.</div>
+                <button type="submit" class="btn btn-primary btn-block">Verify</button>
             </form>
             <p class="modal-footer" id="resendSection">
-                Didn't receive it?
+                Didn't get it?
                 <a href="#" id="resendLink" data-action="resend-code">Resend code</a>
-                <span id="resendTimer" class="resend-timer hidden"></span>
+                <span id="resendTimer" class="hidden"></span>
             </p>
         </div>
     </div>
 
-    <!-- Forgot Password Modal -->
+    <!-- Forgot password -->
     <div class="modal" id="forgotModal" role="dialog" aria-modal="true" aria-labelledby="forgotTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="forgotModal"></div>
         <div class="modal-content">
             <button class="modal-close" data-action="hide-modal" data-target="forgotModal" aria-label="Close">×</button>
             <h2 id="forgotTitle">Reset password</h2>
-            <p class="modal-desc">Enter your email and we'll send you a reset link.</p>
+            <p class="modal-desc">We'll email you a reset link.</p>
             <form id="forgotForm">
                 <div class="form-group">
                     <label for="forgotEmail">Email</label>
                     <input type="email" id="forgotEmail" autocomplete="email" required placeholder="you@example.com">
                 </div>
                 <div class="form-error" id="forgotError" role="alert" aria-live="assertive"></div>
-                <div class="form-success hidden" id="forgotSuccess">
-                    ✅ If this email exists, a reset link has been sent.
-                </div>
+                <div class="form-success hidden" id="forgotSuccess">✅ If that email exists, a reset link is on its way.</div>
                 <button type="submit" class="btn btn-primary btn-block">Send reset link</button>
             </form>
             <p class="modal-footer">
-                <a href="#" data-action="switch-modal" data-from="forgotModal" data-to="loginModal">← Back to login</a>
+                <a href="#" data-action="switch-modal" data-from="forgotModal" data-to="loginModal">← Back to log in</a>
             </p>
         </div>
     </div>
 
-    <!-- Profile Modal -->
+    <!-- Profile -->
     <div class="modal" id="profileModal" role="dialog" aria-modal="true" aria-labelledby="profileTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="profileModal"></div>
         <div class="modal-content modal-lg">
@@ -249,30 +349,27 @@
                 <div class="profile-info">
                     <div class="profile-name" id="profileName">User</div>
                     <div class="profile-email" id="profileEmail">user@example.com</div>
-                    <div class="profile-badge" id="profileVerified">
-                        <span class="badge badge-warning">⚠️ Email not verified</span>
-                    </div>
+                    <div class="profile-badge" id="profileVerified"></div>
                 </div>
             </div>
 
-            <div class="profile-tabs" role="tablist">
-                <button class="tab-btn active" data-action="switch-tab" data-tab="edit" role="tab" aria-selected="true">Edit profile</button>
-                <button class="tab-btn" data-action="switch-tab" data-tab="password" role="tab" aria-selected="false">Change password</button>
+            <div class="tabs" role="tablist">
+                <button class="tab-btn active" data-action="switch-tab" data-tab="edit" data-scope="profile" role="tab" aria-selected="true">Edit profile</button>
+                <button class="tab-btn" data-action="switch-tab" data-tab="password" data-scope="profile" role="tab" aria-selected="false">Change password</button>
             </div>
 
-            <div class="tab-content active" id="tabEdit" role="tabpanel">
+            <div class="tab-content active" id="profileTabEdit" role="tabpanel">
                 <form id="profileForm">
                     <div class="form-group">
                         <label for="profileNameInput">Name</label>
-                        <input type="text" id="profileNameInput" autocomplete="name" required placeholder="Your name">
+                        <input type="text" id="profileNameInput" autocomplete="name" required placeholder="Your name" maxlength="100">
                     </div>
                     <div class="form-error" id="profileError" role="alert" aria-live="assertive"></div>
-                    <div class="form-success hidden" id="profileSuccess">✅ Profile updated!</div>
                     <button type="submit" class="btn btn-primary btn-block">Save changes</button>
                 </form>
             </div>
 
-            <div class="tab-content" id="tabPassword" role="tabpanel">
+            <div class="tab-content" id="profileTabPassword" role="tabpanel">
                 <form id="passwordForm">
                     <div class="form-group">
                         <label for="currentPassword">Current password</label>
@@ -287,15 +384,121 @@
                         <input type="password" id="confirmPassword" autocomplete="new-password" required minlength="8" placeholder="••••••••">
                     </div>
                     <div class="form-error" id="passwordError" role="alert" aria-live="assertive"></div>
-                    <div class="form-success hidden" id="passwordSuccess">✅ Password changed!</div>
                     <button type="submit" class="btn btn-primary btn-block">Change password</button>
                 </form>
             </div>
         </div>
     </div>
 
-    <div class="sr-only" id="announcer" aria-live="polite" aria-atomic="true"></div>
+    <!-- Workspace -->
+    <div class="modal" id="workspaceModal" role="dialog" aria-modal="true" aria-labelledby="workspaceTitle" hidden>
+        <div class="modal-overlay" data-action="hide-modal" data-target="workspaceModal"></div>
+        <div class="modal-content modal-lg">
+            <button class="modal-close" data-action="hide-modal" data-target="workspaceModal" aria-label="Close">×</button>
+            <h2 id="workspaceTitle">Workspace</h2>
+            <p class="modal-desc" id="workspaceSubtitle">Members and invitations</p>
 
-    <script src="app.js"></script>
+            <div class="tabs" role="tablist">
+                <button class="tab-btn active" data-action="switch-tab" data-tab="members" data-scope="workspace" role="tab" aria-selected="true">Members</button>
+                <button class="tab-btn" data-action="switch-tab" data-tab="invites" data-scope="workspace" role="tab" aria-selected="false">Invitations</button>
+            </div>
+
+            <div class="tab-content active" id="workspaceTabMembers" role="tabpanel">
+                <ul class="panel-list" id="memberList"></ul>
+                <div class="panel-empty hidden" id="memberEmpty">No members to show.</div>
+            </div>
+
+            <div class="tab-content" id="workspaceTabInvites" role="tabpanel">
+                <form id="inviteForm">
+                    <div class="form-group">
+                        <label for="inviteEmail">Invite someone</label>
+                        <input type="email" id="inviteEmail" placeholder="teammate@example.com" autocomplete="off" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="inviteRole">Role</label>
+                        <select id="inviteRole">
+                            <option value="member">Member — can add and edit tasks</option>
+                            <option value="admin">Admin — can also manage members</option>
+                            <option value="viewer">Viewer — read only</option>
+                        </select>
+                    </div>
+                    <div class="form-error" id="inviteError" role="alert" aria-live="assertive"></div>
+                    <button type="submit" class="btn btn-primary btn-block">Send invitation</button>
+                </form>
+                <h3 class="section-title">Pending</h3>
+                <ul class="panel-list" id="inviteList"></ul>
+                <div class="panel-empty hidden" id="inviteEmpty">No pending invitations.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- New workspace -->
+    <div class="modal" id="newWorkspaceModal" role="dialog" aria-modal="true" aria-labelledby="newWorkspaceTitle" hidden>
+        <div class="modal-overlay" data-action="hide-modal" data-target="newWorkspaceModal"></div>
+        <div class="modal-content">
+            <button class="modal-close" data-action="hide-modal" data-target="newWorkspaceModal" aria-label="Close">×</button>
+            <h2 id="newWorkspaceTitle">New workspace</h2>
+            <p class="modal-desc">A separate space for a project or a team.</p>
+            <form id="newWorkspaceForm">
+                <div class="form-group">
+                    <label for="newWorkspaceName">Name</label>
+                    <input type="text" id="newWorkspaceName" required placeholder="Product team" maxlength="120" autocomplete="off">
+                </div>
+                <div class="form-error" id="newWorkspaceError" role="alert" aria-live="assertive"></div>
+                <button type="submit" class="btn btn-primary btn-block">Create workspace</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Activity -->
+    <div class="modal" id="activityModal" role="dialog" aria-modal="true" aria-labelledby="activityTitle" hidden>
+        <div class="modal-overlay" data-action="hide-modal" data-target="activityModal"></div>
+        <div class="modal-content modal-lg">
+            <button class="modal-close" data-action="hide-modal" data-target="activityModal" aria-label="Close">×</button>
+            <h2 id="activityTitle">Activity</h2>
+            <p class="modal-desc">The 50 most recent things that happened on your account.</p>
+            <ul class="panel-list" id="activityList"></ul>
+            <div class="panel-empty hidden" id="activityEmpty">Nothing recorded yet.</div>
+        </div>
+    </div>
+
+    <!-- Security & data -->
+    <div class="modal" id="accountModal" role="dialog" aria-modal="true" aria-labelledby="accountTitle" hidden>
+        <div class="modal-overlay" data-action="hide-modal" data-target="accountModal"></div>
+        <div class="modal-content modal-lg">
+            <button class="modal-close" data-action="hide-modal" data-target="accountModal" aria-label="Close">×</button>
+            <h2 id="accountTitle">Security &amp; data</h2>
+
+            <h3 class="section-title">Where you're signed in</h3>
+            <ul class="panel-list" id="sessionList"></ul>
+            <div class="panel-empty hidden" id="sessionEmpty">No other sessions.</div>
+            <button class="btn btn-ghost btn-block stack-top" type="button" id="revokeOthersBtn">
+                Sign out everywhere else
+            </button>
+
+            <h3 class="section-title">Your data</h3>
+            <p class="form-hint stack-bottom">
+                Download everything this account holds — tasks, workspaces and activity — as JSON.
+            </p>
+            <a class="btn btn-ghost btn-block" id="exportBtn" href="/api/export" download="zig-tasks-export.json">
+                Export my data
+            </a>
+
+            <div class="danger-zone">
+                <h3>Delete account</h3>
+                <p>This removes your account, your tasks and any workspace you own. It cannot be undone.</p>
+                <form id="deleteAccountForm">
+                    <div class="form-group">
+                        <label for="deletePassword">Confirm your password</label>
+                        <input type="password" id="deletePassword" autocomplete="current-password" required placeholder="••••••••">
+                    </div>
+                    <div class="form-error" id="deleteAccountError" role="alert" aria-live="assertive"></div>
+                    <button type="submit" class="btn btn-danger btn-block">Delete my account permanently</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
 </body>
 </html>

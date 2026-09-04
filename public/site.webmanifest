@@ -1,0 +1,19 @@
+{
+  "name": "Zig Tasks",
+  "short_name": "Zig Tasks",
+  "description": "A fast task manager with shared workspaces, due dates, tags and priorities.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0b0c10",
+  "theme_color": "#0b0c10",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
