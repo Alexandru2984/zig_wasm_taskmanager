@@ -32,6 +32,67 @@ pub fn validateEmail(email: []const u8) bool {
     return true;
 }
 
+/// Passwords that satisfy "8+ characters, a letter and a digit" while being
+/// among the first things any credential-stuffing list tries. The composition
+/// rule alone accepted every one of these.
+///
+/// This is a deliberately short list, not a breach corpus: it costs one linear
+/// scan and removes the passwords that actually show up in automated attacks.
+/// A real deployment should check against Have I Been Pwned's range API, which
+/// needs an outbound request per signup and is left as a follow-up.
+const COMMON_PASSWORDS = [_][]const u8{
+    "password",   "password1",  "password12", "password123",   "password1234",
+    "passw0rd",   "p@ssword",   "p@ssw0rd",   "qwerty123",     "qwerty1234",
+    "qwertyui",   "1qaz2wsx",   "1q2w3e4r",   "1q2w3e4r5t",    "zaq12wsx",
+    "abc12345",   "abcd1234",   "a1b2c3d4",   "12345678",      "123456789",
+    "1234567890", "11111111",   "00000000",   "iloveyou1",     "letmein1",
+    "welcome1",   "welcome123", "admin123",   "administrator", "football1",
+    "baseball1",  "monkey123",  "dragon123",  "sunshine1",     "princess1",
+    "trustno1",   "master123",  "shadow123",  "superman1",     "batman123",
+    "michael1",   "jordan23",   "starwars1",  "computer1",     "internet1",
+    "samsung1",   "changeme1",  "secret123",  "test1234",      "demo1234",
+};
+
+fn isCommonPassword(password: []const u8) bool {
+    for (COMMON_PASSWORDS) |common| {
+        if (password.len != common.len) continue;
+        var same = true;
+        for (password, common) |a, b| {
+            if (std.ascii.toLower(a) != b) {
+                same = false;
+                break;
+            }
+        }
+        if (same) return true;
+    }
+    return false;
+}
+
+/// True when the password is a single character repeated, or a straight
+/// ascending/descending run ("abcdefgh", "87654321"). Both pass a naive
+/// letter-and-digit check when padded, and both are trivially guessable.
+fn isTrivialSequence(password: []const u8) bool {
+    if (password.len < 2) return true;
+
+    var all_same = true;
+    for (password[1..]) |c| {
+        if (c != password[0]) {
+            all_same = false;
+            break;
+        }
+    }
+    if (all_same) return true;
+
+    var ascending = true;
+    var descending = true;
+    for (password[1..], 0..) |c, i| {
+        const prev = password[i];
+        if (c != prev +% 1) ascending = false;
+        if (c != prev -% 1) descending = false;
+    }
+    return ascending or descending;
+}
+
 /// Validate password strength
 pub fn validatePasswordStrength(password: []const u8) PasswordValidationResult {
     var result = PasswordValidationResult{};
@@ -54,7 +115,15 @@ pub fn validatePasswordStrength(password: []const u8) PasswordValidationResult {
     result.weak = !has_letter or !has_number;
     // SECURITY: `weak` is now load-bearing — previously computed and ignored,
     // which let users sign up with passwords like "aaaaaaaa".
-    result.valid = !result.too_short and !result.too_long and !result.weak;
+
+    // SECURITY: composition rules are a poor proxy for guessability.
+    // "password1" satisfies every one of them and is among the first guesses
+    // any credential-stuffing run makes, so reject the obvious cases outright.
+    if (!result.too_short and !result.too_long) {
+        result.common = isCommonPassword(password) or isTrivialSequence(password);
+    }
+
+    result.valid = !result.too_short and !result.too_long and !result.weak and !result.common;
 
     return result;
 }
@@ -64,22 +133,50 @@ pub const PasswordValidationResult = struct {
     too_short: bool = false,
     too_long: bool = false,
     weak: bool = false,
+    common: bool = false,
 };
 
-/// Validate name (no special SQL characters, reasonable length)
+/// Validate name (reasonable length, no markup).
+///
+/// The apostrophe used to be rejected here as an "SQL metacharacter", which
+/// locked out every O'Brien, D'Angelo and N'Diaye. It was never load-bearing:
+/// values reach SurrealDB through the escaping bind helper, and they reach the
+/// browser through textContent. Rejecting a letter that belongs in real names
+/// bought nothing and broke signup for people whose names contain it.
+///
+/// `<` and `>` stay rejected — not because the app would render them, but
+/// because a name is also interpolated into the HTML confirmation email, and
+/// keeping markup out at the door is cheaper than auditing every consumer.
 pub fn validateName(name: []const u8) bool {
     if (name.len < 1 or name.len > 100) return false;
 
-    // Block dangerous characters. `&` is legitimate in names ("Tom & Jerry"),
-    // output escaping is the consumer's job.
     for (name) |c| {
         switch (c) {
-            '<', '>', '"', '\'', '\\', ';' => return false,
+            '<', '>' => return false,
+            // Control bytes have no place in a display name and would break
+            // the email headers the name is interpolated into.
+            0x00...0x1F, 0x7F => return false,
             else => {},
         }
     }
 
     return true;
+}
+
+/// Lowercase an email for storage and lookup.
+///
+/// The domain part of an address is case-insensitive by definition, and every
+/// mail provider anyone actually uses treats the local part that way too.
+/// Storing the raw casing meant `Alice@example.com` and `alice@example.com`
+/// were two different rows as far as the UNIQUE index was concerned: a second
+/// account could be registered for the same mailbox, and a login with the
+/// "wrong" capitalisation would fail against an account that plainly exists.
+///
+/// Caller owns the returned slice.
+pub fn normalizeEmail(allocator: std.mem.Allocator, email: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, email.len);
+    for (email, 0..) |c, i| out[i] = std.ascii.toLower(c);
+    return out;
 }
 
 /// Validate task title
@@ -92,7 +189,8 @@ pub fn validateWorkspaceName(name: []const u8) bool {
     if (name.len < 1 or name.len > 120) return false;
     for (name) |c| {
         switch (c) {
-            '<', '>', '"', '\'', '\\', ';' => return false,
+            '<', '>' => return false,
+            0x00...0x1F, 0x7F => return false,
             else => {},
         }
     }
@@ -196,8 +294,15 @@ test "validatePasswordStrength" {
     try std.testing.expect(!result1.valid);
     try std.testing.expect(result1.too_short);
 
+    // "password123" used to pass here: it satisfies length, a letter and a
+    // digit. It is also one of the most-guessed passwords in existence, and is
+    // now rejected by the common-password check.
     const result2 = validatePasswordStrength("password123");
-    try std.testing.expect(result2.valid);
+    try std.testing.expect(!result2.valid);
+    try std.testing.expect(result2.common);
+
+    const result2b = validatePasswordStrength("marmalade7bridge");
+    try std.testing.expect(result2b.valid);
 
     // Weak: letters only, no digit
     const result3 = validatePasswordStrength("aaaaaaaa");
@@ -217,13 +322,42 @@ test "validateHexToken64" {
     try std.testing.expect(!validateHexToken64("g" ** 64)); // non-hex char
 }
 
-test "validateName rejects markup and SQL metacharacters" {
+test "validateName accepts real names and rejects markup" {
     try std.testing.expect(validateName("Jane Doe"));
     try std.testing.expect(validateName("Tom & Jerry"));
+    // Apostrophes and hyphens belong in names and must not be rejected.
+    try std.testing.expect(validateName("O'Brien"));
+    try std.testing.expect(validateName("N'Diaye"));
+    try std.testing.expect(validateName("Anne-Marie"));
+    try std.testing.expect(validateName("Ștefan Ionuț"));
     try std.testing.expect(!validateName(""));
     try std.testing.expect(!validateName("<script>"));
-    try std.testing.expect(!validateName("a'b"));
-    try std.testing.expect(!validateName("a;b"));
+    try std.testing.expect(!validateName("a\nb"));
+}
+
+test "normalizeEmail lowercases the whole address" {
+    const a = std.testing.allocator;
+    const out = try normalizeEmail(a, "Alice.Smith@Example.COM");
+    defer a.free(out);
+    try std.testing.expectEqualStrings("alice.smith@example.com", out);
+}
+
+test "validatePasswordStrength rejects common and trivial passwords" {
+    // Passes the letter+digit rule but is a top credential-stuffing guess.
+    const common = validatePasswordStrength("password1");
+    try std.testing.expect(!common.valid);
+    try std.testing.expect(common.common);
+
+    // Case-insensitive, so capitalising does not evade the list.
+    try std.testing.expect(!validatePasswordStrength("Password1").valid);
+    try std.testing.expect(!validatePasswordStrength("qwerty123").valid);
+
+    // Straight runs and single repeated characters.
+    try std.testing.expect(!validatePasswordStrength("abcdefgh").valid);
+    try std.testing.expect(!validatePasswordStrength("87654321").valid);
+
+    // A password that is none of the above still passes.
+    try std.testing.expect(validatePasswordStrength("tr0ubad0ur-horse").valid);
 }
 
 test "role and priority validators are allow-lists" {

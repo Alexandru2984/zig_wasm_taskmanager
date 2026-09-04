@@ -278,8 +278,40 @@ fn sendEmailRequest(
     return last_error orelse error.EmailSendFailed;
 }
 
+/// Escape a value for interpolation into an HTML email body.
+///
+/// validateName already refuses `<` and `>`, so this is the second line rather
+/// than the first — but the email template is the one place a stored name
+/// reaches an HTML context, and relying on an input filter three modules away
+/// to keep it safe is the kind of coupling that breaks quietly when someone
+/// relaxes the filter.
+fn appendHtmlEscaped(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    for (value) |c| {
+        switch (c) {
+            '&' => try out.appendSlice(allocator, "&amp;"),
+            '<' => try out.appendSlice(allocator, "&lt;"),
+            '>' => try out.appendSlice(allocator, "&gt;"),
+            '"' => try out.appendSlice(allocator, "&quot;"),
+            '\'' => try out.appendSlice(allocator, "&#39;"),
+            else => try out.append(allocator, c),
+        }
+    }
+}
+
+fn htmlEscape(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    try appendHtmlEscaped(&out, allocator, value);
+    return out.toOwnedSlice(allocator);
+}
+
 pub fn sendConfirmationEmail(allocator: std.mem.Allocator, to_email: []const u8, name: []const u8, code: []const u8) !void {
     const subject = "Your Verification Code - Task Manager";
+
+    const name_html = try htmlEscape(allocator, name);
+    defer allocator.free(name_html);
+    const code_html = try htmlEscape(allocator, code);
+    defer allocator.free(code_html);
 
     const html_body = try std.fmt.allocPrint(allocator,
         \\<!DOCTYPE html>
@@ -314,7 +346,7 @@ pub fn sendConfirmationEmail(allocator: std.mem.Allocator, to_email: []const u8,
         \\  </table>
         \\</body>
         \\</html>
-    , .{ name, code });
+    , .{ name_html, code_html });
     defer allocator.free(html_body);
 
     try sendHtmlEmail(allocator, to_email, name, subject, html_body);

@@ -658,7 +658,16 @@ async function loadTasks() {
     if (isLoggedIn()) {
         try {
             const response = await fetch('/api/tasks', { credentials: 'include' });
-            tasks = await response.json();
+            // The API answers 401 for an expired or revoked session. It used to
+            // answer 200 with [], which looked exactly like "no tasks yet" and
+            // left the UI claiming to be signed in against a dead session.
+            if (response.status === 401) {
+                showLoggedOut();
+                renderTasks(getAnonTasks());
+                return;
+            }
+            const data = await response.json();
+            tasks = Array.isArray(data) ? data : [];
         } catch (error) {
             tasks = [];
         }

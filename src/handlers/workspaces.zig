@@ -143,12 +143,19 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
         try http.jsonError(r, 400, "Invalid email format");
         return;
     }
+    // Stored lowercase to match how user emails are stored, so the
+    // accept-time comparison and the pending-invite dedupe both work on one
+    // canonical form.
+    const invite_email = validation.normalizeEmail(req_alloc, request.email) catch {
+        try http.jsonError(r, 500, "Failed to process email");
+        return;
+    };
     if (!validation.validateWorkspaceInviteRole(request.role)) {
         try http.jsonError(r, 400, "Invalid role");
         return;
     }
     const now = std.time.timestamp();
-    if (db.hasPendingWorkspaceInvite(req_alloc, workspace_id, request.email, now) catch false) {
+    if (db.hasPendingWorkspaceInvite(req_alloc, workspace_id, invite_email, now) catch false) {
         try http.jsonError(r, 409, "A pending invite already exists for this email");
         return;
     }
@@ -169,7 +176,7 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
 
     const token = db.generateSecureToken();
     const expires_at = now + (7 * 24 * 60 * 60);
-    const invite_result = db.createWorkspaceInvite(req_alloc, workspace_id, request.email, request.role, user_id, token[0..], expires_at) catch {
+    const invite_result = db.createWorkspaceInvite(req_alloc, workspace_id, invite_email, request.role, user_id, token[0..], expires_at) catch {
         try http.jsonError(r, 500, "Failed to create invite");
         return;
     };
@@ -183,7 +190,7 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
     }
     const invite = parsed_invite.value[0].result[0];
 
-    email.sendWorkspaceInviteEmail(req_alloc, request.email, workspace.name, token[0..]) catch |err| {
+    email.sendWorkspaceInviteEmail(req_alloc, invite_email, workspace.name, token[0..]) catch |err| {
         log.warn("Failed to send workspace invite: {}", .{err});
         db.deleteWorkspaceInviteById(req_alloc, invite.id) catch |delete_err| {
             log.warn("Failed to delete unsent workspace invite: {}", .{delete_err});

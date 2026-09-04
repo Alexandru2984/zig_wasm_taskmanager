@@ -50,11 +50,16 @@ pub const RateLimiter = struct {
         const now = std.time.timestamp();
         const window_size: i64 = @intCast(self.config.window_seconds);
 
+        // SECURITY: every allocation failure below denies the request rather
+        // than allowing it. This limiter guards login and password reset; an
+        // attacker who can drive the process to OOM should not thereby switch
+        // brute-force protection off. Memory pressure makes requests fail
+        // either way — failing them as 429 is the safe half of that choice.
         if (self.map.get(ip)) |state| {
             // Check if we're in a new window
             if (now - state.window_start >= window_size) {
                 // New window - reset
-                self.map.put(ip, .{ .count = 1, .window_start = now }) catch return true;
+                self.map.put(ip, .{ .count = 1, .window_start = now }) catch return false;
                 return true;
             }
 
@@ -64,14 +69,14 @@ pub const RateLimiter = struct {
             }
 
             // Increment count
-            self.map.put(ip, .{ .count = state.count + 1, .window_start = state.window_start }) catch return true;
+            self.map.put(ip, .{ .count = state.count + 1, .window_start = state.window_start }) catch return false;
             return true;
         } else {
             // New IP - add to map
-            const ip_copy = self.allocator.dupe(u8, ip) catch return true;
+            const ip_copy = self.allocator.dupe(u8, ip) catch return false;
             self.map.put(ip_copy, .{ .count = 1, .window_start = now }) catch {
                 self.allocator.free(ip_copy);
-                return true;
+                return false;
             };
             return true;
         }

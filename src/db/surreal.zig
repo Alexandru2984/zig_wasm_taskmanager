@@ -184,6 +184,15 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD csrf_hash ON sessions TYPE string DEFAULT "";
     );
 
+    // Bring rows written before email normalisation into the canonical form,
+    // so the UNIQUE index and every lookup agree on one spelling. Verified
+    // beforehand that no two accounts differ only by case, which this would
+    // otherwise collide.
+    try runMigration(allocator, "008_lowercase_emails",
+        \\UPDATE users SET email = string::lowercase(email) WHERE email != string::lowercase(email);
+        \\UPDATE workspace_invites SET email = string::lowercase(email) WHERE email != string::lowercase(email);
+    );
+
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
 }
 

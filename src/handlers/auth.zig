@@ -31,6 +31,14 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 400, "Invalid email format");
         return;
     }
+    // SECURITY: store one canonical form. Without this, Alice@x.com and
+    // alice@x.com are distinct rows to the UNIQUE index, so the same mailbox
+    // could hold two accounts and a later login with different capitalisation
+    // would fail against an account that exists.
+    const email_norm = validation.normalizeEmail(req_alloc, request.email) catch {
+        try http.jsonError(r, 500, "Failed to process email");
+        return;
+    };
 
     // Validate password
     const pwd_result = validation.validatePasswordStrength(request.password);
@@ -39,6 +47,8 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
             try http.jsonError(r, 400, "Password must be at least 8 characters");
         } else if (pwd_result.too_long) {
             try http.jsonError(r, 400, "Password is too long");
+        } else if (pwd_result.common) {
+            try http.jsonError(r, 400, "That password is too common. Please choose a less guessable one.");
         } else {
             try http.jsonError(r, 400, "Password must contain at least one letter and one number");
         }
@@ -54,7 +64,7 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 
     // Check if email exists
     {
-        const db_result = try db.getUserByEmail(req_alloc, request.email);
+        const db_result = try db.getUserByEmail(req_alloc, email_norm);
         defer req_alloc.free(db_result);
 
         const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.User), req_alloc, db_result, .{ .ignore_unknown_fields = true });
@@ -77,8 +87,8 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     // parallel signups for the same email can both pass and then race at the
     // UNIQUE index. When that happens, surface it as 400 "Email already exists"
     // instead of a generic 500.
-    const db_result = db.createUser(req_alloc, request.email, password_hash, name, verification_code, verification_expires) catch {
-        const dup_check = db.getUserByEmail(req_alloc, request.email) catch {
+    const db_result = db.createUser(req_alloc, email_norm, password_hash, name, verification_code, verification_expires) catch {
+        const dup_check = db.getUserByEmail(req_alloc, email_norm) catch {
             try http.jsonError(r, 500, "Failed to create user");
             return;
         };
@@ -161,12 +171,16 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         try http.jsonError(r, 401, "Invalid credentials");
         return;
     }
+    const email_norm = validation.normalizeEmail(req_alloc, request.email) catch {
+        try http.jsonError(r, 500, "Database error");
+        return;
+    };
     // SECURITY: only failed attempts count against the per-account limit (see
     // the isAllowed calls on the failure paths below). A correct login never
     // consumes budget, so a user who eventually types the right password isn't
     // throttled by their own earlier typos.
     if (rate_limiter.login_account_limiter) |*limiter| {
-        if (!limiter.peek(request.email)) {
+        if (!limiter.peek(email_norm)) {
             r.setHeader("Retry-After", "300") catch {};
             try http.jsonError(r, 429, "Too many login attempts for this account. Please wait 5 minutes.");
             return;
@@ -174,7 +188,7 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     }
 
     // Get user from DB
-    const db_result = db.getUserByEmail(req_alloc, request.email) catch {
+    const db_result = db.getUserByEmail(req_alloc, email_norm) catch {
         try http.jsonError(r, 500, "Database error");
         return;
     };
@@ -187,7 +201,7 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         // SECURITY: equalize timing with the real-user path so attackers can't
         // probe which emails are registered by measuring response latency.
         auth.burnTime(req_alloc, request.password);
-        if (rate_limiter.login_account_limiter) |*limiter| _ = limiter.isAllowed(request.email);
+        if (rate_limiter.login_account_limiter) |*limiter| _ = limiter.isAllowed(email_norm);
         try http.jsonError(r, 401, "Invalid credentials");
         return;
     }
@@ -196,7 +210,7 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     // Verify password
     const valid = auth.verifyPassword(req_alloc, user.password_hash, request.password) catch false;
     if (!valid) {
-        if (rate_limiter.login_account_limiter) |*limiter| _ = limiter.isAllowed(request.email);
+        if (rate_limiter.login_account_limiter) |*limiter| _ = limiter.isAllowed(email_norm);
         try http.jsonError(r, 401, "Invalid credentials");
         return;
     }
@@ -341,8 +355,19 @@ pub fn handleForgotPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void 
         try http.jsonError(r, 400, "Invalid JSON body");
         return;
     };
+    // A malformed address can never match a row, so answer with the same
+    // uniform message rather than spending a database round trip on it.
+    // Returning early keeps the response identical to the not-found path.
+    if (!validation.validateEmail(request.email)) {
+        try http.jsonSuccess(r, models.SuccessResponse{ .status = "If the email exists, a reset link has been sent." });
+        return;
+    }
+    const email_norm = validation.normalizeEmail(req_alloc, request.email) catch {
+        try http.jsonError(r, 500, "Database error");
+        return;
+    };
 
-    const db_result = db.getUserByEmail(req_alloc, request.email) catch {
+    const db_result = db.getUserByEmail(req_alloc, email_norm) catch {
         try http.jsonError(r, 500, "Database error");
         return;
     };
@@ -402,6 +427,8 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
             try http.jsonError(r, 400, "Password must be at least 8 characters");
         } else if (pwd_result.too_long) {
             try http.jsonError(r, 400, "Password is too long");
+        } else if (pwd_result.common) {
+            try http.jsonError(r, 400, "That password is too common. Please choose a less guessable one.");
         } else {
             try http.jsonError(r, 400, "Password must contain at least one letter and one number");
         }

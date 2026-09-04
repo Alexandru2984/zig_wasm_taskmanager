@@ -21,10 +21,12 @@ fn rateLimitWrite(r: zap.Request, user_id: []const u8) !bool {
 }
 
 pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
+    // An unauthenticated read used to answer 200 with an empty array, which is
+    // indistinguishable from "you are signed in and have no tasks". The front
+    // end could not tell an expired session from an empty list, and neither
+    // could a monitoring check.
     const user_id = http.getCurrentUserId(req_alloc, r) orelse {
-        // Return empty list if not logged in (as per original logic, though weird)
-        // Original logic: if not logged in, return []
-        try http.jsonSuccess(r, [0]models.TaskResponse{});
+        try http.jsonError(r, 401, "Not authenticated");
         return;
     };
 
