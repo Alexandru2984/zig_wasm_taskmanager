@@ -194,8 +194,17 @@ docker restart surrealdb
 
 ### Rebuild after code changes
 ```bash
-cd /opt/taskmanager
-sudo git pull
-sudo zig build -Doptimize=ReleaseSafe
+cd /home/micu/taskmanager
+git pull
+zig build -Doptimize=ReleaseSafe
+./scripts/stamp-assets.sh          # cache-bust the front-end assets
 sudo systemctl restart taskmanager
 ```
+
+`stamp-assets.sh` is not optional. JS, CSS and WASM are served with
+`Cache-Control: no-cache` because their filenames carry no content hash;
+Cloudflare honours that at the edge and revalidates, but rewrites what the
+*browser* is told to `max-age=14400`. Without the stamp, a returning visitor
+can run four-hour-old JavaScript against a freshly deployed API. The script
+writes a content hash into the asset URLs in `public/*.html`, so a changed
+file is a changed URL. It is idempotent — run it as often as you like.

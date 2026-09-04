@@ -649,7 +649,7 @@ async function initWasm() {
                 js_renderTasks: () => { if (!suppressRender) loadTasks(); },
             },
         };
-        const response = await fetch('/app.wasm');
+        const response = await fetch('/app.wasm?v=b5d27dcf');
         if (!response.ok) throw new Error('WASM fetch failed');
         const bytes = await response.arrayBuffer();
         const result = await WebAssembly.instantiate(bytes, importObject);

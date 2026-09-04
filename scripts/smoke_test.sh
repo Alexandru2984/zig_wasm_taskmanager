@@ -33,8 +33,19 @@ echo ""
 
 curl_opts=( "${extra_curl_opts[@]}" -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" )
 
+# The CSRF cookie is `__Host-csrf_token` over HTTPS. The prefix is a
+# browser-enforced guarantee that no other host on the parent domain could have
+# set it, and it requires Secure — so a plain-HTTP local run still uses the bare
+# name. Accept either.
+# Prefer the prefixed cookie explicitly rather than taking whichever line comes
+# last: logout expires both spellings, so the jar can still hold a stale bare
+# `csrf_token` after a fresh login has set `__Host-csrf_token`.
 csrf_token() {
-    awk '$6 == "csrf_token" { token = $7 } END { print token }' "$COOKIE_JAR" 2>/dev/null
+    awk '
+        $6 == "__Host-csrf_token" { host_token = $7 }
+        $6 == "csrf_token"        { plain_token = $7 }
+        END { print (host_token != "" ? host_token : plain_token) }
+    ' "$COOKIE_JAR" 2>/dev/null
 }
 
 # Helper function
@@ -124,7 +135,20 @@ echo ""
 echo "=== Static Files ==="
 test_endpoint "Index HTML" "GET" "/" "" "DOCTYPE" || true
 test_header "Cache-Control (HTML)" "/" "Cache-Control" "no-cache" || true
-test_header "Cache-Control (JS)" "/app.js" "Cache-Control" "max-age=3600" || true
+# Asserting the origin's Cache-Control here would be meaningless: Cloudflare
+# rewrites what the browser is told (no-cache becomes max-age=14400), so the
+# value seen through the edge is the edge's, not ours.
+#
+# What actually keeps a returning visitor off a stale bundle is the content
+# hash in the asset URL, and that is true at the origin and at the edge alike.
+echo -n "Testing assets are cache-busted... "
+if curl -s "$BASE_URL/" | grep -qE 'src="/app\.js\?v=[0-9a-f]+"'; then
+    echo -e "${GREEN}✓ PASS${NC}"
+    PASS=$((PASS + 1))
+else
+    echo -e "${RED}✗ FAIL${NC} (no ?v= stamp on /app.js — run scripts/stamp-assets.sh)"
+    FAIL=$((FAIL + 1))
+fi
 
 echo ""
 echo "=== Security Headers ==="
@@ -198,9 +222,43 @@ if [ -n "$TASK_ID" ]; then
 
     test_endpoint "Task Priority" "GET" "/api/tasks" "" '"priority":"high"' || true
     test_endpoint "Get Tasks (List)" "GET" "/api/tasks" "" "$TASK_ID" || true
-    test_endpoint "Toggle Task" "PUT" "/api/tasks/$TASK_ID" "" "true" || true
+
+    test_endpoint "Update Task (title, notes, tags)" "PUT" "/api/tasks/$TASK_ID" \
+        '{"title":"Renamed Smoke Task","notes":"a note","tags":["smoke","test"]}' \
+        "Renamed Smoke Task" || true
+    test_endpoint "Update Task keeps untouched fields" "GET" "/api/tasks" "" '"priority":"high"' || true
+    test_endpoint "Reject a due date in the past" "PUT" "/api/tasks/$TASK_ID" \
+        '{"due_date":"2020-01-01T09:00"}' "future" || true
+    test_endpoint "Reject too many tags" "PUT" "/api/tasks/$TASK_ID" \
+        '{"tags":["1","2","3","4","5","6","7","8","9","10","11","12","13"]}' "at most 12" || true
+
+    # A conforming client percent-encodes the colon in a record id. The router
+    # slices ids out of the raw path, so this only works if the server decodes.
+    ENCODED_TASK_ID="${TASK_ID/:/%3A}"
+    test_endpoint "Percent-encoded task id" "PUT" "/api/tasks/$ENCODED_TASK_ID" \
+        '{"title":"Encoded Id Works"}' "Encoded Id Works" || true
+
+    test_endpoint "Toggle Task (empty body)" "PUT" "/api/tasks/$TASK_ID" "" "true" || true
     test_endpoint "Delete Task" "DELETE" "/api/tasks/$TASK_ID" "" "success" || true
     test_endpoint "Activity Log" "GET" "/api/activity" "" "create_task" || true
+fi
+
+# 6. Account, sessions and data
+echo ""
+echo "=== Account & Data ==="
+test_endpoint "List Sessions" "GET" "/api/sessions" "" '"current":true' || true
+test_endpoint "Export Data" "GET" "/api/export" "" '"exported_at"' || true
+test_endpoint "Delete Account Rejects Wrong Password" "DELETE" "/api/account" \
+    '{"password":"definitely-not-it-9"}' "Incorrect password" || true
+
+echo -n "Testing unauthenticated task read returns 401... "
+unauth_status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/tasks")
+if [ "$unauth_status" = "401" ]; then
+    echo -e "${GREEN}✓ PASS${NC}"
+    PASS=$((PASS + 1))
+else
+    echo -e "${RED}✗ FAIL${NC} (got $unauth_status, expected 401)"
+    FAIL=$((FAIL + 1))
 fi
 
 echo ""
