@@ -216,6 +216,24 @@ pub fn validateWorkspaceInviteRole(role: []const u8) bool {
         std.mem.eql(u8, role, "viewer");
 }
 
+/// Board columns. "done" is the same fact as `completed`, kept in step by the
+/// update path rather than allowed to disagree with it.
+pub fn validateTaskStatus(status: []const u8) bool {
+    return std.mem.eql(u8, status, "todo") or
+        std.mem.eql(u8, status, "doing") or
+        std.mem.eql(u8, status, "done");
+}
+
+/// A deliberately small vocabulary. A cron expression would be more powerful
+/// and would also need a parser, a timezone policy and a story for what
+/// happens when a rule matches nothing.
+pub fn validateRecurrence(recurrence: []const u8) bool {
+    return std.mem.eql(u8, recurrence, "none") or
+        std.mem.eql(u8, recurrence, "daily") or
+        std.mem.eql(u8, recurrence, "weekly") or
+        std.mem.eql(u8, recurrence, "monthly");
+}
+
 pub fn validateTaskPriority(priority: []const u8) bool {
     return std.mem.eql(u8, priority, "low") or
         std.mem.eql(u8, priority, "normal") or
@@ -304,6 +322,68 @@ pub fn dueDateToTimestamp(value: []const u8) ?i64 {
     return daysFromCivil(year, month, day) * 86400 + hour * 3600 + minute * 60;
 }
 
+/// Civil date from days since the epoch — the inverse of daysFromCivil, and
+/// the same algorithm run backwards.
+fn civilFromDays(z_in: i64) struct { y: i64, m: i64, d: i64 } {
+    const z = z_in + 719468;
+    const era = @divFloor(if (z >= 0) z else z - 146096, 146097);
+    const doe = z - era * 146097;
+    const yoe = @divTrunc(doe - @divTrunc(doe, 1460) + @divTrunc(doe, 36524) - @divTrunc(doe, 146096), 365);
+    const y = yoe + era * 400;
+    const doy = doe - (365 * yoe + @divTrunc(yoe, 4) - @divTrunc(yoe, 100));
+    const mp = @divTrunc(5 * doy + 2, 153);
+    const d = doy - @divTrunc(153 * mp + 2, 5) + 1;
+    const m = if (mp < 10) mp + 3 else mp - 9;
+    return .{ .y = if (m <= 2) y + 1 else y, .m = m, .d = d };
+}
+
+/// Render a Unix timestamp as the "YYYY-MM-DDTHH:MM" form the API accepts.
+pub fn timestampToDueDate(allocator: std.mem.Allocator, ts: i64) ![]u8 {
+    const days = @divFloor(ts, 86400);
+    const secs = @mod(ts, 86400);
+    const c = civilFromDays(days);
+    // Cast to unsigned before formatting: `{d:0>4}` on a signed integer emits
+    // a leading '+' for positive values, which would produce "+2026-+9-+5".
+    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}", .{
+        @as(u32, @intCast(c.y)),
+        @as(u32, @intCast(c.m)),
+        @as(u32, @intCast(c.d)),
+        @as(u32, @intCast(@divTrunc(secs, 3600))),
+        @as(u32, @intCast(@divTrunc(@mod(secs, 3600), 60))),
+    });
+}
+
+const DAYS_IN_MONTH = [_]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+
+fn daysInMonth(y: i64, m: i64) i64 {
+    if (m != 2) return DAYS_IN_MONTH[@intCast(m - 1)];
+    const leap = (@mod(y, 4) == 0 and @mod(y, 100) != 0) or @mod(y, 400) == 0;
+    return if (leap) 29 else 28;
+}
+
+/// Add whole months, clamping the day to the length of the target month.
+///
+/// 31 January plus one month is 28 or 29 February, not 2 or 3 March. Adding
+/// 30 days instead would make a monthly task drift earlier every year.
+pub fn addMonthClamped(allocator: std.mem.Allocator, ts: i64, months: i64) ![]u8 {
+    const days = @divFloor(ts, 86400);
+    const secs = @mod(ts, 86400);
+    const c = civilFromDays(days);
+
+    const total = (c.y * 12 + (c.m - 1)) + months;
+    const y = @divFloor(total, 12);
+    const m = @mod(total, 12) + 1;
+    const d = @min(c.d, daysInMonth(y, m));
+
+    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}", .{
+        @as(u32, @intCast(y)),
+        @as(u32, @intCast(m)),
+        @as(u32, @intCast(d)),
+        @as(u32, @intCast(@divTrunc(secs, 3600))),
+        @as(u32, @intCast(@divTrunc(@mod(secs, 3600), 60))),
+    });
+}
+
 /// The database asserts due_date >= created_at, so a past date is refused at
 /// the storage layer. Catching it here turns what was an opaque write failure
 /// into a message that says what to change.
@@ -314,6 +394,43 @@ pub fn dueDateToTimestamp(value: []const u8) ?i64 {
 pub fn isDueDateInPast(value: []const u8, now: i64) bool {
     const ts = dueDateToTimestamp(value) orelse return false;
     return ts < now - 300;
+}
+
+test "timestampToDueDate round-trips" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "2026-09-05T14:30", "1970-01-01T00:00", "2000-02-29T23:59" }) |iso| {
+        const ts = dueDateToTimestamp(iso).?;
+        const back = try timestampToDueDate(a, ts);
+        defer a.free(back);
+        try std.testing.expectEqualStrings(iso, back);
+    }
+}
+
+test "addMonthClamped clamps instead of overflowing" {
+    const a = std.testing.allocator;
+
+    // 31 January + 1 month is the end of February, not the 2nd or 3rd of March.
+    const jan31 = dueDateToTimestamp("2026-01-31T09:00").?;
+    const feb = try addMonthClamped(a, jan31, 1);
+    defer a.free(feb);
+    try std.testing.expectEqualStrings("2026-02-28T09:00", feb);
+
+    // And a leap year gets the 29th.
+    const jan31_leap = dueDateToTimestamp("2028-01-31T09:00").?;
+    const feb_leap = try addMonthClamped(a, jan31_leap, 1);
+    defer a.free(feb_leap);
+    try std.testing.expectEqualStrings("2028-02-29T09:00", feb_leap);
+
+    // Ordinary months are untouched, and December rolls the year over.
+    const mid = dueDateToTimestamp("2026-03-15T08:30").?;
+    const apr = try addMonthClamped(a, mid, 1);
+    defer a.free(apr);
+    try std.testing.expectEqualStrings("2026-04-15T08:30", apr);
+
+    const dec = dueDateToTimestamp("2026-12-10T12:00").?;
+    const jan = try addMonthClamped(a, dec, 1);
+    defer a.free(jan);
+    try std.testing.expectEqualStrings("2027-01-10T12:00", jan);
 }
 
 test "dueDateToTimestamp matches known epochs" {
@@ -443,6 +560,19 @@ test "the blocklist is well formed" {
         const curr = blocklist[i..][0..BLOCKLIST_PREFIX_LEN];
         try std.testing.expect(std.mem.order(u8, prev, curr) == .lt);
     }
+}
+
+test "status and recurrence validators are allow-lists" {
+    try std.testing.expect(validateTaskStatus("todo"));
+    try std.testing.expect(validateTaskStatus("doing"));
+    try std.testing.expect(validateTaskStatus("done"));
+    try std.testing.expect(!validateTaskStatus("archived"));
+    try std.testing.expect(!validateTaskStatus(""));
+
+    try std.testing.expect(validateRecurrence("none"));
+    try std.testing.expect(validateRecurrence("weekly"));
+    try std.testing.expect(!validateRecurrence("hourly"));
+    try std.testing.expect(!validateRecurrence("0 9 * * 1"));
 }
 
 test "role and priority validators are allow-lists" {

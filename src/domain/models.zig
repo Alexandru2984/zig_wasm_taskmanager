@@ -31,6 +31,10 @@ pub const Task = struct {
     notes: []const u8 = "",
     tags: []const []const u8 = &.{},
     updated_at: ?[]const u8 = null,
+    status: []const u8 = "todo",
+    recurrence: []const u8 = "none",
+    parent_id: ?[]const u8 = null,
+    assignee_id: ?[]const u8 = null,
 };
 
 pub const Session = struct {
@@ -86,6 +90,10 @@ pub const CreateTaskRequest = struct {
     priority: ?[]const u8 = null,
     notes: ?[]const u8 = null,
     tags: ?[]const []const u8 = null,
+    status: ?[]const u8 = null,
+    recurrence: ?[]const u8 = null,
+    parent_id: ?[]const u8 = null,
+    assignee_id: ?[]const u8 = null,
 };
 
 pub const TaskResponse = struct {
@@ -100,6 +108,10 @@ pub const TaskResponse = struct {
     notes: []const u8 = "",
     tags: []const []const u8 = &.{},
     updated_at: ?[]const u8 = null,
+    status: []const u8 = "todo",
+    recurrence: []const u8 = "none",
+    parent_id: ?[]const u8 = null,
+    assignee_id: ?[]const u8 = null,
 };
 
 /// Partial task update. Every field is optional; omitting one leaves the
@@ -112,6 +124,10 @@ pub const UpdateTaskRequest = struct {
     completed: ?bool = null,
     tags: ?[]const []const u8 = null,
     due_date: ?[]const u8 = null,
+    status: ?[]const u8 = null,
+    recurrence: ?[]const u8 = null,
+    /// Empty string clears the assignment, matching due_date's convention.
+    assignee_id: ?[]const u8 = null,
 };
 
 pub const Workspace = struct {

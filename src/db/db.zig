@@ -72,6 +72,7 @@ pub const toggleTask = impl.toggleTask;
 pub const updateTask = impl.updateTask;
 pub const TaskPatch = impl.TaskPatch;
 pub const deleteTask = impl.deleteTask;
+pub const deleteTaskWithChildren = impl.deleteTaskWithChildren;
 pub const getTaskOwner = impl.getTaskOwner;
 pub const verifyTaskOwnership = impl.verifyTaskOwnership;
 pub const getDueTasksForReminders = impl.getDueTasksForReminders;

@@ -254,6 +254,23 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\UPDATE workspace_invites SET email = string::lowercase(email) WHERE email != string::lowercase(email);
     );
 
+    try runMigration(allocator, "011_task_board_and_structure",
+        // Kanban column. `completed` stays the source of truth for "is this
+        // done" — every existing query and the whole front end already read
+        // it — and status is kept consistent with it rather than replacing it.
+        \\DEFINE FIELD IF NOT EXISTS status ON tasks TYPE string DEFAULT "todo" ASSERT $value INSIDE ["todo", "doing", "done"];
+        // A subtask is a task with a parent, not a different kind of record,
+        // so it inherits editing, tags, due dates, reminders and the whole
+        // permission model without any of them being written twice.
+        \\DEFINE FIELD IF NOT EXISTS parent_id ON tasks TYPE option<record<tasks>>;
+        // Who is expected to do it. The handler checks they belong to the
+        // task's workspace; the schema only says it is a user.
+        \\DEFINE FIELD IF NOT EXISTS assignee_id ON tasks TYPE option<record<users>>;
+        // A small vocabulary rather than a cron expression: the next instance
+        // is created when one is completed.
+        \\DEFINE FIELD IF NOT EXISTS recurrence ON tasks TYPE string DEFAULT "none" ASSERT $value INSIDE ["none", "daily", "weekly", "monthly"];
+    );
+
     // A reminder that cannot be delivered must eventually stop being retried.
     // Without a counter the reminder loop re-attempts the same undeliverable
     // task every minute, forever, three SMTP connections at a time.
@@ -656,17 +673,33 @@ pub const NewTask = struct {
     notes: []const u8 = "",
     tags: []const []const u8 = &.{},
     due_date: ?[]const u8 = null,
+    status: []const u8 = "todo",
+    recurrence: []const u8 = "none",
+    /// Set to make this task a subtask of another.
+    parent_id: ?[]const u8 = null,
+    assignee_id: ?[]const u8 = null,
 };
 
 pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
-    // Only the due-date column varies, and only between two compile-time
-    // fragments; every value is still bound.
+    // Optional columns are appended only when supplied, so an ordinary task is
+    // not written with NONE assignments it never asked for. Every fragment
+    // below is a compile-time string; only values are bound.
+    var sets = std.ArrayListUnmanaged(u8){};
+    defer sets.deinit(allocator);
+    const w = sets.writer(allocator);
+
+    try w.writeAll("user_id = $user_id, workspace_id = $workspace_id, title = $title, " ++
+        "priority = $priority, notes = $notes, tags = $tags, status = $status, " ++
+        "recurrence = $recurrence, completed = false, reminder_sent = false, " ++
+        "reminder_attempts = 0, created_at = time::now()");
+
     const has_due = task.due_date != null and task.due_date.?.len > 0;
-    const sql = if (has_due)
-        \\CREATE tasks SET user_id = $user_id, workspace_id = $workspace_id, title = $title, priority = $priority, notes = $notes, tags = $tags, completed = false, reminder_sent = false, created_at = time::now(), due_date = <datetime>$due_date;
-    else
-        \\CREATE tasks SET user_id = $user_id, workspace_id = $workspace_id, title = $title, priority = $priority, notes = $notes, tags = $tags, completed = false, reminder_sent = false, created_at = time::now();
-    ;
+    if (has_due) try w.writeAll(", due_date = <datetime>$due_date");
+    if (task.parent_id != null) try w.writeAll(", parent_id = $parent_id");
+    if (task.assignee_id != null) try w.writeAll(", assignee_id = $assignee_id");
+
+    const sql = try std.fmt.allocPrint(allocator, "CREATE tasks SET {s};", .{sets.items});
+    defer allocator.free(sql);
 
     var due_owned: ?[]u8 = null;
     defer if (due_owned) |d| allocator.free(d);
@@ -683,14 +716,39 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
         .priority = task.priority,
         .notes = task.notes,
         .tags = task.tags,
+        .status = task.status,
+        .recurrence = task.recurrence,
         .due_date = due_bind,
+        // Bound unconditionally because the bind list is comptime, but only
+        // referenced by the statement when the caller supplied one.
+        .parent_id = rec(task.parent_id orelse "tasks:unset"),
+        .assignee_id = rec(task.assignee_id orelse "users:unset"),
     });
 }
 
+/// Every task the user can see, subtasks included.
+///
+/// Subtasks come back in the same list rather than through a separate call:
+/// the front end already holds the whole set in memory to filter and sort it,
+/// and nesting them there costs one pass over an array instead of a request
+/// per parent.
 pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
-        \\SELECT * FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE);
+        \\SELECT * FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE) ORDER BY created_at DESC LIMIT 2000;
     , .{ .user_id = rec(user_id) });
+}
+
+/// Delete a task together with anything hanging off it, so completing the
+/// parent's removal cannot leave orphaned subtasks that no view will show.
+pub fn deleteTaskWithChildren(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
+    const children = try queryWithVars(allocator,
+        \\DELETE tasks WHERE parent_id = $record_id;
+    , .{ .record_id = rec(task_id) });
+    allocator.free(children);
+
+    return queryWithVars(allocator,
+        \\DELETE $record_id RETURN BEFORE;
+    , .{ .record_id = rec(task_id) });
 }
 
 /// Partial update of a task. Only the fields the caller actually supplied are
@@ -711,6 +769,10 @@ pub const TaskPatch = struct {
     /// Null leaves the stored value alone — which is why this cannot simply be
     /// an optional string with null meaning "clear".
     due_date: ?[]const u8 = null,
+    status: ?[]const u8 = null,
+    recurrence: ?[]const u8 = null,
+    /// Same convention as due_date: empty clears the assignment.
+    assignee_id: ?[]const u8 = null,
 };
 
 pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: TaskPatch) ![]u8 {
@@ -724,6 +786,27 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
     if (patch.notes != null) try w.writeAll(", notes = $notes");
     if (patch.completed != null) try w.writeAll(", completed = $completed");
     if (patch.tags != null) try w.writeAll(", tags = $tags");
+    if (patch.recurrence != null) try w.writeAll(", recurrence = $recurrence");
+    // Completion and the board column are two views of one fact, so writing
+    // either keeps the other consistent. Letting them drift would mean a task
+    // shown in the Done column that the task list still counts as outstanding.
+    if (patch.status) |st| {
+        try w.writeAll(", status = $status");
+        if (std.mem.eql(u8, st, "done")) {
+            try w.writeAll(", completed = true");
+        } else {
+            try w.writeAll(", completed = false");
+        }
+    } else if (patch.completed) |done| {
+        try w.writeAll(if (done) ", status = \"done\"" else ", status = \"todo\"");
+    }
+    if (patch.assignee_id) |a| {
+        if (a.len == 0) {
+            try w.writeAll(", assignee_id = NONE");
+        } else {
+            try w.writeAll(", assignee_id = $assignee_id");
+        }
+    }
     if (patch.due_date) |dd| {
         if (dd.len == 0) {
             try w.writeAll(", due_date = NONE");
@@ -756,6 +839,9 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
         .completed = patch.completed orelse false,
         .tags = patch.tags orelse &[_][]const u8{},
         .due_date = due_bind,
+        .status = patch.status orelse "todo",
+        .recurrence = patch.recurrence orelse "none",
+        .assignee_id = rec(if (patch.assignee_id) |a| (if (a.len == 0) "users:unset" else a) else "users:unset"),
     });
 }
 

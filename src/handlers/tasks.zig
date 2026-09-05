@@ -83,23 +83,9 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     }
 
     const priority = request.priority orelse "normal";
-    if (!validation.validateTaskPriority(priority)) {
-        try http.jsonError(r, 400, "Invalid priority");
-        return;
-    }
-
-    if (request.notes) |notes| {
-        if (notes.len > 5000) {
-            try http.jsonError(r, 400, "Notes must be at most 5000 characters");
-            return;
-        }
-    }
-    if (request.tags) |tags| {
-        if (!validateTags(tags)) {
-            try http.jsonError(r, 400, "Tags must be 1-32 characters, at most 12 per task");
-            return;
-        }
-    }
+    const status = request.status orelse "todo";
+    const recurrence = request.recurrence orelse "none";
+    if (!try validateTaskFields(r, priority, status, recurrence, request.notes, request.tags)) return;
 
     const workspace_id = if (request.workspace_id) |workspace|
         workspace
@@ -120,6 +106,32 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     }
 
+    // A subtask must belong to a task the caller can already write to,
+    // otherwise the parent link becomes a way to attach rows to someone
+    // else's task.
+    if (request.parent_id) |parent| {
+        if (!std.mem.startsWith(u8, parent, "tasks:")) {
+            try http.jsonError(r, 400, "Invalid parent task ID");
+            return;
+        }
+        const parent_writable = db.canWriteTask(req_alloc, parent, user_id) catch false;
+        if (!parent_writable) {
+            try http.jsonError(r, 403, "Forbidden: parent task is not yours");
+            return;
+        }
+    }
+
+    if (request.assignee_id) |assignee| {
+        if (!std.mem.startsWith(u8, assignee, "users:")) {
+            try http.jsonError(r, 400, "Invalid assignee ID");
+            return;
+        }
+        if (!try assigneeIsMember(req_alloc, assignee, workspace_id)) {
+            try http.jsonError(r, 400, "The assignee is not a member of this workspace");
+            return;
+        }
+    }
+
     const db_result = db.createTask(req_alloc, .{
         .user_id = user_id,
         .workspace_id = workspace_id,
@@ -128,6 +140,10 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         .notes = request.notes orelse "",
         .tags = request.tags orelse &.{},
         .due_date = request.due_date,
+        .status = status,
+        .recurrence = recurrence,
+        .parent_id = request.parent_id,
+        .assignee_id = request.assignee_id,
     }) catch |err| {
         log.warn("Failed to create task: {}", .{err});
         try http.jsonError(r, 500, "Failed to create task");
@@ -163,7 +179,57 @@ fn toResponse(task: models.Task) models.TaskResponse {
         .notes = task.notes,
         .tags = task.tags,
         .updated_at = task.updated_at,
+        .status = task.status,
+        .recurrence = task.recurrence,
+        .parent_id = task.parent_id,
+        .assignee_id = task.assignee_id,
     };
+}
+
+/// An assignee has to be someone who can actually see the task. Without this
+/// an admin could point a task at any account in the database by id, which
+/// both leaks that the account exists and puts a stranger's name on work in a
+/// workspace they are not part of.
+fn assigneeIsMember(req_alloc: std.mem.Allocator, assignee_id: []const u8, workspace_id: []const u8) !bool {
+    const role = db.getWorkspaceRole(req_alloc, assignee_id, workspace_id) catch return false;
+    if (role) |r| {
+        req_alloc.free(r);
+        return true;
+    }
+    return false;
+}
+
+/// Shared validation for the fields create and update have in common.
+/// Returns false when a response has already been written.
+fn validateTaskFields(
+    r: zap.Request,
+    priority: ?[]const u8,
+    status: ?[]const u8,
+    recurrence: ?[]const u8,
+    notes: ?[]const u8,
+    tags: ?[]const []const u8,
+) !bool {
+    if (priority) |v| if (!validation.validateTaskPriority(v)) {
+        try http.jsonError(r, 400, "Invalid priority");
+        return false;
+    };
+    if (status) |v| if (!validation.validateTaskStatus(v)) {
+        try http.jsonError(r, 400, "Invalid status");
+        return false;
+    };
+    if (recurrence) |v| if (!validation.validateRecurrence(v)) {
+        try http.jsonError(r, 400, "Invalid recurrence");
+        return false;
+    };
+    if (notes) |v| if (v.len > 5000) {
+        try http.jsonError(r, 400, "Notes must be at most 5000 characters");
+        return false;
+    };
+    if (tags) |v| if (!validateTags(v)) {
+        try http.jsonError(r, 400, "Tags must be 1-32 characters, at most 12 per task");
+        return false;
+    };
+    return true;
 }
 
 /// Tags are free-form labels, so they get their own limits rather than
@@ -183,6 +249,64 @@ fn validateTags(tags: []const []const u8) bool {
         }
     }
     return true;
+}
+
+/// Advance a due date by one recurrence step.
+///
+/// Month arithmetic clamps rather than overflowing: the 31st of a month
+/// followed by a 30-day month lands on the 30th, not the 1st of the month
+/// after. Anyone who has had a monthly task quietly drift a day later every
+/// other month knows why that matters.
+fn nextDueDate(allocator: std.mem.Allocator, due: []const u8, recurrence: []const u8) !?[]u8 {
+    const ts = validation.dueDateToTimestamp(due) orelse return null;
+
+    if (std.mem.eql(u8, recurrence, "daily")) {
+        return try validation.timestampToDueDate(allocator, ts + 24 * 60 * 60);
+    }
+    if (std.mem.eql(u8, recurrence, "weekly")) {
+        return try validation.timestampToDueDate(allocator, ts + 7 * 24 * 60 * 60);
+    }
+    if (std.mem.eql(u8, recurrence, "monthly")) {
+        return try validation.addMonthClamped(allocator, ts, 1);
+    }
+    return null;
+}
+
+/// Create the next instance of a recurring task.
+///
+/// Failures here are logged, not surfaced: the user completed a task and that
+/// succeeded. Telling them the completion failed because the follow-up could
+/// not be created would be both untrue and unhelpful.
+fn spawnRecurrence(r: zap.Request, req_alloc: std.mem.Allocator, user_id: []const u8, task: models.Task) void {
+    _ = r;
+    if (std.mem.eql(u8, task.recurrence, "none")) return;
+    if (!task.completed) return;
+    const due = task.due_date orelse return;
+
+    const next = nextDueDate(req_alloc, due, task.recurrence) catch |err| {
+        log.warn("Could not compute the next due date for {s}: {}", .{ task.id, err });
+        return;
+    } orelse return;
+    defer req_alloc.free(next);
+
+    const workspace_id = task.workspace_id orelse return;
+    const created = db.createTask(req_alloc, .{
+        .user_id = user_id,
+        .workspace_id = workspace_id,
+        .title = task.title,
+        .priority = task.priority,
+        .notes = task.notes,
+        .tags = task.tags,
+        .due_date = next,
+        .status = "todo",
+        .recurrence = task.recurrence,
+        .assignee_id = task.assignee_id,
+    }) catch |err| {
+        log.warn("Could not create the next occurrence of {s}: {}", .{ task.id, err });
+        return;
+    };
+    req_alloc.free(created);
+    log.info("Created the next occurrence of a {s} task", .{task.recurrence});
 }
 
 /// PUT /api/tasks/:id
@@ -215,12 +339,7 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
             return;
         }
     }
-    if (request.priority) |priority| {
-        if (!validation.validateTaskPriority(priority)) {
-            try http.jsonError(r, 400, "Invalid priority");
-            return;
-        }
-    }
+    if (!try validateTaskFields(r, request.priority, request.status, request.recurrence, request.notes, request.tags)) return;
     // An empty due_date is the documented way to clear one, so it skips the
     // format check that a real value must pass.
     if (request.due_date) |dd| {
@@ -235,19 +354,6 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
             }
         }
     }
-    if (request.notes) |notes| {
-        if (notes.len > 5000) {
-            try http.jsonError(r, 400, "Notes must be at most 5000 characters");
-            return;
-        }
-    }
-    if (request.tags) |tags| {
-        if (!validateTags(tags)) {
-            try http.jsonError(r, 400, "Tags must be 1-32 characters, at most 12 per task");
-            return;
-        }
-    }
-
     // SECURITY: authorization before the write, same as toggle and delete. A
     // task in a shared workspace is writable by its members; a personal task
     // only by its owner.
@@ -267,6 +373,9 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         .completed = request.completed,
         .tags = request.tags,
         .due_date = request.due_date,
+        .status = request.status,
+        .recurrence = request.recurrence,
+        .assignee_id = request.assignee_id,
     }) catch {
         try http.jsonError(r, 500, "Failed to update task");
         return;
@@ -284,6 +393,7 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
     db.logActivity(req_alloc, user_id, "update_task", "task", task.id) catch |err| {
         log.warn("Failed to log update task activity: {}", .{err});
     };
+    spawnRecurrence(r, req_alloc, user_id, task);
 
     try http.jsonSuccess(r, toResponse(task));
 }
@@ -324,6 +434,7 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
     db.logActivity(req_alloc, user_id, "toggle_task", "task", task.id) catch |err| {
         log.warn("Failed to log toggle task activity: {}", .{err});
     };
+    spawnRecurrence(r, req_alloc, user_id, task);
 
     try http.jsonSuccess(r, toResponse(task));
 }
@@ -345,7 +456,9 @@ pub fn deleteTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         return;
     }
 
-    _ = db.deleteTask(req_alloc, task_id) catch {
+    // Subtasks go with the parent. Leaving them behind would strand rows that
+    // no view lists, since a subtask is only ever shown under its parent.
+    _ = db.deleteTaskWithChildren(req_alloc, task_id) catch {
         try http.jsonError(r, 500, "Failed to delete task");
         return;
     };
