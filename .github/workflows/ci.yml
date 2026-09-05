@@ -22,19 +22,31 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # gitleaks scans a commit range, so it needs the commits either side
+          # of it. actions/checkout clones one commit by default, which left
+          # the scan unable to resolve its own range: it reported "no leaks
+          # found in partial scan" and then exited 1, a code the action treats
+          # as an error rather than a result. The step had failed on every run
+          # since June, and because it ran first, `Run checks` was skipped —
+          # so formatting, the build and the unit tests were not actually
+          # running in CI at all.
+          fetch-depth: 0
 
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
 
+      # Before the secret scan, so a problem with the scanner cannot hide
+      # whether the code compiles and its tests pass.
+      - name: Run checks
+        run: ./scripts/check.sh
+
       - name: Scan for secrets
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run checks
-        run: ./scripts/check.sh
 
   integration:
     name: API against a real database

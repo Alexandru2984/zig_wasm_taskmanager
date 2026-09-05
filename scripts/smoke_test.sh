@@ -161,7 +161,11 @@ echo ""
 echo "=== Auth Flow ==="
 RANDOM_ID=$((RANDOM % 10000))
 EMAIL="test${RANDOM_ID}@example.com"
-PASSWORD="Password123!"
+# Generated per run rather than written here. A literal test password is
+# indistinguishable from a leaked credential to a secret scanner, and a fresh
+# one per run also cannot drift into the common-password blocklist.
+PASSWORD="Aa1$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
+WRONG_PASSWORD="Zz9$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
 
 echo "Using email: $EMAIL"
 
@@ -249,7 +253,7 @@ echo "=== Account & Data ==="
 test_endpoint "List Sessions" "GET" "/api/sessions" "" '"current":true' || true
 test_endpoint "Export Data" "GET" "/api/export" "" '"exported_at"' || true
 test_endpoint "Delete Account Rejects Wrong Password" "DELETE" "/api/account" \
-    '{"password":"definitely-not-it-9"}' "Incorrect password" || true
+    "{\"password\":\"$WRONG_PASSWORD\"}" "Incorrect password" || true
 
 echo -n "Testing unauthenticated task read returns 401... "
 unauth_status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/tasks")

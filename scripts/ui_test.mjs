@@ -14,9 +14,15 @@
  */
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
+import { randomBytes } from 'node:crypto';
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:9200';
-const PASSWORD = 'marmalade7bridge';
+
+// Generated per run. A literal test password reads as a leaked credential to a
+// secret scanner, and a fresh one cannot drift into the common-password
+// blocklist as that list grows. The Aa1 prefix guarantees the letter and digit
+// the strength rules require.
+const PASSWORD = 'Aa1' + randomBytes(12).toString('base64url');
 
 const results = [];
 const record = (name, ok, detail = '') =>
