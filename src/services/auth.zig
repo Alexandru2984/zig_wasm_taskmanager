@@ -4,10 +4,25 @@ const std = @import("std");
 const config = @import("../config/config.zig");
 const log = @import("../util/log.zig");
 
-// Argon2id parameters (OWASP recommendations for password hashing)
+// Argon2id parameters (OWASP recommendations for password hashing).
+//
+// These are the values used for NEW hashes. They are also written into each
+// hash, so they can be changed later without invalidating anything already
+// stored — see the note on the hash format below.
 const ARGON2_T_COST = 3; // Time cost (iterations)
 const ARGON2_M_COST = 65536; // Memory cost (64 MB)
 const ARGON2_PARALLELISM = 4; // Parallelism
+
+/// Parameters assumed for a hash written before the format carried them.
+/// Every such hash was produced with exactly these values, so verification
+/// stays correct; new hashes record their own.
+const LEGACY_PARAMS = Argon2Params{ .t = 3, .m = 65536, .p = 4 };
+
+const Argon2Params = struct {
+    t: u32,
+    m: u32,
+    p: u24,
+};
 
 // SECURITY: fixed decoy hash used by login when the email is unknown, so that
 // response time matches the real-user path and timing can't be used to probe
@@ -16,8 +31,17 @@ const ARGON2_PARALLELISM = 4; // Parallelism
 const DUMMY_ARGON2_HASH: []const u8 =
     "$argon2id$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000";
 
-/// Hash a password using Argon2id with random salt
-/// Returns format: "$argon2id$salt_hex$hash_hex"
+/// Hash a password using Argon2id with a random salt.
+///
+/// Returns `$argon2id$v=19$m=<m>,t=<t>,p=<p>$<salt_hex>$<hash_hex>`.
+///
+/// The parameters are part of the string. The previous format was
+/// `$argon2id$<salt>$<hash>` with the cost baked into the binary, which meant
+/// raising or lowering the cost would have silently failed to verify every
+/// password already stored — a change nobody could make without forcing a
+/// reset for every account. Recording them turns that into an ordinary
+/// migration: old hashes keep verifying with the parameters they were made
+/// with, and new ones use whatever is configured now.
 pub fn hashPassword(allocator: std.mem.Allocator, password: []const u8) ![]u8 {
     // Generate random salt
     var salt: [16]u8 = undefined;
@@ -56,8 +80,11 @@ pub fn hashPassword(allocator: std.mem.Allocator, password: []const u8) ![]u8 {
         hash_hex[i * 2 + 1] = hex_chars[byte & 0x0F];
     }
 
-    // Return PHC-style format: $argon2id$salt$hash
-    return try std.fmt.allocPrint(allocator, "$argon2id${s}${s}", .{ salt_hex, hash_hex });
+    return try std.fmt.allocPrint(
+        allocator,
+        "$argon2id$v=19$m={d},t={d},p={d}${s}${s}",
+        .{ ARGON2_M_COST, ARGON2_T_COST, ARGON2_PARALLELISM, salt_hex, hash_hex },
+    );
 }
 
 /// Verify a password against a stored hash
@@ -72,15 +99,54 @@ pub fn verifyPassword(allocator: std.mem.Allocator, stored_hash: []const u8, pas
     return verifyLegacyPassword(allocator, stored_hash, password);
 }
 
+/// Read `m=<n>,t=<n>,p=<n>` out of a parameter segment.
+fn parseParams(segment: []const u8) ?Argon2Params {
+    var m: ?u32 = null;
+    var t: ?u32 = null;
+    var p: ?u24 = null;
+
+    var it = std.mem.splitScalar(u8, segment, ',');
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse return null;
+        const key = pair[0..eq];
+        const value = pair[eq + 1 ..];
+        if (std.mem.eql(u8, key, "m")) {
+            m = std.fmt.parseInt(u32, value, 10) catch return null;
+        } else if (std.mem.eql(u8, key, "t")) {
+            t = std.fmt.parseInt(u32, value, 10) catch return null;
+        } else if (std.mem.eql(u8, key, "p")) {
+            p = std.fmt.parseInt(u24, value, 10) catch return null;
+        } else return null;
+    }
+
+    return Argon2Params{ .t = t orelse return null, .m = m orelse return null, .p = p orelse return null };
+}
+
 fn verifyArgon2Password(allocator: std.mem.Allocator, stored_hash: []const u8, password: []const u8) !bool {
     _ = allocator;
 
-    // Parse: $argon2id$salt_hex$hash_hex
-    const after_prefix = stored_hash[10..]; // Skip "$argon2id$"
-    const dollar_pos = std.mem.indexOf(u8, after_prefix, "$") orelse return false;
+    // Two shapes: the current one carries its parameters, the older one does
+    // not and was always produced with LEGACY_PARAMS.
+    //   $argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>
+    //   $argon2id$<salt>$<hash>
+    var rest = stored_hash[10..]; // skip "$argon2id$"
+    var params = LEGACY_PARAMS;
 
-    const salt_hex = after_prefix[0..dollar_pos];
-    const hash_hex = after_prefix[dollar_pos + 1 ..];
+    if (std.mem.startsWith(u8, rest, "v=")) {
+        const after_version = std.mem.indexOfScalar(u8, rest, '$') orelse return false;
+        // The version is fixed; a hash claiming another one was not written by
+        // this code and must not be verified with these assumptions.
+        if (!std.mem.eql(u8, rest[0..after_version], "v=19")) return false;
+        rest = rest[after_version + 1 ..];
+
+        const after_params = std.mem.indexOfScalar(u8, rest, '$') orelse return false;
+        params = parseParams(rest[0..after_params]) orelse return false;
+        rest = rest[after_params + 1 ..];
+    }
+
+    const dollar_pos = std.mem.indexOfScalar(u8, rest, '$') orelse return false;
+    const salt_hex = rest[0..dollar_pos];
+    const hash_hex = rest[dollar_pos + 1 ..];
 
     if (salt_hex.len != 32 or hash_hex.len != 64) return false;
 
@@ -103,11 +169,7 @@ fn verifyArgon2Password(allocator: std.mem.Allocator, stored_hash: []const u8, p
         &computed_hash,
         password,
         &salt,
-        .{
-            .t = ARGON2_T_COST,
-            .m = ARGON2_M_COST,
-            .p = ARGON2_PARALLELISM,
-        },
+        .{ .t = params.t, .m = params.m, .p = params.p },
         .argon2id,
     ) catch return false;
 
@@ -196,6 +258,72 @@ test "hashPassword produces a verifiable Argon2id hash" {
     try std.testing.expect(!isLegacyHash(hash));
     try std.testing.expect(try verifyPassword(a, hash, "correct horse battery staple"));
     try std.testing.expect(!try verifyPassword(a, hash, "wrong password"));
+}
+
+test "a new hash records its parameters" {
+    const a = std.testing.allocator;
+    const hash = try hashPassword(a, "correct horse battery staple");
+    defer a.free(hash);
+
+    try std.testing.expect(std.mem.startsWith(u8, hash, "$argon2id$v=19$m="));
+    try std.testing.expect(std.mem.indexOf(u8, hash, ",t=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hash, ",p=") != null);
+}
+
+test "a hash written before the format carried parameters still verifies" {
+    const a = std.testing.allocator;
+
+    // Built the way the old code did: no parameter segment, and produced with
+    // what are now LEGACY_PARAMS. If this ever fails, every account created
+    // before the format change can no longer log in.
+    var salt: [16]u8 = undefined;
+    std.crypto.random.bytes(&salt);
+    var derived: [32]u8 = undefined;
+    try std.crypto.pwhash.argon2.kdf(
+        a,
+        &derived,
+        "old password 1",
+        &salt,
+        .{ .t = LEGACY_PARAMS.t, .m = LEGACY_PARAMS.m, .p = LEGACY_PARAMS.p },
+        .argon2id,
+    );
+
+    const hex = "0123456789abcdef";
+    var salt_hex: [32]u8 = undefined;
+    var hash_hex: [64]u8 = undefined;
+    for (salt, 0..) |b, i| {
+        salt_hex[i * 2] = hex[b >> 4];
+        salt_hex[i * 2 + 1] = hex[b & 0x0F];
+    }
+    for (derived, 0..) |b, i| {
+        hash_hex[i * 2] = hex[b >> 4];
+        hash_hex[i * 2 + 1] = hex[b & 0x0F];
+    }
+
+    const legacy = try std.fmt.allocPrint(a, "$argon2id${s}${s}", .{ salt_hex, hash_hex });
+    defer a.free(legacy);
+
+    try std.testing.expect(try verifyPassword(a, legacy, "old password 1"));
+    try std.testing.expect(!try verifyPassword(a, legacy, "wrong password 1"));
+}
+
+test "parseParams reads and rejects" {
+    const ok = parseParams("m=65536,t=3,p=4").?;
+    try std.testing.expectEqual(@as(u32, 65536), ok.m);
+    try std.testing.expectEqual(@as(u32, 3), ok.t);
+    try std.testing.expectEqual(@as(u24, 4), ok.p);
+
+    // Missing a field, an unknown field, and a non-numeric value all fail
+    // closed rather than silently defaulting.
+    try std.testing.expect(parseParams("m=65536,t=3") == null);
+    try std.testing.expect(parseParams("m=65536,t=3,p=4,x=1") == null);
+    try std.testing.expect(parseParams("m=abc,t=3,p=4") == null);
+}
+
+test "a hash claiming an unknown version is refused" {
+    const a = std.testing.allocator;
+    const forged = "$argon2id$v=99$m=65536,t=3,p=4$" ++ ("0" ** 32) ++ "$" ++ ("0" ** 64);
+    try std.testing.expect(!try verifyPassword(a, forged, "anything"));
 }
 
 test "isLegacyHash flags non-Argon2 hashes" {

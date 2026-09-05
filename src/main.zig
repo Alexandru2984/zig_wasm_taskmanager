@@ -112,12 +112,60 @@ pub fn main() !void {
     });
     try listener.listen();
 
+    log.info("Serving with {d} request threads in 1 worker process", .{serverThreads()});
     log.banner("Task Manager", interface, port);
 
     zap.start(.{
-        .threads = 2,
+        .threads = serverThreads(),
+        // Deliberately one process, not one per core.
+        //
+        // Several things in this program are per-process and would misbehave
+        // if there were several: the reminder thread would send every due
+        // reminder once per worker, the outbound mail queue would be split
+        // across processes, and the in-memory rate limiters would each see
+        // only a fraction of the traffic. Concurrency comes from threads,
+        // which share all of that behind their existing mutexes.
         .workers = 1,
     });
+}
+
+/// How many request threads to run.
+///
+/// The previous fixed value of 2 was the ceiling on this server, not a
+/// tuning choice. Hashing a password with Argon2id takes about two seconds
+/// by design, and it holds its thread for the whole time — so two people
+/// signing in at once occupied both threads, and anything else that arrived
+/// meanwhile waited behind them. Measured on this machine: four concurrent
+/// logins made an unrelated /api/health take three seconds, against half a
+/// millisecond when idle.
+///
+/// Defaults to the CPU count, capped at 16. The cap is about memory rather
+/// than CPU: each concurrent hash allocates its Argon2 memory cost (64 MB at
+/// the current settings), so the worst case is threads × 64 MB of transient
+/// allocation.
+///
+/// SERVER_THREADS overrides it for hosts where that default is wrong.
+fn serverThreads() i16 {
+    const DEFAULT_MAX = 16;
+
+    if (config.get("SERVER_THREADS")) |raw| {
+        const parsed = std.fmt.parseInt(i16, raw, 10) catch {
+            log.warn("SERVER_THREADS is not a number ({s}); using the default", .{raw});
+            return defaultThreads(DEFAULT_MAX);
+        };
+        if (parsed < 1) {
+            log.warn("SERVER_THREADS must be at least 1; using the default", .{});
+            return defaultThreads(DEFAULT_MAX);
+        }
+        return parsed;
+    }
+    return defaultThreads(DEFAULT_MAX);
+}
+
+fn defaultThreads(max: i16) i16 {
+    const cpus = std.Thread.getCpuCount() catch 2;
+    const clamped = @min(cpus, @as(usize, @intCast(max)));
+    return @intCast(@max(clamped, 2));
 }
 
 fn validHeaderValue(value: []const u8) bool {

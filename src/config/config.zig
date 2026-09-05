@@ -145,7 +145,7 @@ const ENV_KEYS = [_][]const u8{
     "SMTP_HOST",       "SMTP_PORT",     "SMTP_USER",     "SMTP_PASS",    "SMTP_FROM",
     "SMTP_FROM_NAME",  "FROM_EMAIL",    "FROM_NAME",     "APP_BASE_URL", "TASK_REMINDERS_ENABLED",
     "PORT",            "INTERFACE",     "CORS_ORIGIN",   "HSTS_MAX_AGE", "TRUST_PROXY",
-    "COOKIE_INSECURE", "METRICS_TOKEN", "LEGACY_SECRET", "LOG_LEVEL",
+    "COOKIE_INSECURE", "METRICS_TOKEN", "LEGACY_SECRET", "LOG_LEVEL",    "SERVER_THREADS",
 };
 
 // Overlay recognized process environment variables onto the map. Runs once at
