@@ -1,0 +1,13 @@
+{
+  "name": "zig-tasks-tests",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Browser tests for the Zig task manager. The application itself has no JavaScript build step; this exists only to pin the test dependency.",
+  "type": "module",
+  "scripts": {
+    "test:ui": "node scripts/ui_test.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.56.1"
+  }
+}

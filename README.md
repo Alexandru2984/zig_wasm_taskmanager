@@ -86,26 +86,28 @@ by a process environment variable of the same name.
 ## Verification
 
 ```bash
-./scripts/check.sh
+./scripts/check.sh            # formatting, build, unit tests
+./scripts/integration_test.sh # API against a throwaway SurrealDB
+npm install && node scripts/ui_test.mjs   # browser checks
 ```
 
-This runs formatting checks, `zig build`, and `zig build test`.
+All three run in CI on every push.
 
-Smoke tests create a test user and may send verification email, so they are
-opt-in:
+`integration_test.sh` starts a real SurrealDB in Docker, builds and runs the
+application against it, and drives the API through the smoke suite. It is not
+redundant with the unit tests: every incompatibility found while moving the
+database from SurrealDB 1.x to 3.x — a bound string no longer being a record
+id, `DEFINE TABLE` rejecting a table that exists, a renamed time function —
+compiles cleanly and passes every unit test. Only talking to a real database
+catches them. The script also fails if the schema had to be retried, because a
+schema statement the server rejects still leaves a process answering
+`/api/health`, so liveness alone would call a broken deploy healthy.
 
-```bash
-RUN_SMOKE=1 ./scripts/check.sh
-```
-
-For production-like local testing with Secure cookies, run smoke tests through
-the local nginx HTTPS vhost:
-
-```bash
-BASE_URL=https://task.micutu.com \
-CURL_RESOLVE=task.micutu.com:443:127.0.0.1 \
-RUN_SMOKE=1 ./scripts/check.sh
-```
+`ui_test.mjs` covers what an HTTP-level suite cannot: that the WebAssembly
+module loads and owns the signed-out task list, that a task titled
+`<script>alert(1)</script>` renders as text and creates no script element,
+that no viewport scrolls sideways, and that the task checkbox — 22px of paint
+over a 44px hit area — is still hit when tapped 16px outside its visible box.
 
 ## Architecture
 

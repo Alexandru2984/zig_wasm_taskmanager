@@ -39,6 +39,7 @@ Primary attacker capabilities:
 | Path parameters | Percent-decoded before use, with a malformed escape rejected rather than passed through altered |
 | Error handling | Any error escaping a handler is answered as 500; previously it produced HTTP 200 with an empty body, which a client reads as success |
 | Input validation | Email/name/password/task title/date validation before database writes |
+| Record references | Values naming a row are bound through a `RecordId` type that emits `type::record()` and validates the `table:key` shape first, so a record range — which would let one statement touch many rows — is refused |
 | Database access | SurrealQL variable binding helper for user-controlled values (unit-tested for quote/control-byte escaping; unsupported bind types are rejected at compile time); Surreal `ERR` results are treated as failed queries |
 | Password change | Re-authenticates the current password, rejects reuse, invalidates other sessions, and is rate-limited |
 | XSS defense | DOM rendering uses `textContent`; strict CSP for HTML responses |
@@ -55,10 +56,10 @@ Primary attacker capabilities:
 
 ## Known Limitations
 
-- SurrealDB 1.5.6 is several major versions behind. The application connects
-  with root credentials, so any escape from the query builder would have the
-  whole database in reach. Upgrading, and giving the app a scoped database
-  user, is the single largest outstanding item.
+- The application connects to SurrealDB with root credentials. The server is
+  now current (3.2.4), but a scoped database user with only the rights this
+  application needs would limit the blast radius of any escape from the query
+  builder. That is the largest outstanding item.
 - Bind variables are emitted as `LET $x = "…"` prefixes with hand-written
   escaping rather than a native parameter protocol, because SurrealDB's HTTP
   `/sql` endpoint takes no separate variables. The escaper is unit-tested and

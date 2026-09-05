@@ -7,14 +7,15 @@ work visible for interviews and portfolio review.
 
 - Maintain `zig build`, `zig build test`, and `./scripts/check.sh` as the
   baseline verification flow.
-- Add isolated integration tests with a disposable SurrealDB namespace.
+- Extend the integration suite to cover the workspace invitation flow, which
+  needs a verified account and so is currently only exercised by hand.
 - Keep CI secret scanning enabled and review findings before merging.
 - Publish an OpenAPI document for the public API.
 
 ## 2. Security Posture
 
-- Upgrade SurrealDB from 1.5.6 and give the app a scoped database user
-  instead of root. Largest outstanding item.
+- Give the app a scoped database user instead of root. Largest outstanding
+  item now that the server itself is current.
 - Check new passwords against Have I Been Pwned's range API rather than the
   short built-in list.
 - Add audit events for password resets and login failures.
@@ -22,7 +23,8 @@ work visible for interviews and portfolio review.
   as the nginx zones already do.
 - Keep deployment hardening documented and reproducible.
 
-Done: workspace RBAC with role changes and member removal; CSRF bound to the
+Done: SurrealDB upgraded 1.5.6 -> 3.2.4 with a rehearsed, reversible
+migration; workspace RBAC with role changes and member removal; CSRF bound to the
 session; `__Host-` cookies; origin restricted to Cloudflare; edge rate limits;
 email normalisation; account deletion with re-authentication.
 

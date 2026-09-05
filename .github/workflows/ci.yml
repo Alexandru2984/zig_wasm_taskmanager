@@ -9,8 +9,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
+    name: Format, build, unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -31,7 +36,102 @@ jobs:
       - name: Run checks
         run: ./scripts/check.sh
 
+  integration:
+    name: API against a real database
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      # Starts SurrealDB, builds and runs the app against it, then drives the
+      # API through the smoke suite. The same script runs locally, which is how
+      # its sequencing gets debugged without pushing commits.
+      #
+      # It is not redundant with the unit tests: everything that broke during
+      # the 1.x-to-3.x database migration — a bound string no longer being a
+      # record id, DEFINE rejecting an existing table, a renamed time function —
+      # compiles cleanly and passes every unit test. Only talking to a real
+      # database catches it.
+      - name: Integration test
+        run: ./scripts/integration_test.sh
+
+  ui:
+    name: Browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install test dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Install Chromium
+        run: npx --yes playwright@1.56.1 install --with-deps chromium
+
+      - name: Start SurrealDB
+        run: |
+          docker run -d --name surreal-ui --user root \
+            -p 127.0.0.1:8020:8000 surrealdb/surrealdb:v3.2.4 \
+            start --log warn --user itroot --pass itpass rocksdb:/data/ui.db
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8020/version >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8020/version
+
+      - name: Build and start the app
+        run: |
+          zig build
+          cat > .env <<'ENV'
+          SURREAL_URL=http://127.0.0.1:8020
+          SURREAL_NS=taskmanager_ui
+          SURREAL_DB=main
+          SURREAL_USER=itroot
+          SURREAL_PASS=itpass
+          PORT=9200
+          INTERFACE=127.0.0.1
+          CORS_ORIGIN=http://localhost:9200
+          APP_BASE_URL=http://127.0.0.1:9200
+          COOKIE_INSECURE=1
+          ENV
+          LD_LIBRARY_PATH="$(dirname "$(find .zig-cache -name 'libfacil.io.so' | head -1)")" \
+            ./zig-out/bin/taskmanager > app.log 2>&1 &
+          for _ in $(seq 1 45); do
+            curl -fsS http://127.0.0.1:9200/api/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:9200/api/health
+
+      - name: Browser tests
+        env:
+          BASE_URL: http://127.0.0.1:9200
+        run: node scripts/ui_test.mjs
+
+      - name: Application log on failure
+        if: failure()
+        run: tail -60 app.log || true
+
   docker:
+    name: Docker image
     runs-on: ubuntu-latest
     timeout-minutes: 20
 

@@ -39,3 +39,7 @@ db_settings.txt
 
 # Local toolchain / scratch
 *.tar.xz
+
+# JS test dependencies (the app itself has no npm build step)
+node_modules/
+package-lock.json
