@@ -12,8 +12,29 @@ fn enabled() bool {
     return std.mem.eql(u8, config.getOrDefault("TASK_REMINDERS_ENABLED", "0"), "1");
 }
 
+/// How far ahead of a deadline to send the reminder, in minutes.
+///
+/// An hour by default: long enough to be actionable, short enough that the
+/// task is still the thing you are about to do.
+fn leadSeconds() i64 {
+    const raw = config.getOrDefault("TASK_REMINDER_LEAD_MINUTES", "60");
+    const minutes = std.fmt.parseInt(i64, raw, 10) catch {
+        log.warn("TASK_REMINDER_LEAD_MINUTES is not a number ({s}); using 60", .{raw});
+        return 60 * 60;
+    };
+    if (minutes < 0) return 0;
+    return minutes * 60;
+}
+
+/// How many delivery failures before a task's reminder is abandoned.
+///
+/// Three is enough to ride out a mail server that is briefly unreachable, and
+/// few enough that an address which will never accept mail stops being retried
+/// within a few minutes rather than for the life of the task.
+const MAX_REMINDER_ATTEMPTS: i64 = 3;
+
 fn processDueReminders(allocator: std.mem.Allocator) !void {
-    const task_result = try db.getDueTasksForReminders(allocator);
+    const task_result = try db.getDueTasksForReminders(allocator, leadSeconds(), MAX_REMINDER_ATTEMPTS);
     defer allocator.free(task_result);
 
     const parsed_tasks = try std.json.parseFromSlice([]models.SurrealResponse(models.Task), allocator, task_result, .{ .ignore_unknown_fields = true });
@@ -39,8 +60,20 @@ fn processDueReminders(allocator: std.mem.Allocator) !void {
         if (parsed_users.value.len == 0 or parsed_users.value[0].result.len == 0) continue;
         const user = parsed_users.value[0].result[0];
 
+        // SECURITY: never mail an address nobody has proven they control.
+        // Signing up with someone else's address and filling a workspace with
+        // due tasks would otherwise turn this into a way to send them mail.
+        // The task keeps its unsent state, so verifying later still works.
+        if (!user.email_verified) {
+            log.debug("Reminder skipped for task {s}: address not verified", .{task.id});
+            continue;
+        }
+
         email.sendTaskReminderEmail(allocator, user.email, user.name, task.title, due_date) catch |err| {
             log.warn("Reminder email failed for task {s}: {}", .{ task.id, err });
+            db.bumpReminderAttempts(allocator, task.id) catch |bump_err| {
+                log.warn("Failed to record the reminder attempt for {s}: {}", .{ task.id, bump_err });
+            };
             continue;
         };
 

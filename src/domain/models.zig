@@ -27,6 +27,7 @@ pub const Task = struct {
     due_date: ?[]const u8 = null,
     priority: []const u8 = "normal",
     reminder_sent: bool = false,
+    reminder_attempts: i64 = 0,
     notes: []const u8 = "",
     tags: []const []const u8 = &.{},
     updated_at: ?[]const u8 = null,

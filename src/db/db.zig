@@ -76,6 +76,7 @@ pub const getTaskOwner = impl.getTaskOwner;
 pub const verifyTaskOwnership = impl.verifyTaskOwnership;
 pub const getDueTasksForReminders = impl.getDueTasksForReminders;
 pub const markTaskReminderSent = impl.markTaskReminderSent;
+pub const bumpReminderAttempts = impl.bumpReminderAttempts;
 
 // Activity operations
 pub const logActivity = impl.logActivity;

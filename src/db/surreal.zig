@@ -254,6 +254,13 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\UPDATE workspace_invites SET email = string::lowercase(email) WHERE email != string::lowercase(email);
     );
 
+    // A reminder that cannot be delivered must eventually stop being retried.
+    // Without a counter the reminder loop re-attempts the same undeliverable
+    // task every minute, forever, three SMTP connections at a time.
+    try runMigration(allocator, "010_reminder_attempts",
+        \\DEFINE FIELD IF NOT EXISTS reminder_attempts ON tasks TYPE int DEFAULT 0;
+    );
+
     try runMigration(allocator, "009_task_notes_and_tags",
         \\DEFINE FIELD IF NOT EXISTS notes ON tasks TYPE string DEFAULT "";
         \\DEFINE FIELD IF NOT EXISTS tags ON tasks TYPE array<string> DEFAULT [];
@@ -774,10 +781,30 @@ pub fn deleteTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
     , .{ .record_id = rec(task_id) });
 }
 
-pub fn getDueTasksForReminders(allocator: std.mem.Allocator) ![]u8 {
-    return query(allocator,
-        \\SELECT * FROM tasks WHERE completed = false AND due_date != NONE AND due_date <= time::now() AND (reminder_sent = false OR reminder_sent = NONE) LIMIT 25;
-    );
+/// Tasks whose deadline is close enough to warrant a reminder.
+///
+/// `lead_seconds` reaches forward from now, so a reminder arrives before the
+/// deadline rather than after it. The previous condition was
+/// `due_date <= time::now()`, which only ever fired once a task was already
+/// overdue — a reminder that arrives too late to act on is a notification that
+/// something has gone wrong, not a reminder.
+pub fn getDueTasksForReminders(allocator: std.mem.Allocator, lead_seconds: i64, max_attempts: i64) ![]u8 {
+    const lead = try std.fmt.allocPrint(allocator, "{d}s", .{lead_seconds});
+    defer allocator.free(lead);
+
+    return queryWithVars(allocator,
+        \\SELECT * FROM tasks WHERE completed = false AND due_date != NONE AND due_date <= time::now() + type::duration($lead) AND (reminder_sent = false OR reminder_sent = NONE) AND (reminder_attempts OR 0) < $max_attempts LIMIT 25;
+    , .{ .lead = lead, .max_attempts = max_attempts });
+}
+
+/// Record a failed delivery. Once the count reaches the cap the task drops out
+/// of getDueTasksForReminders, so a permanently undeliverable address stops
+/// costing an SMTP connection every minute.
+pub fn bumpReminderAttempts(allocator: std.mem.Allocator, task_id: []const u8) !void {
+    const result = try queryWithVars(allocator,
+        \\UPDATE $record_id SET reminder_attempts = (reminder_attempts OR 0) + 1;
+    , .{ .record_id = rec(task_id) });
+    allocator.free(result);
 }
 
 pub fn markTaskReminderSent(allocator: std.mem.Allocator, task_id: []const u8) !void {
