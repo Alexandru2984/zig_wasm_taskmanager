@@ -27,7 +27,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/favicon.svg">
     <link rel="manifest" href="/site.webmanifest">
-    <link rel="stylesheet" href="/style.css?v=a0451d56">
+    <link rel="stylesheet" href="/style.css?v=1eeb6e29">
 
     <!-- Structured data. The CSP forbids inline <script>, but this is
          application/ld+json, which is data rather than script: the parser
@@ -152,6 +152,21 @@
                 </div>
             </form>
 
+            <div class="view-switch" role="group" aria-label="View">
+                <button type="button" class="chip" data-view="list" aria-pressed="true">☰ List</button>
+                <button type="button" class="chip" data-view="board" aria-pressed="false">▦ Board</button>
+                <button type="button" class="chip" id="selectModeBtn" aria-pressed="false">☑ Select</button>
+                <button type="button" class="chip" id="shortcutsBtn" aria-label="Keyboard shortcuts" title="Keyboard shortcuts">⌨</button>
+            </div>
+
+            <div class="bulk-bar hidden" id="bulkBar" role="region" aria-label="Bulk actions">
+                <span class="bulk-count"><strong id="bulkCount">0</strong> selected</span>
+                <button type="button" class="btn btn-ghost btn-sm" data-bulk="complete">Complete</button>
+                <button type="button" class="btn btn-ghost btn-sm" data-bulk="todo">Reopen</button>
+                <button type="button" class="btn btn-danger-ghost btn-sm" data-bulk="delete">Delete</button>
+                <button type="button" class="btn btn-ghost btn-sm" data-bulk="clear">Clear</button>
+            </div>
+
             <div class="toolbar">
                 <div class="search-wrap">
                     <span class="search-icon" aria-hidden="true">🔎</span>
@@ -203,6 +218,8 @@
             </div>
 
             <ul class="task-list" id="taskList" aria-label="Tasks"></ul>
+
+            <div class="board hidden" id="board" aria-label="Task board"></div>
 
             <div class="empty-state" id="emptyState">
                 <div class="empty-icon" aria-hidden="true">📝</div>
@@ -481,8 +498,11 @@
                 Download everything this account holds — tasks, workspaces and activity — as JSON.
             </p>
             <a class="btn btn-ghost btn-block" id="exportBtn" href="/api/export" download="zig-tasks-export.json">
-                Export my data
+                Export everything as JSON
             </a>
+            <button class="btn btn-ghost btn-block stack-top" type="button" id="exportCsvBtn">
+                Export tasks as CSV
+            </button>
 
             <div class="danger-zone">
                 <h3>Delete account</h3>
@@ -499,6 +519,24 @@
         </div>
     </div>
 
-    <script src="/app.js?v=38340847"></script>
+    <div class="modal" id="shortcutsModal" role="dialog" aria-modal="true" aria-labelledby="shortcutsTitle" hidden>
+        <div class="modal-overlay" data-action="hide-modal" data-target="shortcutsModal"></div>
+        <div class="modal-content">
+            <button class="modal-close" data-action="hide-modal" data-target="shortcutsModal" aria-label="Close">×</button>
+            <h2 id="shortcutsTitle">Keyboard shortcuts</h2>
+            <ul class="shortcut-list">
+                <li><kbd>/</kbd><span>Search</span></li>
+                <li><kbd>n</kbd><span>New task</span></li>
+                <li><kbd>b</kbd><span>Switch list and board</span></li>
+                <li><kbd>s</kbd><span>Selection mode</span></li>
+                <li><kbd>a</kbd><span>Select everything shown</span></li>
+                <li><kbd>e</kbd><span>Edit the first task</span></li>
+                <li><kbd>?</kbd><span>This list</span></li>
+                <li><kbd>Esc</kbd><span>Close, or clear the selection</span></li>
+            </ul>
+        </div>
+    </div>
+
+    <script src="/app.js?v=3134258d"></script>
 </body>
 </html>

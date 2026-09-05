@@ -25,7 +25,20 @@ const state = {
     editingId: null,
     completedCollapsed: false,
     loading: false,
+    /// 'list' or 'board'.
+    view: 'list',
+    /// Ids of tasks ticked for a bulk action. A Set because membership is
+    /// checked once per row on every render.
+    selection: new Set(),
+    selectMode: false,
+    /// Workspace members, for the assignee picker. Loaded lazily: it needs
+    /// admin rights, which most members will not have.
+    members: [],
+    addingSubtaskFor: null,
 };
+
+const STATUSES = ['todo', 'doing', 'done'];
+const STATUS_LABEL = { todo: 'To do', doing: 'In progress', done: 'Done' };
 
 let wasm = null;
 let wasmMemory = null;
@@ -859,6 +872,30 @@ function workspaceTasks() {
     return state.tasks.filter(t => !t.workspace_id || t.workspace_id === state.currentWorkspaceId);
 }
 
+/// Tasks that are not subtasks. The board and the list both show these; a
+/// subtask appears under its parent rather than as a row of its own.
+function topLevel(tasks) {
+    return tasks.filter(t => !t.parent_id);
+}
+
+function subtasksOf(id) {
+    return state.tasks.filter(t => t.parent_id === id);
+}
+
+function subtaskProgress(id) {
+    const kids = subtasksOf(id);
+    if (!kids.length) return null;
+    return { done: kids.filter(k => k.completed).length, total: kids.length };
+}
+
+function memberName(userId) {
+    if (!userId) return null;
+    const m = state.members.find(x => x.user_id === userId);
+    if (m) return m.name || m.email;
+    if (state.user && state.user.id === userId) return state.user.name;
+    return null;
+}
+
 function matchesSearch(task, needle) {
     if (!needle) return true;
     const haystack = [
@@ -961,6 +998,21 @@ function renderTaskItem(task) {
     checkbox.disabled = !canWrite();
     checkbox.setAttribute('aria-label', task.completed ? 'Mark as not done' : 'Mark as done');
 
+    // In selection mode the row grows a second box. Two boxes are clearer than
+    // one that changes meaning depending on a mode you might have forgotten
+    // you were in.
+    let selectBox = null;
+    if (state.selectMode) {
+        selectBox = document.createElement('input');
+        selectBox.type = 'checkbox';
+        selectBox.className = 'task-select';
+        selectBox.dataset.id = task.id;
+        selectBox.dataset.act = 'select';
+        selectBox.checked = state.selection.has(String(task.id));
+        selectBox.setAttribute('aria-label', `Select ${task.title}`);
+        if (selectBox.checked) li.classList.add('selected');
+    }
+
     const content = document.createElement('div');
     content.className = 'task-content';
 
@@ -999,17 +1051,101 @@ function renderTaskItem(task) {
         meta.appendChild(el);
     }
 
+    const assignee = memberName(task.assignee_id);
+    if (assignee) meta.appendChild(badge(`👤 ${assignee}`, 'task-assignee'));
+
+    if (task.recurrence && task.recurrence !== 'none') {
+        meta.appendChild(badge(`🔁 ${task.recurrence}`, 'task-badge'));
+    }
+
+    const progress = subtaskProgress(task.id);
+    if (progress) {
+        meta.appendChild(badge(`☑ ${progress.done}/${progress.total}`, 'task-badge'));
+    }
+
     if (meta.childElementCount) content.appendChild(meta);
+
+    // Subtasks live under their parent, never as rows of their own.
+    const kids = subtasksOf(task.id);
+    if (kids.length) {
+        const list = document.createElement('ul');
+        list.className = 'subtask-list';
+        for (const kid of kids) list.appendChild(renderSubtask(kid));
+        content.appendChild(list);
+    }
+
+    if (state.addingSubtaskFor === String(task.id)) {
+        content.appendChild(renderSubtaskComposer(task.id));
+    }
 
     const actions = document.createElement('div');
     actions.className = 'task-actions';
     if (canWrite()) {
+        // Subtasks exist only for signed-in tasks: the offline store has no
+        // notion of a parent, and pretending otherwise would lose them.
+        if (isLoggedIn()) {
+            actions.appendChild(iconButton('Add subtask', '＋', 'icon-btn', { id: task.id, act: 'add-subtask' }));
+        }
         actions.appendChild(iconButton('Edit task', '✏️', 'icon-btn', { id: task.id, act: 'edit' }));
         actions.appendChild(iconButton('Delete task', '🗑️', 'icon-btn btn-delete', { id: task.id, act: 'delete' }));
     }
 
+    if (selectBox) li.append(selectBox);
     li.append(checkbox, content, actions);
     return li;
+}
+
+function renderSubtask(task) {
+    const li = document.createElement('li');
+    li.className = task.completed ? 'subtask done' : 'subtask';
+
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.className = 'task-checkbox';
+    box.dataset.id = task.id;
+    box.dataset.act = 'toggle';
+    box.checked = Boolean(task.completed);
+    box.disabled = !canWrite();
+    box.setAttribute('aria-label', `Mark "${task.title}" as ${task.completed ? 'not done' : 'done'}`);
+
+    const title = document.createElement('span');
+    title.className = 'subtask-title';
+    title.textContent = task.title;
+
+    li.append(box, title);
+    if (canWrite()) {
+        li.appendChild(iconButton('Delete subtask', '×', 'icon-btn btn-delete', { id: task.id, act: 'delete' }));
+    }
+    return li;
+}
+
+function renderSubtaskComposer(parentId) {
+    const form = document.createElement('form');
+    form.className = 'subtask-add';
+    form.dataset.act = 'save-subtask';
+    form.dataset.parent = parentId;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Subtask title';
+    input.maxLength = 500;
+    input.required = true;
+    input.setAttribute('aria-label', 'Subtask title');
+
+    const add = document.createElement('button');
+    add.type = 'submit';
+    add.className = 'btn btn-primary btn-sm';
+    add.textContent = 'Add';
+
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn btn-ghost btn-sm';
+    cancel.textContent = 'Cancel';
+    cancel.dataset.act = 'cancel-subtask';
+
+    form.append(input, add, cancel);
+    setTimeout(() => input.focus(), 0);
+    return form;
 }
 
 /** Inline editor. Replaces the row in place rather than opening a dialog: the
@@ -1076,7 +1212,45 @@ function renderTaskEditor(task) {
     tags.setAttribute('aria-label', 'Tags');
     tags.dataset.field = 'tags';
 
+    const recurrence = document.createElement('select');
+    recurrence.setAttribute('aria-label', 'Repeat');
+    recurrence.dataset.field = 'recurrence';
+    for (const [value, label] of [
+        ['none', 'Does not repeat'], ['daily', 'Repeats daily'],
+        ['weekly', 'Repeats weekly'], ['monthly', 'Repeats monthly'],
+    ]) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        if ((task.recurrence || 'none') === value) option.selected = true;
+        recurrence.appendChild(option);
+    }
+
+    // Only offered where it can be honoured: assigning needs the member list,
+    // which needs admin rights, and the offline store has no members at all.
+    let assignee = null;
+    if (isLoggedIn() && state.members.length) {
+        assignee = document.createElement('select');
+        assignee.setAttribute('aria-label', 'Assignee');
+        assignee.dataset.field = 'assignee_id';
+        const none = document.createElement('option');
+        none.value = '';
+        none.textContent = 'Unassigned';
+        assignee.appendChild(none);
+        for (const m of state.members) {
+            const option = document.createElement('option');
+            option.value = m.user_id;
+            option.textContent = m.name || m.email;
+            if (task.assignee_id === m.user_id) option.selected = true;
+            assignee.appendChild(option);
+        }
+    }
+
     row.append(priority, due);
+    const row2 = document.createElement('div');
+    row2.className = 'task-edit-row';
+    row2.appendChild(recurrence);
+    if (assignee) row2.appendChild(assignee);
 
     const actions = document.createElement('div');
     actions.className = 'task-edit-actions';
@@ -1091,7 +1265,7 @@ function renderTaskEditor(task) {
     save.textContent = 'Save';
     actions.append(cancel, save);
 
-    form.append(title, notes, row, tags, actions);
+    form.append(title, notes, row, row2, tags, actions);
     li.appendChild(form);
     return li;
 }
@@ -1105,16 +1279,32 @@ function renderTasks() {
     list.textContent = '';
     completedList.textContent = '';
 
-    const scoped = workspaceTasks();
+    const scoped = topLevel(workspaceTasks());
     const needle = state.search.trim().toLowerCase();
 
     renderCounts(scoped);
     renderTagChips(scoped);
+    renderBulkBar();
 
     const visible = scoped
         .filter(t => matchesFilter(t))
         .filter(t => matchesSearch(t, needle))
         .filter(t => !state.tagFilter || (t.tags || []).includes(state.tagFilter));
+
+    // The board shows the same filtered set, grouped differently.
+    const boardEl = $('board');
+    const listEl = $('taskList');
+    if (state.view === 'board') {
+        boardEl.classList.remove('hidden');
+        listEl.classList.add('hidden');
+        $('completedSection').classList.add('hidden');
+        renderBoard(visible);
+        $('emptyState').classList.toggle('visible', visible.length === 0 && !state.loading);
+        if (!visible.length) renderEmptyState(scoped.length > 0);
+        return;
+    }
+    boardEl.classList.add('hidden');
+    listEl.classList.remove('hidden');
 
     // "Completed" is a section, not a filter, so it only splits out when the
     // active filter would otherwise mix the two.
@@ -1138,6 +1328,126 @@ function renderTasks() {
     const nothing = active.length === 0 && done.length === 0;
     empty.classList.toggle('visible', nothing && !state.loading);
     if (nothing) renderEmptyState(scoped.length > 0);
+}
+
+/// The board is the same filtered set as the list, grouped by status rather
+/// than split into active and completed. Cards can be dragged between columns
+/// on a pointer device and moved with buttons everywhere else — a board that
+/// only works with a mouse is a board that does not work on a phone.
+function renderBoard(visible) {
+    const board = $('board');
+    board.textContent = '';
+
+    for (const status of STATUSES) {
+        const column = document.createElement('section');
+        column.className = 'board-column';
+        column.dataset.status = status;
+
+        const head = document.createElement('h3');
+        head.className = 'board-column-head';
+        head.textContent = STATUS_LABEL[status];
+
+        const inColumn = visible.filter(t => taskStatus(t) === status);
+        const count = document.createElement('span');
+        count.className = 'board-column-count';
+        count.textContent = String(inColumn.length);
+        head.appendChild(count);
+
+        const cards = document.createElement('ul');
+        cards.className = 'board-cards';
+        for (const task of sortTasks(inColumn)) cards.appendChild(renderCard(task, status));
+
+        column.append(head, cards);
+        board.appendChild(column);
+    }
+}
+
+/// A task's column. Older rows predate the status field, so completion is the
+/// fallback — the two are kept in step on write, and this keeps them in step
+/// on read for anything written before that was true.
+function taskStatus(task) {
+    if (task.status && STATUSES.includes(task.status)) return task.status;
+    return task.completed ? 'done' : 'todo';
+}
+
+function renderCard(task, status) {
+    const li = document.createElement('li');
+    li.className = 'board-card';
+    li.draggable = canWrite();
+    li.dataset.id = task.id;
+
+    const title = document.createElement('div');
+    title.className = 'board-card-title';
+    title.textContent = task.title;
+    li.appendChild(title);
+
+    const meta = document.createElement('div');
+    meta.className = 'board-card-meta';
+    if (task.priority === 'high') meta.appendChild(badge('High', 'task-badge task-badge-high'));
+    if (task.priority === 'low') meta.appendChild(badge('Low', 'task-badge task-badge-low'));
+    const due = formatDate(task.due_date);
+    if (due) {
+        meta.appendChild(badge(`${isOverdue(task) ? '⚠️' : '📅'} ${due}`,
+            `task-badge ${isOverdue(task) ? 'task-badge-overdue' : 'task-badge-due'}`));
+    }
+    for (const tag of task.tags || []) meta.appendChild(badge(tag, 'task-tag'));
+    const assignee = memberName(task.assignee_id);
+    if (assignee) meta.appendChild(badge(`👤 ${assignee}`, 'task-assignee'));
+    const progress = subtaskProgress(task.id);
+    if (progress) meta.appendChild(badge(`☑ ${progress.done}/${progress.total}`, 'task-badge'));
+    if (meta.childElementCount) li.appendChild(meta);
+
+    if (canWrite()) {
+        const move = document.createElement('div');
+        move.className = 'board-move';
+        const index = STATUSES.indexOf(status);
+        for (const [label, target] of [['←', STATUSES[index - 1]], ['→', STATUSES[index + 1]]]) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.textContent = label;
+            btn.disabled = !target;
+            if (target) {
+                btn.dataset.act = 'move-status';
+                btn.dataset.id = task.id;
+                btn.dataset.status = target;
+                btn.setAttribute('aria-label', `Move "${task.title}" to ${STATUS_LABEL[target]}`);
+            }
+            move.appendChild(btn);
+        }
+        li.appendChild(move);
+    }
+
+    return li;
+}
+
+async function moveTask(id, status) {
+    const task = state.tasks.find(t => String(t.id) === String(id));
+    if (!task) return;
+
+    const previous = { status: taskStatus(task), completed: task.completed };
+    task.status = status;
+    task.completed = status === 'done';
+    renderTasks();
+
+    if (!isLoggedIn()) {
+        // The offline store knows about completion but not columns, so a move
+        // is recorded as the completion it implies.
+        anonToggle(id);
+        await loadTasks();
+        return;
+    }
+
+    const { ok, data } = await api(`/api/tasks/${encodeURIComponent(id)}`, {
+        method: 'PUT', body: { status },
+    });
+    if (!ok) {
+        Object.assign(task, previous);
+        renderTasks();
+        toast(data?.error || 'Could not move the task', 'error');
+        return;
+    }
+    Object.assign(task, data);
+    renderTasks();
 }
 
 function renderEmptyState(hasTasksButFiltered) {
@@ -1333,6 +1643,8 @@ async function saveTaskEdit(form) {
     // the server anyway, get a 401, and report the session as expired — for a
     // user who had never signed in.
     if (!isLoggedIn()) {
+        // Recurrence and assignment need a server; the offline store keeps the
+        // fields it can actually honour rather than pretending to save them.
         anonUpdate(id, {
             title,
             dueDate: field('due_date').value || null,
@@ -1355,6 +1667,10 @@ async function saveTaskEdit(form) {
         // would mean "leave it alone".
         due_date: field('due_date').value || '',
     };
+    const recurrenceField = field('recurrence');
+    if (recurrenceField) body.recurrence = recurrenceField.value;
+    const assigneeField = field('assignee_id');
+    if (assigneeField) body.assignee_id = assigneeField.value;
 
     const { ok, data } = await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'PUT', body });
     if (!ok) {
@@ -1367,6 +1683,148 @@ async function saveTaskEdit(form) {
     state.editingId = null;
     renderTasks();
     toast('Task updated', 'success');
+}
+
+// ============ SELECTION AND BULK ACTIONS ============
+
+function renderBulkBar() {
+    const bar = $('bulkBar');
+    const count = state.selection.size;
+    bar.classList.toggle('hidden', !state.selectMode || count === 0);
+    $('bulkCount').textContent = String(count);
+}
+
+function setSelectMode(on) {
+    state.selectMode = on;
+    if (!on) state.selection.clear();
+    $('selectModeBtn').setAttribute('aria-pressed', String(on));
+    renderTasks();
+}
+
+function toggleSelected(id) {
+    const key = String(id);
+    if (state.selection.has(key)) state.selection.delete(key);
+    else state.selection.add(key);
+    renderTasks();
+}
+
+function selectAllVisible() {
+    if (!state.selectMode) setSelectMode(true);
+    for (const el of document.querySelectorAll('[data-act="select"]')) {
+        state.selection.add(String(el.dataset.id));
+    }
+    renderTasks();
+}
+
+/**
+ * Apply an action to every selected task.
+ *
+ * Sequential rather than parallel. Each write is a round trip that ends in an
+ * Argon2-free but still database-backed handler, and firing twenty at once
+ * only moves the queue from the server to the browser while making a partial
+ * failure much harder to describe.
+ */
+async function bulkApply(action) {
+    const ids = [...state.selection];
+    if (!ids.length) return;
+
+    if (action === 'delete' && !window.confirm(`Delete ${ids.length} task${ids.length === 1 ? '' : 's'}?`)) {
+        return;
+    }
+
+    let done = 0;
+    let failed = 0;
+    for (const id of ids) {
+        const ok = await applyOne(action, id);
+        if (ok) done += 1;
+        else failed += 1;
+    }
+
+    state.selection.clear();
+    await loadTasks();
+
+    if (failed === 0) toast(`${done} task${done === 1 ? '' : 's'} updated`, 'success');
+    else toast(`${done} updated, ${failed} failed`, 'error');
+}
+
+async function applyOne(action, id) {
+    if (!isLoggedIn()) {
+        if (action === 'delete') anonDelete(id);
+        else {
+            const task = state.tasks.find(t => String(t.id) === String(id));
+            const wantDone = action === 'complete';
+            if (task && Boolean(task.completed) !== wantDone) anonToggle(id);
+        }
+        return true;
+    }
+
+    if (action === 'delete') {
+        const { ok } = await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE', quiet: true });
+        return ok;
+    }
+    const { ok } = await api(`/api/tasks/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        body: { status: action === 'complete' ? 'done' : 'todo' },
+        quiet: true,
+    });
+    return ok;
+}
+
+// ============ SUBTASKS ============
+
+async function addSubtask(parentId, title) {
+    const body = { title, parent_id: parentId };
+    const parent = state.tasks.find(t => String(t.id) === String(parentId));
+    if (parent && parent.workspace_id) body.workspace_id = parent.workspace_id;
+
+    const { ok, data } = await api('/api/tasks', { method: 'POST', body });
+    if (!ok) {
+        toast(data?.error || 'Could not add the subtask', 'error');
+        return;
+    }
+    state.tasks.push(data);
+    state.addingSubtaskFor = null;
+    renderTasks();
+}
+
+// ============ CSV EXPORT ============
+
+/// Quote a field for CSV. Excel and everything else agree on doubling the
+/// quote character; a field is quoted whenever it holds a delimiter, a quote
+/// or a newline.
+function csvField(value) {
+    const text = value === null || value === undefined ? '' : String(value);
+    if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+    return text;
+}
+
+function tasksAsCsv() {
+    const columns = ['id', 'title', 'notes', 'status', 'completed', 'priority',
+        'due_date', 'tags', 'recurrence', 'parent_id', 'created_at'];
+    const rows = [columns.join(',')];
+
+    for (const task of workspaceTasks()) {
+        rows.push(columns.map(c => {
+            if (c === 'tags') return csvField((task.tags || []).join(' '));
+            return csvField(task[c]);
+        }).join(','));
+    }
+    return rows.join('\r\n');
+}
+
+function downloadCsv() {
+    const blob = new Blob([tasksAsCsv()], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'zig-tasks.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoking immediately can cancel the download in some browsers; a tick is
+    // enough for the navigation to have started.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('CSV downloaded', 'success');
 }
 
 // ============ WORKSPACE MEMBERS & INVITES ============
@@ -1916,13 +2374,24 @@ function bindTaskList(listEl) {
         else if (act === 'edit') { state.editingId = id; renderTasks(); }
         else if (act === 'cancel-edit') { state.editingId = null; renderTasks(); }
         else if (act === 'filter-tag') { state.tagFilter = tag; renderTasks(); }
+        else if (act === 'select') toggleSelected(id);
+        else if (act === 'add-subtask') { state.addingSubtaskFor = String(id); renderTasks(); }
+        else if (act === 'cancel-subtask') { state.addingSubtaskFor = null; renderTasks(); }
     });
 
     listEl.addEventListener('submit', (e) => {
-        const form = e.target.closest('[data-act="save-edit"]');
-        if (!form) return;
-        e.preventDefault();
-        saveTaskEdit(form);
+        const edit = e.target.closest('[data-act="save-edit"]');
+        if (edit) {
+            e.preventDefault();
+            saveTaskEdit(edit);
+            return;
+        }
+        const sub = e.target.closest('[data-act="save-subtask"]');
+        if (sub) {
+            e.preventDefault();
+            const title = sub.querySelector('input').value.trim();
+            if (title) addSubtask(sub.dataset.parent, title);
+        }
     });
 
     // Escape leaves the inline editor without saving, which is what Escape
@@ -1952,6 +2421,75 @@ function bindPanelLists() {
         const el = e.target.closest('[data-act="revoke-session"]');
         if (el) revokeSession(el.dataset.sessionId);
     });
+}
+
+function bindBoard() {
+    const board = $('board');
+
+    board.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-act="move-status"]');
+        if (btn) moveTask(btn.dataset.id, btn.dataset.status);
+    });
+
+    // Dragging is an enhancement, not the only way across: every card also
+    // carries arrow buttons, which are what a touch screen and a keyboard use.
+    board.addEventListener('dragstart', (e) => {
+        const card = e.target.closest('.board-card');
+        if (!card) return;
+        e.dataTransfer.setData('text/plain', card.dataset.id);
+        e.dataTransfer.effectAllowed = 'move';
+        card.classList.add('dragging');
+    });
+    board.addEventListener('dragend', (e) => {
+        e.target.closest('.board-card')?.classList.remove('dragging');
+    });
+    board.addEventListener('dragover', (e) => {
+        const column = e.target.closest('.board-column');
+        if (!column) return;
+        e.preventDefault();
+        column.classList.add('drop-target');
+    });
+    board.addEventListener('dragleave', (e) => {
+        e.target.closest('.board-column')?.classList.remove('drop-target');
+    });
+    board.addEventListener('drop', (e) => {
+        const column = e.target.closest('.board-column');
+        if (!column) return;
+        e.preventDefault();
+        column.classList.remove('drop-target');
+        const id = e.dataTransfer.getData('text/plain');
+        if (id) moveTask(id, column.dataset.status);
+    });
+}
+
+function setView(view) {
+    state.view = view;
+    try {
+        localStorage.setItem('view', view);
+    } catch (_) { /* ignore */ }
+    document.querySelectorAll('[data-view]').forEach(b => {
+        b.setAttribute('aria-pressed', String(b.dataset.view === view));
+    });
+    renderTasks();
+}
+
+function bindViewSwitch() {
+    document.querySelector('.view-switch').addEventListener('click', (e) => {
+        const viewBtn = e.target.closest('[data-view]');
+        if (viewBtn) { setView(viewBtn.dataset.view); return; }
+        if (e.target.closest('#selectModeBtn')) { setSelectMode(!state.selectMode); return; }
+        if (e.target.closest('#shortcutsBtn')) showModal('shortcutsModal');
+    });
+
+    $('bulkBar').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-bulk]');
+        if (!btn) return;
+        const action = btn.dataset.bulk;
+        if (action === 'clear') { state.selection.clear(); renderTasks(); return; }
+        bulkApply(action);
+    });
+
+    $('exportCsvBtn').addEventListener('click', downloadCsv);
 }
 
 function bindToolbar() {
@@ -2073,7 +2611,9 @@ function bindActions() {
         if (e.key === 'Escape') {
             if (dropdownOpen()) { closeDropdown(); return; }
             const open = getOpenModal();
-            if (open) hideModal(open.id);
+            if (open) { hideModal(open.id); return; }
+            if (state.selection.size) { state.selection.clear(); renderTasks(); return; }
+            if (state.selectMode) setSelectMode(false);
             return;
         }
         if (e.key === 'Tab') {
@@ -2081,11 +2621,40 @@ function bindActions() {
             if (open) trapFocus(e, open);
             return;
         }
-        // "/" focuses search, the convention in every list-shaped app — but not
-        // while the caret is already in a field, where it is just a character.
-        if (e.key === '/' && !getOpenModal() && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) {
-            e.preventDefault();
-            $('searchInput').focus();
+        // Single-key shortcuts, but never while the caret is in a field, where
+        // they are just characters someone is trying to type.
+        const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+        if (getOpenModal() || typing || e.ctrlKey || e.metaKey || e.altKey) return;
+
+        switch (e.key) {
+            case '/':
+                e.preventDefault();
+                $('searchInput').focus();
+                break;
+            case 'n':
+                e.preventDefault();
+                $('taskInput').focus();
+                break;
+            case 'b':
+                setView(state.view === 'board' ? 'list' : 'board');
+                break;
+            case 's':
+                setSelectMode(!state.selectMode);
+                break;
+            case 'a':
+                e.preventDefault();
+                selectAllVisible();
+                break;
+            case 'e': {
+                const first = document.querySelector('[data-act="edit"]');
+                if (first) { state.editingId = first.dataset.id; renderTasks(); }
+                break;
+            }
+            case '?':
+                showModal('shortcutsModal');
+                break;
+            default:
+                break;
         }
     });
 
@@ -2119,6 +2688,8 @@ function bindActions() {
     bindPanelLists();
     bindToolbar();
     bindComposer();
+    bindViewSwitch();
+    bindBoard();
 }
 
 // ============ INIT ============
@@ -2126,11 +2697,31 @@ function bindActions() {
 async function refreshAll() {
     await loadWorkspaces();
     await loadTasks();
+    await loadMembersForLabels();
+}
+
+/// Members are needed to turn an assignee id into a name. The endpoint is
+/// admin-only, so a plain member simply gets no names — which is why the
+/// failure is silent rather than a toast about a permission they cannot have.
+async function loadMembersForLabels() {
+    if (!isLoggedIn() || !canAdmin()) {
+        state.members = [];
+        return;
+    }
+    const ws = currentWorkspace();
+    if (!ws) return;
+    const { ok, data } = await api(`/api/workspaces/${encodeURIComponent(ws.id)}/members`, { quiet: true });
+    state.members = ok && Array.isArray(data) ? data : [];
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
     initTheme();
+    try {
+        const savedView = localStorage.getItem('view');
+        if (savedView === 'board' || savedView === 'list') state.view = savedView;
+    } catch (_) { /* ignore */ }
     bindActions();
+    setView(state.view);
     await initWasm();
     await checkAuth();
     await refreshAll();

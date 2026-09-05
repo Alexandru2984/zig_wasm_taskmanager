@@ -1707,3 +1707,265 @@ select {
         transform: none;
     }
 }
+
+/* ===== View switch and bulk actions ===== */
+.view-switch {
+    display: flex;
+    gap: var(--s2);
+    margin-bottom: var(--s3);
+    flex-wrap: wrap;
+}
+
+.bulk-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    margin-bottom: var(--s3);
+    padding: var(--s2) var(--s3);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    flex-wrap: wrap;
+}
+
+.bulk-count {
+    margin-right: auto;
+    font-size: 0.875rem;
+    color: var(--text);
+}
+
+/* The selection checkbox only exists in selection mode, so the row keeps its
+ * ordinary shape the rest of the time. */
+.task-select {
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    margin-top: 3px;
+    border: 2px solid var(--border-strong);
+    border-radius: var(--radius-xs);
+    cursor: pointer;
+    flex-shrink: 0;
+    position: relative;
+}
+
+.task-select:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.task-select:checked::after {
+    content: "";
+    position: absolute;
+    left: 5px;
+    top: 1px;
+    width: 5px;
+    height: 10px;
+    border: solid var(--on-accent);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
+.task-item.selected {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+/* ===== Board =====
+ * Columns scroll sideways on a phone rather than shrinking to unusable
+ * widths; from 60rem up all three fit and share the row.
+ */
+.board {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(15rem, 1fr);
+    gap: var(--s3);
+    overflow-x: auto;
+    padding-bottom: var(--s2);
+    scroll-snap-type: x mandatory;
+}
+
+.board-column {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: var(--s3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    scroll-snap-align: start;
+}
+
+.board-column-head {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    margin-bottom: var(--s3);
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+}
+
+.board-column-count {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+}
+
+.board-cards {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    list-style: none;
+    min-height: 3rem;
+}
+
+.board-card {
+    padding: var(--s3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    cursor: grab;
+}
+
+.board-card:active {
+    cursor: grabbing;
+}
+
+.board-card.dragging {
+    opacity: 0.5;
+}
+
+.board-column.drop-target {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.board-card-title {
+    font-weight: 500;
+    word-break: break-word;
+}
+
+.board-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s1);
+    margin-top: var(--s2);
+    font-size: 0.75rem;
+}
+
+.board-move {
+    display: flex;
+    gap: var(--s1);
+    margin-top: var(--s2);
+}
+
+.board-move button {
+    flex: 1;
+    min-height: 32px;
+    padding: 0 var(--s2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    background: var(--surface-2);
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+}
+
+.board-move button:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.board-move button:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+/* ===== Subtasks ===== */
+.subtask-list {
+    list-style: none;
+    margin-top: var(--s2);
+    padding-left: var(--s4);
+    border-left: 2px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+}
+
+.subtask {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    font-size: 0.875rem;
+}
+
+.subtask.done .subtask-title {
+    text-decoration: line-through;
+    color: var(--text-faint);
+}
+
+.subtask-title {
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+}
+
+.subtask-add {
+    display: flex;
+    gap: var(--s2);
+    margin-top: var(--s2);
+    padding-left: var(--s4);
+}
+
+.subtask-add input {
+    flex: 1;
+    min-height: 36px;
+    font-size: 0.875rem;
+}
+
+.subtask-progress {
+    font-size: 0.75rem;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ===== Assignee ===== */
+.task-assignee {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px var(--s2);
+    border-radius: var(--radius-pill);
+    background: var(--info-soft);
+    color: var(--info);
+    font-weight: 600;
+}
+
+/* ===== Keyboard shortcuts ===== */
+.shortcut-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+}
+
+.shortcut-list li {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+}
+
+kbd {
+    display: inline-grid;
+    place-items: center;
+    min-width: 2rem;
+    padding: var(--s1) var(--s2);
+    border: 1px solid var(--border-strong);
+    border-bottom-width: 2px;
+    border-radius: var(--radius-xs);
+    background: var(--surface-2);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+}
