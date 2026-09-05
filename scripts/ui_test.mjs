@@ -205,6 +205,76 @@ try {
     ).then(() => true).catch(() => false);
     record('checkbox hit area extends past its 22px face', toggled);
 
+    // ---------- Board, subtasks, selection, shortcuts ----------
+
+    // The checks above finish by completing every task, which moves them to the
+    // completed section — so start this part with one that is definitely open.
+    await m.fill('#taskInput', 'Parent task');
+    await m.click('#taskForm button[type=submit]');
+    await m.waitForFunction(
+        () => document.querySelectorAll('#taskList > .task-item').length >= 1,
+        null, { timeout: 20000 });
+
+    // A subtask is a task with a parent, so it must appear under its parent
+    // and nowhere else. Showing it twice, or as a peer, is the failure mode
+    // this guards.
+    const topLevelBefore = await m.locator('#taskList > .task-item').count();
+    await m.click('#taskList .task-item >> nth=0 >> [data-act="add-subtask"]');
+    await m.waitForSelector('.subtask-add input', { timeout: 10000 });
+    await m.fill('.subtask-add input', 'A subtask');
+    await m.click('.subtask-add button[type=submit]');
+    await m.waitForSelector('.subtask', { timeout: 20000 });
+    record('a subtask renders under its parent', (await m.locator('.subtask').count()) === 1);
+    record('a subtask is not also a top-level row',
+        (await m.locator('#taskList > .task-item').count()) === topLevelBefore);
+    record('the parent shows subtask progress',
+        (await m.locator('.task-badge', { hasText: '0/1' }).count()) >= 1);
+
+    await m.click('[data-view="board"]');
+    await m.waitForSelector('#board:not(.hidden)', { timeout: 10000 });
+    record('the board has three columns', (await m.locator('.board-column').count()) === 3);
+
+    // Moving a card to Done must also complete the task. If the column and
+    // the completed flag disagree, the counters and the list stop matching
+    // the board.
+    const firstTodo = m.locator('.board-column[data-status="todo"] .board-card').first();
+    if (await firstTodo.count()) {
+        await firstTodo.locator('.board-move button').nth(1).click();
+        await m.waitForFunction(
+            () => document.querySelectorAll('.board-column[data-status="doing"] .board-card').length >= 1,
+            null, { timeout: 20000 });
+        record('a card moves between columns', true);
+    } else {
+        record('a card moves between columns', false, 'no card in To do');
+    }
+    await m.click('[data-view="list"]');
+    await m.waitForSelector('#taskList:not(.hidden)', { timeout: 10000 });
+
+    await m.click('#selectModeBtn');
+    await m.waitForSelector('.task-select', { timeout: 10000 });
+    record('selection mode shows its own checkboxes',
+        (await m.locator('.task-select').count()) >= 1);
+    await m.click('.task-select >> nth=0');
+    await m.waitForSelector('#bulkBar:not(.hidden)', { timeout: 10000 });
+    record('selecting a task reveals the bulk bar', true);
+    await m.click('[data-bulk="clear"]');
+    await m.click('#selectModeBtn');
+
+    // Shortcuts must not fire while the caret is in a field, or they become
+    // characters nobody can type.
+    await m.click('#searchInput');
+    await m.keyboard.press('b');
+    record('shortcuts are ignored while typing',
+        (await m.locator('#board.hidden').count()) === 1 &&
+        (await m.inputValue('#searchInput')) === 'b');
+    await m.fill('#searchInput', '');
+    await m.click('body');
+    await m.keyboard.press('b');
+    await m.waitForTimeout(300);
+    record('"b" switches to the board', (await m.locator('#board:not(.hidden)').count()) === 1);
+    await m.keyboard.press('b');
+    await m.waitForTimeout(300);
+
     record('no uncaught page errors', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 
     // ---------- Desktop layout ----------

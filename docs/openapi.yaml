@@ -548,6 +548,28 @@ components:
           items:
             type: string
             maxLength: 32
+        status:
+          type: string
+          enum: [todo, doing, done]
+          description: >-
+            Board column. Kept in step with `completed` on every write, so the
+            two can never disagree.
+        recurrence:
+          type: string
+          enum: [none, daily, weekly, monthly]
+          description: >-
+            When a recurring task is completed the next instance is created,
+            with month arithmetic clamped to the length of the target month.
+        parent_id:
+          type: string
+          nullable: true
+          description: >-
+            Makes this a subtask. Requires write access to the parent, and the
+            parent's deletion removes it.
+        assignee_id:
+          type: string
+          nullable: true
+          description: Must be a member of the task's workspace.
         reminder_sent:
           type: boolean
     UpdateTaskRequest:
@@ -580,6 +602,15 @@ components:
             An empty string clears the due date. Omitting the field leaves it
             unchanged, which is why this is not a nullable date. A value must
             be in the future.
+        status:
+          type: string
+          enum: [todo, doing, done]
+        recurrence:
+          type: string
+          enum: [none, daily, weekly, monthly]
+        assignee_id:
+          type: string
+          description: An empty string clears the assignment.
     ChangeMemberRoleRequest:
       type: object
       required: [user_id, role]

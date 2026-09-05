@@ -30,15 +30,15 @@ email normalisation; account deletion with re-authentication.
 
 ## 3. Product Features
 
-- Add Kanban status columns.
-- Add recurring tasks with a conservative recurrence model.
-- Add CSV export alongside the existing JSON export.
-- Add task assignment within a workspace.
 - Add a service worker so the app opens offline.
+- Add saved filters, so a search someone runs daily is one click.
+- Add per-workspace task templates.
 
 Done: workspace selector and member management UI; invitation accept flow;
 task editing with notes, tags, due dates and priorities; search, filters and
-sorting; session management; JSON export; installable web manifest.
+sorting; session management; JSON and CSV export; installable web manifest;
+Kanban board; subtasks; recurring tasks; task assignment; bulk actions;
+keyboard shortcuts.
 
 ## 4. Demo Readiness
 

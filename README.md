@@ -17,9 +17,16 @@ systemd-sandboxed VPS deployment.
   workspaces, memberships, and tasks.
 - Argon2id password hashing and server-side sessions carried by HttpOnly
   cookies.
-- Full task editing: title, notes, tags, priority and due date, edited inline;
-  plus search across titles/notes/tags, filters (active, done, overdue, high
-  priority) and five sort orders.
+- Full task editing: title, notes, tags, priority, due date, assignee and
+  recurrence, edited inline; plus search across titles/notes/tags, filters
+  (active, done, overdue, high priority) and five sort orders.
+- A Kanban board alongside the list, with drag-and-drop on pointer devices and
+  arrow buttons everywhere else.
+- Subtasks, which are ordinary tasks with a parent, so they inherit editing,
+  tags, due dates and the workspace permission model.
+- Recurring tasks (daily, weekly, monthly); completing one creates the next.
+- Selection mode with bulk complete, reopen and delete.
+- Keyboard shortcuts, and a CSV export that runs in the browser.
 - Multi-workspace task tenancy with owner/admin/member/viewer roles, member
   listing, and email invite acceptance.
 - Email verification and password reset through SMTP, dispatched on a background
@@ -141,8 +148,9 @@ Main endpoint groups:
 - `/api/profile*`: profile and password changes
 - `/api/workspaces`: workspace listing and creation; members (list, change
   role, remove) and invitations (create, list, revoke, accept)
-- `/api/tasks*`: task CRUD with priority, due date, notes and tags; `PUT`
-  applies a partial update, or toggles completion when the body is empty
+- `/api/tasks*`: task CRUD with priority, due date, notes, tags, board status,
+  recurrence, assignee and parent; `PUT` applies a partial update, or toggles
+  completion when the body is empty
 - `/api/sessions*`: list and revoke sessions
 - `/api/export`: everything the account holds, as one JSON document
 - `/api/account`: delete the account, re-authenticating first
