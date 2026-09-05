@@ -170,8 +170,16 @@ try {
     await m.click('#taskList .task-checkbox >> nth=0');
     await m.waitForSelector('#completedSection:not(.hidden)', { timeout: 10000 });
     record('completed section appears', true);
-    record('progress bar has width',
-        (await m.evaluate(() => document.getElementById('progressBar').getBoundingClientRect().width)) > 0);
+
+    // Waited for, not sampled. The bar carries `transition: width 300ms`, so a
+    // single measurement taken right after the render races the animation and
+    // reads back roughly zero — reliably on a fast machine, intermittently on a
+    // loaded CI runner, which is the worst of both.
+    const barGrew = await m.waitForFunction(
+        () => document.getElementById('progressBar').getBoundingClientRect().width > 0,
+        null, { timeout: 10000 },
+    ).then(() => true).catch(() => false);
+    record('progress bar has width', barGrew);
 
     // Tap targets. The checkbox is deliberately 22px of paint over a 44px hit
     // area, so it is measured by tapping outside the visible box instead.
@@ -189,9 +197,13 @@ try {
     const box = await m.locator('.task-checkbox').first().boundingBox();
     const before = await m.locator('.task-item.completed').count();
     await m.mouse.click(box.x + box.width / 2 - 16, box.y + box.height / 2);
-    await m.waitForTimeout(1500);
-    record('checkbox hit area extends past its 22px face',
-        (await m.locator('.task-item.completed').count()) !== before);
+    // Also waited for rather than slept on: the toggle is a round trip to the
+    // API, whose latency is not something a fixed delay should be guessing at.
+    const toggled = await m.waitForFunction(
+        (n) => document.querySelectorAll('.task-item.completed').length !== n,
+        before, { timeout: 15000 },
+    ).then(() => true).catch(() => false);
+    record('checkbox hit area extends past its 22px face', toggled);
 
     record('no uncaught page errors', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 
