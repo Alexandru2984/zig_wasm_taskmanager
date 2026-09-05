@@ -532,12 +532,32 @@ function wasmReadStr(ptr, len) {
 const priorityToCode = (p) => (p === 'high' ? 1 : p === 'low' ? 2 : 0);
 const priorityFromCode = (c) => (c === 1 ? 'high' : c === 2 ? 'low' : 'normal');
 
-function wasmAddTask(title, dueDate, priority) {
+function wasmAddTask(title, dueDate, priority, notes = '', tags = []) {
     const t = wasmStr(title);
     const d = wasmStr(dueDate || '');
-    const id = wasm.addTask(t.ptr, t.len, d.ptr, d.len, priorityToCode(priority));
+    const n = wasmStr(notes || '');
+    // Tags cross the boundary as one comma-separated string: the interface is
+    // raw pointers and lengths, so a list would mean a call per element.
+    const g = wasmStr((tags || []).join(','));
+    const id = wasm.addTask(
+        t.ptr, t.len, d.ptr, d.len, priorityToCode(priority),
+        n.ptr, n.len, g.ptr, g.len,
+    );
     wasm.freeString();
     return id;
+}
+
+function wasmUpdateTask(id, { title, dueDate, priority, notes, tags }) {
+    const t = wasmStr(title);
+    const d = wasmStr(dueDate || '');
+    const n = wasmStr(notes || '');
+    const g = wasmStr((tags || []).join(','));
+    const ok = wasm.updateTask(
+        Number(id), t.ptr, t.len, d.ptr, d.len, priorityToCode(priority),
+        n.ptr, n.len, g.ptr, g.len,
+    );
+    wasm.freeString();
+    return ok;
 }
 
 function wasmGetTasks() {
@@ -546,14 +566,15 @@ function wasmGetTasks() {
     for (let i = 0; i < count; i++) {
         const id = wasm.getTaskId(i);
         if (!id) continue;
+        const tags = wasmReadStr(wasm.getTaskTags(id), wasm.getTaskTagsLen(id));
         out.push({
             id,
             title: wasmReadStr(wasm.getTaskTitle(id), wasm.getTaskTitleLen(id)),
             completed: wasm.getTaskCompleted(id),
             due_date: wasmReadStr(wasm.getTaskDue(id), wasm.getTaskDueLen(id)) || null,
             priority: priorityFromCode(wasm.getTaskPriority(id)),
-            notes: '',
-            tags: [],
+            notes: wasmReadStr(wasm.getTaskNotes(id), wasm.getTaskNotesLen(id)),
+            tags: tags ? tags.split(',').filter(Boolean) : [],
             created_at: null,
         });
     }
@@ -572,7 +593,8 @@ function readSnapshot() {
 function writeSnapshot(tasks) {
     try {
         localStorage.setItem('localTasks', JSON.stringify(tasks.map(t => ({
-            title: t.title, completed: t.completed, due_date: t.due_date, priority: t.priority,
+            title: t.title, completed: t.completed, due_date: t.due_date,
+            priority: t.priority, notes: t.notes, tags: t.tags,
         }))));
     } catch (_) { /* quota or private mode */ }
 }
@@ -586,7 +608,7 @@ function hydrateAnon() {
     suppressRender = true;
     wasm.clearAll();
     for (const t of readSnapshot()) {
-        const id = wasmAddTask(t.title, t.due_date, t.priority);
+        const id = wasmAddTask(t.title, t.due_date, t.priority, t.notes, t.tags);
         if (id && t.completed) wasm.toggleTask(id);
     }
     suppressRender = false;
@@ -599,15 +621,35 @@ function getAnonTasks() {
     }));
 }
 
-function anonAdd(title, dueDate, priority) {
+function anonAdd(title, dueDate, priority, notes = '', tags = []) {
     suppressRender = true;
     if (wasmReady()) {
-        wasmAddTask(title, dueDate, priority);
+        wasmAddTask(title, dueDate, priority, notes, tags);
         persistAnon();
     } else {
         const snap = readSnapshot();
-        snap.push({ title, completed: false, due_date: dueDate, priority });
+        snap.push({ title, completed: false, due_date: dueDate, priority, notes, tags });
         writeSnapshot(snap);
+    }
+    suppressRender = false;
+}
+
+function anonUpdate(id, patch) {
+    suppressRender = true;
+    if (wasmReady()) {
+        wasmUpdateTask(id, patch);
+        persistAnon();
+    } else {
+        const snap = readSnapshot();
+        const item = snap[Number(id)];
+        if (item) {
+            item.title = patch.title;
+            item.due_date = patch.dueDate || null;
+            item.priority = patch.priority;
+            item.notes = patch.notes;
+            item.tags = patch.tags;
+            writeSnapshot(snap);
+        }
     }
     suppressRender = false;
 }
@@ -649,7 +691,7 @@ async function initWasm() {
                 js_renderTasks: () => { if (!suppressRender) loadTasks(); },
             },
         };
-        const response = await fetch('/app.wasm?v=b5d27dcf');
+        const response = await fetch('/app.wasm?v=f01f59ea');
         if (!response.ok) throw new Error('WASM fetch failed');
         const bytes = await response.arrayBuffer();
         const result = await WebAssembly.instantiate(bytes, importObject);
@@ -896,7 +938,13 @@ function iconButton(label, symbol, className, dataset) {
 // SECURITY: every task field below is written with textContent or setAttribute.
 // A title of `<img src=x onerror=...>` is rendered as those literal characters.
 function renderTaskItem(task) {
-    if (state.editingId === task.id) return renderTaskEditor(task);
+    // Compared as strings. Server ids are strings ("tasks:abc"), but the WASM
+    // store hands out numbers, and `dataset.id` is always a string — so a
+    // strict comparison never matched for a signed-out task and the edit
+    // button silently did nothing.
+    if (state.editingId !== null && String(state.editingId) === String(task.id)) {
+        return renderTaskEditor(task);
+    }
 
     const li = document.createElement('li');
     li.className = 'task-item';
@@ -1185,9 +1233,12 @@ function renderTagChips(tasks) {
 
 // ---- Task mutations ----
 
-async function addTask(title, dueDate, priority, tags) {
+async function addTask(title, dueDate, priority, tags, notes = '') {
     if (!isLoggedIn()) {
-        anonAdd(title, dueDate, priority);
+        // Tags used to be dropped here: the composer collected them and the
+        // signed-out path simply did not carry them, so they vanished without
+        // a word. The WASM store holds them now.
+        anonAdd(title, dueDate, priority, notes, tags);
         await loadTasks();
         return;
     }
@@ -1275,6 +1326,23 @@ async function saveTaskEdit(form) {
     const title = field('title').value.trim();
     if (!title) {
         toast('A task needs a title', 'error');
+        return;
+    }
+
+    // Signed out there is no API to call. Editing used to send the change to
+    // the server anyway, get a 401, and report the session as expired — for a
+    // user who had never signed in.
+    if (!isLoggedIn()) {
+        anonUpdate(id, {
+            title,
+            dueDate: field('due_date').value || null,
+            priority: field('priority').value,
+            notes: field('notes').value,
+            tags: parseTags(field('tags').value),
+        });
+        state.editingId = null;
+        await loadTasks();
+        toast('Task updated', 'success');
         return;
     }
 

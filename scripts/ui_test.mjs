@@ -76,6 +76,41 @@ try {
     record('WebAssembly module instantiated',
         await m.evaluate(() => typeof WebAssembly === 'object'));
 
+    // The signed-out store has to hold the whole task, not part of it. Tags
+    // used to be collected by the composer and silently dropped on this path,
+    // and editing sent the change to an API that answered 401 for a user who
+    // had never signed in.
+    await m.click('#composerToggle');
+    await m.fill('#taskInput', 'Offline task with metadata');
+    await m.selectOption('#taskPriority', 'high');
+    await m.fill('#taskTags', 'work, urgent');
+    await m.click('#taskForm button[type=submit]');
+    await m.waitForFunction(
+        () => document.querySelectorAll('.task-item').length === 2, null, { timeout: 10000 });
+    record('signed-out tags are kept', (await m.locator('.task-tag').count()) === 2);
+    record('signed-out priority is kept', (await m.locator('.task-badge-high').count()) === 1);
+
+    await m.click('.task-item >> nth=0 >> [data-act="edit"]');
+    await m.waitForSelector('.task-edit', { timeout: 10000 });
+    await m.fill('.task-edit [data-field="title"]', 'Edited while signed out');
+    await m.click('.task-edit button[type=submit]');
+    await m.waitForSelector('.task-edit', { state: 'detached', timeout: 10000 });
+    record('signed-out edit saves',
+        (await m.locator('.task-title').allTextContents()).includes('Edited while signed out'));
+
+    // The WASM store is mirrored to localStorage, so all of it must survive.
+    await m.reload({ waitUntil: 'networkidle' });
+    await m.waitForSelector('.task-item', { timeout: 10000 });
+    record('signed-out tasks survive a reload',
+        (await m.locator('.task-item').count()) === 2 &&
+        (await m.locator('.task-tag').count()) === 2);
+    record('the edit survives a reload',
+        (await m.locator('.task-title').allTextContents()).includes('Edited while signed out'));
+
+    // Start the signed-in half from a clean slate.
+    await m.evaluate(() => localStorage.removeItem('localTasks'));
+    await m.reload({ waitUntil: 'networkidle' });
+
     // ---------- Signed in ----------
     const email = `uitest${Date.now()}@example.com`;
     await m.click('[data-target="signupModal"]');
