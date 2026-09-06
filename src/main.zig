@@ -96,6 +96,10 @@ pub fn main() !void {
     const port_str = config.get("PORT") orelse "9000";
     const port: u16 = std.fmt.parseInt(u16, port_str, 10) catch 9000;
     const interface = config.get("INTERFACE") orelse "127.0.0.1";
+    // Config strings are Zig slices, not necessarily zero-terminated. The
+    // C listener needs its own sentinel for the lifetime of the listener.
+    const interface_z = try allocator.dupeZ(u8, interface);
+    defer allocator.free(interface_z);
 
     // SECURITY: warn if CORS_ORIGIN is missing so operators don't accidentally
     // deploy without cross-origin protection (and because our frontend needs
@@ -111,7 +115,7 @@ pub fn main() !void {
 
     var listener = zap.HttpListener.init(.{
         .port = port,
-        .interface = interface.ptr, // Convert slice to C pointer
+        .interface = interface_z.ptr,
         .on_request = handleRequest,
         .log = true,
     });

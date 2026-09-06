@@ -74,6 +74,7 @@ say "Building"
 if command -v zig >/dev/null 2>&1; then ZIG=zig; else ZIG="$HOME/.local/zig/zig"; fi
 # Build artifacts and static files stay outside the checkout nginx serves.
 cp -a "$ROOT/public" "$WORKDIR/public"
+cp "$ROOT/scripts/fixtures/startup.env" "$WORKDIR/.env"
 "$ZIG" build -j4 -Doptimize="${OPTIMIZE:-Debug}" --prefix "$WORKDIR/build"
 
 say "Starting the application on port $APP_PORT"
@@ -107,7 +108,7 @@ fi
     LD_LIBRARY_PATH="$FACIL_DIR" SURREAL_URL="http://127.0.0.1:$DB_PORT" \
     SURREAL_NS=taskmanager_it SURREAL_DB=main SURREAL_USER=itapp SURREAL_PASS=integration-only-app \
     SURREAL_AUTH_LEVEL=database DB_AUTO_MIGRATE=0 \
-    PORT="$APP_PORT" INTERFACE=127.0.0.1 CORS_ORIGIN="http://127.0.0.1:$APP_PORT" \
+    PORT="$APP_PORT" CORS_ORIGIN="http://127.0.0.1:$APP_PORT" \
     APP_BASE_URL="http://127.0.0.1:$APP_PORT" COOKIE_INSECURE=1 LOG_LEVEL=info \
     SERVER_THREADS=4 "$WORKDIR/build/bin/taskmanager" > "$WORKDIR/app.log" 2>&1 ) &
 APP_PID=$!

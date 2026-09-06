@@ -69,14 +69,15 @@ fn freeMapDeep(allocator: std.mem.Allocator, map: *StringHashMap) void {
     map.deinit();
 }
 
-// Put key/value (already owned) into map, freeing old entry if replaced.
-// NOTE: fetchPut returns the replaced KV, but we must free both old key+value
-// because we allocate a new key every time we parse.
+// StringHashMap retains the original key when replacing a value. Free the
+// newly allocated duplicate key, not the key still referenced by the map.
 fn putOwned(map: *StringHashMap, allocator: std.mem.Allocator, owned_key: []u8, owned_value: []u8) !void {
-    if (try map.fetchPut(owned_key, owned_value)) |old| {
-        allocator.free(old.key);
-        allocator.free(old.value);
+    const entry = try map.getOrPut(owned_key);
+    if (entry.found_existing) {
+        allocator.free(owned_key);
+        allocator.free(entry.value_ptr.*);
     }
+    entry.value_ptr.* = owned_value;
 }
 
 // ---------- Parser ----------
@@ -107,7 +108,9 @@ pub fn parseEnvContent(allocator: std.mem.Allocator, content: []const u8) !Strin
         const value_clean = stripQuotes(value_part);
 
         const owned_key = try allocator.dupe(u8, key_part);
+        errdefer allocator.free(owned_key);
         const owned_value = try allocator.dupe(u8, value_clean);
+        errdefer allocator.free(owned_value);
 
         try putOwned(&map, allocator, owned_key, owned_value);
     }
@@ -217,6 +220,17 @@ pub fn getOrDefault(key: []const u8, default_value: []const u8) []const u8 {
 }
 
 // ---------- Tests ----------
+
+test "replacement keeps map keys alive and frees superseded allocations" {
+    const allocator = std.testing.allocator;
+    var map = try parseEnvContent(allocator, "PORT=9000\nPORT=9200\nSERVER_THREADS=2\nSERVER_THREADS=4\n");
+    defer freeMapDeep(allocator, &map);
+    try std.testing.expectEqualStrings("9200", map.get("PORT").?);
+    try std.testing.expectEqualStrings("4", map.get("SERVER_THREADS").?);
+    try putOwned(&map, allocator, try allocator.dupe(u8, "PORT"), try allocator.dupe(u8, "9300"));
+    try std.testing.expectEqualStrings("9300", map.get("PORT").?);
+    try std.testing.expectEqual(@as(u32, 2), map.count());
+}
 
 test "parseEnvContent basic" {
     const allocator = std.testing.allocator;
