@@ -27,7 +27,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/favicon.svg">
     <link rel="manifest" href="/site.webmanifest">
-    <link rel="stylesheet" href="/style.css?v=1eeb6e29">
+    <link rel="stylesheet" href="/style.css?v=852fa915">
 
     <!-- Structured data. The CSP forbids inline <script>, but this is
          application/ld+json, which is data rather than script: the parser
@@ -106,7 +106,7 @@
     <div class="app-container">
         <header class="hero">
             <h1 class="hero-title">Organize your day</h1>
-            <p class="hero-subtitle" id="heroSubtitle">Zig backend · WebAssembly front end</p>
+            <p class="hero-subtitle" id="heroSubtitle">A little clarity. A little progress. Every day.</p>
         </header>
 
         <main class="main card" id="main">
@@ -181,6 +181,12 @@
                         <button type="button" class="chip" data-filter="active" aria-pressed="false">
                             Active <span class="chip-count" id="countActive">0</span>
                         </button>
+                        <button type="button" class="chip" data-filter="today" aria-pressed="false">
+                            Today <span class="chip-count" id="countToday">0</span>
+                        </button>
+                        <button type="button" class="chip" data-filter="upcoming" aria-pressed="false">
+                            Next 7 days <span class="chip-count" id="countUpcoming">0</span>
+                        </button>
                         <button type="button" class="chip" data-filter="completed" aria-pressed="false">
                             Done <span class="chip-count" id="countDone">0</span>
                         </button>
@@ -201,6 +207,20 @@
                     </select>
                 </div>
                 <div class="filter-chips hidden" id="tagChips" role="group" aria-label="Filter by tag"></div>
+                <details class="saved-view-panel">
+                <summary>Saved views <span>Keep your everyday filters handy</span></summary>
+                <div class="saved-view-controls">
+                    <label class="sr-only" for="savedViews">Saved views</label>
+                    <select id="savedViews"><option value="">Saved views</option></select>
+                    <button type="button" class="btn btn-ghost btn-sm" id="deleteViewBtn" disabled>Delete view</button>
+                    <form id="saveViewForm" class="save-view-form">
+                        <label class="sr-only" for="savedViewName">Name this view</label>
+                        <input id="savedViewName" placeholder="Name this view" maxlength="48" required autocomplete="off">
+                        <button type="submit" class="btn btn-secondary btn-sm">Save view</button>
+                    </form>
+                </div>
+                <p class="saved-view-hint">Save a search, filter and sort for this workspace on this device.</p>
+                </details>
             </div>
 
             <div class="stats">
@@ -217,6 +237,10 @@
                 <div class="skeleton skeleton-row"></div>
             </div>
 
+            <div id="taskLoadError" class="task-load-error hidden" role="status">
+                <span>Tasks could not be refreshed. Your last loaded tasks are still shown.</span>
+                <button type="button" class="btn btn-secondary btn-sm" id="retryTasksBtn">Try again</button>
+            </div>
             <ul class="task-list" id="taskList" aria-label="Tasks"></ul>
 
             <div class="board hidden" id="board" aria-label="Task board"></div>
@@ -537,6 +561,6 @@
         </div>
     </div>
 
-    <script src="/app.js?v=3134258d"></script>
+    <script src="/app.js?v=87fb9ba7"></script>
 </body>
 </html>

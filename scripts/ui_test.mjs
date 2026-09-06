@@ -7,7 +7,7 @@
  * phone, and that controls are large enough to tap.
  *
  *   node scripts/ui_test.mjs                      # against http://127.0.0.1:9200
- *   BASE_URL=https://task.micutu.com node scripts/ui_test.mjs
+ *   RUN_UI=1 scripts/integration_test.sh
  *
  * Needs playwright-core and a Chromium build. In CI, `npx playwright install
  * --with-deps chromium` provides both; locally, set CHROME_PATH.
@@ -17,6 +17,10 @@ import fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:9200';
+const target = new URL(BASE);
+if (target.hostname !== '127.0.0.1' || target.protocol !== 'http:' || target.port === '9000') {
+    throw new Error('Browser mutation tests require an isolated loopback test server');
+}
 
 // Generated per run. A literal test password reads as a leaked credential to a
 // secret scanner, and a fresh one cannot drift into the common-password
@@ -56,6 +60,7 @@ try {
     // ---------- Signed out, on a phone ----------
     const phone = await browser.newContext({
         viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true,
+        timezoneId: 'Europe/Bucharest',
     });
     const m = await phone.newPage();
     const pageErrors = [];
@@ -74,7 +79,7 @@ try {
     await m.waitForSelector('.task-item', { timeout: 10000 });
     record('anonymous task renders', (await m.locator('.task-item').count()) >= 1);
     record('WebAssembly module instantiated',
-        await m.evaluate(() => typeof WebAssembly === 'object'));
+        await m.evaluate(() => wasmReady() && wasmMemory instanceof WebAssembly.Memory));
 
     // The signed-out store has to hold the whole task, not part of it. Tags
     // used to be collected by the composer and silently dropped on this path,
@@ -107,6 +112,23 @@ try {
     record('the edit survives a reload',
         (await m.locator('.task-title').allTextContents()).includes('Edited while signed out'));
 
+    await m.click('[data-filter="high"]');
+    await m.click('.saved-view-panel summary');
+    await m.fill('#savedViewName', 'Focus <work>');
+    await m.click('#saveViewForm button');
+    const savedId = await m.inputValue('#savedViews');
+    record('named view saves safely as text',
+        await m.locator('#savedViews option:checked').textContent() === 'Focus <work>');
+    await m.click('[data-filter="all"]');
+    await m.reload({ waitUntil: 'networkidle' });
+    await m.click('.saved-view-panel summary');
+    await m.selectOption('#savedViews', savedId);
+    record('saved filter survives reload and restores its selection',
+        await m.locator('[data-filter="high"]').getAttribute('aria-pressed') === 'true' &&
+        await m.locator('.task-item').count() === 1);
+    await m.click('#deleteViewBtn');
+    record('saved view can be deleted', await m.locator('#savedViews option').count() === 1);
+
     // Start the signed-in half from a clean slate.
     await m.evaluate(() => localStorage.removeItem('localTasks'));
     await m.reload({ waitUntil: 'networkidle' });
@@ -122,6 +144,7 @@ try {
     // Argon2id makes signup take a couple of seconds; wait for the outcome.
     await m.waitForSelector('#verifyModal:not([hidden])', { timeout: 30000 });
     record('signup signs the user in', (await m.locator('#userMenu:not(.hidden)').count()) === 1);
+    record('guest views are not shown in an account', await m.locator('#savedViews option').count() === 1);
     record('an apostrophe in a name is accepted',
         (await m.locator('#userName').textContent() || '').includes("O'Brien"));
     await m.click('#verifyModal .modal-close');
@@ -271,9 +294,86 @@ try {
     await m.click('body');
     await m.keyboard.press('b');
     await m.waitForTimeout(300);
+
     record('"b" switches to the board', (await m.locator('#board:not(.hidden)').count()) === 1);
-    await m.keyboard.press('b');
-    await m.waitForTimeout(300);
+    await m.click('[data-view="list"]');
+
+    // Local wall-clock dates must travel to the API as UTC, not silently shift
+    // by the visitor's timezone offset.
+    const dates = await m.evaluate(() => {
+        const date = new Date(); date.setDate(date.getDate() + 2); date.setHours(12, 0, 0, 0);
+        return { local: new Date(date - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16),
+            utc: date.toISOString().replace(/\.\d{3}Z$/, 'Z') };
+    });
+    if (await m.locator('#composerDetails').isHidden()) await m.click('#composerToggle');
+    await m.fill('#taskInput', 'A timezone-aware deadline');
+    await m.fill('#taskDueDate', dates.local);
+    await m.click('#taskForm button[type=submit]');
+    await m.waitForFunction(() => state.tasks.some(t => t.title === 'A timezone-aware deadline'));
+    record('due date reaches the API in UTC', await m.evaluate(utc =>
+        state.tasks.find(t => t.title === 'A timezone-aware deadline').due_date === utc, dates.utc));
+    await m.click('[data-filter="upcoming"]');
+    record('Next 7 days shows the future deadline', await m.locator('#taskList > .task-item').count() === 1);
+    await m.click('[data-filter="today"]');
+    record('Today excludes a later deadline', await m.locator('#taskList > .task-item').count() === 0);
+    await m.click('[data-filter="all"]');
+
+    const countBeforeError = await m.evaluate(() => state.tasks.length);
+    await m.route('**/api/tasks', route => route.request().method() === 'GET'
+        ? route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"Temporarily unavailable"}' })
+        : route.continue());
+    await m.evaluate(() => loadTasks());
+    record('a refresh error preserves visible tasks and offers retry',
+        await m.evaluate(n => state.tasks.length === n, countBeforeError) && await m.locator('#taskLoadError').isVisible());
+    await m.unroute('**/api/tasks');
+    await m.click('#retryTasksBtn');
+    await m.waitForSelector('#taskLoadError', { state: 'hidden' });
+
+    for (const width of [320, 390, 768, 1440]) {
+        await m.setViewportSize({ width, height: 900 });
+        for (const theme of ['light', 'dark']) {
+            await m.evaluate(theme => applyTheme(theme), theme);
+            for (const view of ['list', 'board']) {
+                await m.click(`[data-view="${view}"]`);
+                record(`no page overflow: ${width}px ${theme} ${view}`,
+                    await m.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+            }
+        }
+    }
+    await m.setViewportSize({ width: 320, height: 900 });
+    await m.click('[data-view="list"]');
+    await m.locator('#taskList [data-act="edit"]').first().click();
+    await m.waitForSelector('.task-edit');
+    record('inline editor fits a 320px phone',
+        await m.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    record('inline editor fields stay readable on a phone',
+        await m.locator('.task-edit [data-field="title"]').evaluate(el => el.getBoundingClientRect().width >= 200));
+    await m.click('[data-act="cancel-edit"]');
+    if (process.env.UI_ARTIFACT_DIR) {
+        fs.mkdirSync(process.env.UI_ARTIFACT_DIR, { recursive: true });
+        await m.evaluate(() => window.scrollTo(0, 0));
+        await m.screenshot({ path: `${process.env.UI_ARTIFACT_DIR}/mobile.png`, fullPage: true });
+        await m.setViewportSize({ width: 1440, height: 1000 });
+        await m.click('[data-view="board"]');
+        await m.evaluate(() => window.scrollTo(0, 0));
+        await m.screenshot({ path: `${process.env.UI_ARTIFACT_DIR}/board.png`, fullPage: true });
+    }
+
+    record('logout discards a late private task response', await m.evaluate(async () => {
+        const privateTasks = [...state.tasks];
+        const originalFetch = window.fetch;
+        let finish;
+        window.fetch = path => path === '/api/tasks'
+            ? new Promise(resolve => { finish = resolve; }) : originalFetch(path);
+        try {
+            const pending = loadTasks();
+            showLoggedOut();
+            finish(new Response(JSON.stringify(privateTasks), { headers: { 'Content-Type': 'application/json' } }));
+            await pending;
+            return state.user === null && state.tasks.length === 0 &&
+                document.querySelectorAll('.task-item').length === 0;
+        } finally { window.fetch = originalFetch; }
+    }));
 
     record('no uncaught page errors', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 

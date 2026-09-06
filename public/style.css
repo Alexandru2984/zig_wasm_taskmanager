@@ -698,6 +698,7 @@ select {
 /* Filter chips scroll sideways on a phone instead of wrapping into three rows
  * and pushing the list below the fold. */
 .filter-chips {
+    min-width: 0;
     display: flex;
     gap: var(--s2);
     overflow-x: auto;
@@ -987,6 +988,7 @@ select {
 
 /* ===== Inline edit ===== */
 .task-edit {
+    grid-column: 1 / -1;
     display: flex;
     flex-direction: column;
     gap: var(--s2);
@@ -1862,7 +1864,7 @@ select {
 
 .board-move button {
     flex: 1;
-    min-height: 32px;
+    min-height: 44px;
     padding: 0 var(--s2);
     border: 1px solid var(--border);
     border-radius: var(--radius-xs);
@@ -1921,7 +1923,8 @@ select {
 
 .subtask-add input {
     flex: 1;
-    min-height: 36px;
+    min-width: 0;
+    min-height: 44px;
     font-size: 0.875rem;
 }
 
@@ -1968,4 +1971,77 @@ kbd {
     background: var(--surface-2);
     font-family: var(--font-mono);
     font-size: 0.8125rem;
+}
+
+/* Saved views stay one quiet row until needed, including on narrow phones. */
+.saved-view-panel {
+    border-top: 1px solid var(--border);
+    padding-top: var(--s1);
+}
+.saved-view-panel summary {
+    min-height: 44px;
+    align-content: center;
+    cursor: pointer;
+    font-size: 0.875rem;
+    color: var(--text);
+}
+.saved-view-panel summary span {
+    display: none;
+    margin-left: var(--s2);
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+}
+.saved-view-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--s2);
+    padding-top: var(--s2);
+}
+.saved-view-controls select, .save-view-form input { min-width: 0; width: 100%; }
+.save-view-form {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: var(--s2);
+}
+.save-view-form input { flex: 1; }
+.save-view-form button { flex-shrink: 0; }
+.saved-view-hint { color: var(--text-muted); font-size: 0.75rem; margin-top: var(--s2); }
+.task-load-error {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s3);
+    padding: var(--s3);
+    margin-bottom: var(--s3);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+.task-load-error span { flex: 1 1 12rem; }
+.board, .main, .task-edit, .toolbar { min-width: 0; }
+.task-edit-row > *, .subtask-add > * { min-width: 0; }
+@media (min-width: 48rem) {
+    .saved-view-panel summary span { display: inline; }
+    .saved-view-controls { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.4fr); }
+    .save-view-form { grid-column: auto; }
+}
+@media (max-width: 24rem) {
+    .app-container { padding-left: var(--s2); padding-right: var(--s2); }
+    .main { padding: var(--s3); }
+    .hero-subtitle { font-size: 0.8125rem; }
+    .view-switch { gap: var(--s1); }
+}
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+    .app-container { padding-bottom: calc(var(--s7) + env(safe-area-inset-bottom)); }
+}
+@media (max-width: 40rem) {
+    .task-item { grid-template-columns: 22px minmax(0, 1fr); column-gap: var(--s3); }
+    .task-item > .task-content { grid-column: 2; grid-row: 1; }
+    .task-item > .task-actions { grid-column: 2; justify-content: flex-end; }
+    .task-item:has(> .task-select) { grid-template-columns: 20px 22px minmax(0, 1fr); }
+    .task-item:has(> .task-select) > .task-content { grid-column: 3; }
+    .task-item:has(> .task-select) > .task-actions { grid-column: 3; }
+    .subtask-list { padding-left: var(--s2); }
+    .task-actions .icon-btn { min-width: 44px; min-height: 44px; }
 }

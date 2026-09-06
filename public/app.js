@@ -35,6 +35,9 @@ const state = {
     /// admin rights, which most members will not have.
     members: [],
     addingSubtaskFor: null,
+    savedViews: [],
+    savedViewContext: null,
+    activeSavedView: '',
 };
 
 const STATUSES = ['todo', 'doing', 'done'];
@@ -121,6 +124,7 @@ function csrfHeaders(headers = {}) {
  * stale username in the corner while every request fails.
  */
 async function api(path, { method = 'GET', body = null, quiet = false } = {}) {
+    const requestUser = state.user;
     const options = { method, credentials: 'include', headers: {} };
 
     if (body !== null) {
@@ -146,7 +150,7 @@ async function api(path, { method = 'GET', body = null, quiet = false } = {}) {
         // 204s and error pages from nginx have no JSON body; that is fine.
     }
 
-    if (response.status === 401 && state.user !== null) {
+    if (response.status === 401 && requestUser !== null && state.user === requestUser) {
         showLoggedOut();
         if (!quiet) toast('Your session expired. Please log in again.', 'error');
     }
@@ -232,7 +236,6 @@ function isLoggedIn() {
 async function checkAuth() {
     const { ok, data } = await api('/api/auth/me', { quiet: true });
     if (ok && data) {
-        state.user = data;
         showLoggedIn(data);
     } else {
         showLoggedOut();
@@ -240,6 +243,11 @@ async function checkAuth() {
 }
 
 function showLoggedIn(user) {
+    if (state.user?.id !== user.id) {
+        state.tasks = [];
+        state.currentWorkspaceId = null;
+        state.savedViewContext = null;
+    }
     state.user = user;
     $('authButtons').classList.add('hidden');
     $('userMenu').classList.remove('hidden');
@@ -285,14 +293,21 @@ function renderVerifiedBadge(user) {
 
 function showLoggedOut() {
     state.user = null;
+    state.tasks = getAnonTasks();
+    state.savedViewContext = null;
+    state.selection.clear();
     state.workspaces = [];
     state.currentWorkspaceId = null;
     $('authButtons').classList.remove('hidden');
     $('userMenu').classList.add('hidden');
     $('workspaceBar').classList.add('hidden');
-    $('heroSubtitle').textContent = 'Zig backend · WebAssembly front end';
+    $('heroSubtitle').textContent = 'A little clarity. A little progress. Every day.';
     $('heroSubtitle').removeAttribute('title');
     closeDropdown();
+    setLoading(false);
+    $('taskLoadError').classList.add('hidden');
+    renderWorkspaceBar();
+    renderTasks();
 }
 
 async function handleSignup(e) {
@@ -740,7 +755,9 @@ function canAdmin() {
 
 async function loadWorkspaces() {
     if (!isLoggedIn()) return;
+    const requestUser = state.user;
     const { ok, data } = await api('/api/workspaces', { quiet: true });
+    if (state.user !== requestUser) return;
     if (!ok || !Array.isArray(data)) return;
 
     state.workspaces = data;
@@ -817,16 +834,22 @@ async function handleCreateWorkspace(e) {
 
 async function loadTasks() {
     if (!isLoggedIn()) {
+        $('taskLoadError').classList.add('hidden');
         state.tasks = getAnonTasks();
         renderTasks();
         return;
     }
 
     setLoading(true);
+    const requestUser = state.user;
     const { ok, data } = await api('/api/tasks', { quiet: true });
+    // A response started before logout/account change must never repopulate
+    // the new identity's view with the old account's private task data.
+    if (state.user !== requestUser) return;
     setLoading(false);
-
-    state.tasks = ok && Array.isArray(data) ? data : [];
+    const loaded = ok && Array.isArray(data);
+    $('taskLoadError').classList.toggle('hidden', loaded);
+    if (loaded) state.tasks = data;
     renderTasks();
 }
 
@@ -912,8 +935,97 @@ function matchesFilter(task) {
         case 'completed': return task.completed;
         case 'overdue': return isOverdue(task);
         case 'high': return task.priority === 'high' && !task.completed;
+        case 'today': return isDueInWindow(task, 0, 1);
+        case 'upcoming': return isDueInWindow(task, 1, 8);
         default: return true;
     }
+}
+
+// Calendar boundaries use the visitor's timezone, including 23/25-hour days.
+function isDueInWindow(task, fromDay, toDay) {
+    if (task.completed || !task.due_date) return false;
+    const due = new Date(task.due_date).getTime();
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    start.setDate(start.getDate() + fromDay);
+    end.setDate(end.getDate() + toDay);
+    return due >= start.getTime() && due < end.getTime();
+}
+
+const VIEW_FILTERS = ['all', 'active', 'completed', 'overdue', 'high', 'today', 'upcoming'];
+const VIEW_SORTS = ['created_desc', 'created_asc', 'due_asc', 'priority', 'title'];
+function viewStorageKey() {
+    return `zigTasks:views:${state.user?.id || 'guest'}:${state.currentWorkspaceId || 'local'}`;
+}
+function validSavedView(view) {
+    return view && typeof view.id === 'string' && view.id.length <= 64 &&
+        typeof view.name === 'string' && view.name.length > 0 && view.name.length <= 48 &&
+        typeof view.search === 'string' && view.search.length <= 500 &&
+        (view.tagFilter === null || (typeof view.tagFilter === 'string' && view.tagFilter.length <= 32)) &&
+        VIEW_FILTERS.includes(view.filter) && VIEW_SORTS.includes(view.sort) &&
+        ['list', 'board'].includes(view.view);
+}
+function syncSavedViews() {
+    const key = viewStorageKey();
+    if (state.savedViewContext !== key) {
+        state.savedViewContext = key;
+        state.savedViews = [];
+        state.activeSavedView = '';
+        state.filter = 'all'; state.search = ''; state.tagFilter = null;
+        state.selection.clear(); state.editingId = null;
+        try {
+            const stored = JSON.parse(localStorage.getItem(key) || '[]');
+            if (Array.isArray(stored)) state.savedViews = stored.filter(validSavedView).slice(0, 12);
+            const sort = localStorage.getItem(`${key}:sort`);
+            state.sort = VIEW_SORTS.includes(sort) ? sort : 'created_desc';
+        } catch (_) { /* unavailable or corrupt storage */ }
+    }
+    const select = $('savedViews');
+    select.replaceChildren(new Option('Saved views', ''));
+    for (const view of state.savedViews) select.add(new Option(view.name, view.id));
+    select.value = state.activeSavedView;
+    $('deleteViewBtn').disabled = !state.activeSavedView;
+    $('searchInput').value = state.search;
+    $('sortSelect').value = state.sort;
+    document.querySelectorAll('#filterChips [data-filter]').forEach(chip => {
+        chip.setAttribute('aria-pressed', String(chip.dataset.filter === state.filter));
+    });
+}
+function persistSavedViews() {
+    try { localStorage.setItem(viewStorageKey(), JSON.stringify(state.savedViews)); }
+    catch (_) { toast('This browser could not save the view. Storage may be full.', 'error'); return false; }
+    return true;
+}
+function bindSavedViews() {
+    $('saveViewForm').addEventListener('submit', e => {
+        e.preventDefault();
+        const name = $('savedViewName').value.trim();
+        if (!name) return;
+        if (state.savedViews.length >= 12) { toast('You can save up to 12 views per workspace.', 'error'); return; }
+        const view = { id: crypto.randomUUID(), name, search: state.search.slice(0, 500),
+            filter: state.filter, tagFilter: state.tagFilter, sort: state.sort, view: state.view };
+        state.savedViews.push(view);
+        if (!persistSavedViews()) { state.savedViews.pop(); return; }
+        state.activeSavedView = view.id;
+        $('savedViewName').value = '';
+        renderTasks(); toast('View saved', 'success');
+    });
+    $('savedViews').addEventListener('change', e => {
+        state.activeSavedView = e.target.value;
+        const view = state.savedViews.find(item => item.id === e.target.value);
+        if (view) {
+            state.search = view.search; state.filter = view.filter; state.tagFilter = view.tagFilter;
+            state.sort = view.sort; state.selection.clear();
+            setView(view.view);
+        } else renderTasks();
+    });
+    $('deleteViewBtn').addEventListener('click', () => {
+        const previous = state.savedViews;
+        state.savedViews = previous.filter(view => view.id !== state.activeSavedView);
+        if (!persistSavedViews()) { state.savedViews = previous; return; }
+        state.activeSavedView = ''; renderTasks(); toast('Saved view deleted');
+    });
+    $('retryTasksBtn').addEventListener('click', loadTasks);
 }
 
 const PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
@@ -1201,8 +1313,11 @@ function renderTaskEditor(task) {
             // UTC value from the API is shifted before being sliced.
             const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
             due.value = local.toISOString().slice(0, 16);
+            // An unchanged overdue deadline must not block editing the title.
+            if (due.value < due.min) due.min = due.value;
         }
     }
+    due.dataset.originalValue = due.value;
 
     const tags = document.createElement('input');
     tags.type = 'text';
@@ -1271,6 +1386,7 @@ function renderTaskEditor(task) {
 }
 
 function renderTasks() {
+    syncSavedViews();
     const list = $('taskList');
     const completedList = $('completedTaskList');
     const completedSection = $('completedSection');
@@ -1505,6 +1621,8 @@ function renderCounts(tasks) {
     $('countDone').textContent = String(done);
     $('countOverdue').textContent = String(tasks.filter(isOverdue).length);
     $('countHigh').textContent = String(tasks.filter(t => t.priority === 'high' && !t.completed).length);
+    $('countToday').textContent = String(tasks.filter(t => isDueInWindow(t, 0, 1)).length);
+    $('countUpcoming').textContent = String(tasks.filter(t => isDueInWindow(t, 1, 8)).length);
 
     $('totalCount').textContent = String(total);
     $('completedCount').textContent = String(done);
@@ -1544,6 +1662,7 @@ function renderTagChips(tasks) {
 // ---- Task mutations ----
 
 async function addTask(title, dueDate, priority, tags, notes = '') {
+    dueDate = toApiDueDate(dueDate);
     if (!isLoggedIn()) {
         // Tags used to be dropped here: the composer collected them and the
         // signed-out path simply did not carry them, so they vanished without
@@ -1554,6 +1673,7 @@ async function addTask(title, dueDate, priority, tags, notes = '') {
     }
 
     const body = { title, priority };
+    if (notes) body.notes = notes;
     if (dueDate) body.due_date = dueDate;
     if (tags.length) body.tags = tags;
     if (state.currentWorkspaceId) body.workspace_id = state.currentWorkspaceId;
@@ -1593,6 +1713,7 @@ async function toggleTask(id) {
     }
     Object.assign(task, data);
     renderTasks();
+    if (task.completed && task.recurrence !== 'none') await loadTasks();
 }
 
 async function deleteTask(id) {
@@ -1665,8 +1786,9 @@ async function saveTaskEdit(form) {
         tags: parseTags(field('tags').value),
         // The empty string is the documented way to clear a due date; null
         // would mean "leave it alone".
-        due_date: field('due_date').value || '',
     };
+    const dueField = field('due_date');
+    if (dueField.value !== dueField.dataset.originalValue) body.due_date = toApiDueDate(dueField.value) || '';
     const recurrenceField = field('recurrence');
     if (recurrenceField) body.recurrence = recurrenceField.value;
     const assigneeField = field('assignee_id');
@@ -2502,6 +2624,7 @@ function bindToolbar() {
 
     $('sortSelect').addEventListener('change', (e) => {
         state.sort = e.target.value;
+        try { localStorage.setItem(`${viewStorageKey()}:sort`, state.sort); } catch (_) { /* ignore */ }
         renderTasks();
     });
 
@@ -2538,6 +2661,11 @@ function refreshDueDateMin(input) {
     const now = new Date();
     const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
     input.min = local.toISOString().slice(0, 16);
+}
+
+function toApiDueDate(value) {
+    if (!value) return null;
+    return new Date(value).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 function bindComposer() {
@@ -2687,6 +2815,7 @@ function bindActions() {
     bindTaskList($('completedTaskList'));
     bindPanelLists();
     bindToolbar();
+    bindSavedViews();
     bindComposer();
     bindViewSwitch();
     bindBoard();
