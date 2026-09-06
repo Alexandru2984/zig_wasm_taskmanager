@@ -23,34 +23,36 @@ DB_IMAGE="${DB_IMAGE:-surrealdb/surrealdb:v3.2.4}"
 CONTAINER="taskmanager-it-$$"
 WORKDIR="$(mktemp -d)"
 APP_PID=""
+CONTAINER_STARTED=0
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
-
-# Kill whatever is listening on a port. The application is started in a
-# subshell so `$!` is the subshell, not the binary, and killing the subshell
-# leaves the server running and holding the port — which then makes the next
-# run fail with ListenError and serve a stale build.
-kill_port() {
-    local port="$1" pids
-    pids="$(ss -tlnp 2>/dev/null | awk -v p=":$port" '$4 ~ p {print $NF}' \
-            | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)"
-    [ -n "$pids" ] && kill $pids 2>/dev/null || true
-}
 
 cleanup() {
     local status=$?
     say "Cleaning up"
     [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null || true
-    kill_port "$APP_PORT"
+    [ -n "$APP_PID" ] && wait "$APP_PID" 2>/dev/null || true
     if [ "$status" != "0" ] && [ -f "$WORKDIR/app.log" ]; then
         echo "--- application log ---"
         tail -40 "$WORKDIR/app.log"
     fi
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    if [ "$CONTAINER_STARTED" = 1 ]; then docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; fi
     rm -rf "$WORKDIR"
     exit "$status"
 }
 trap cleanup EXIT
+
+# Never signal another service by port, including when a caller chooses the
+# production port accidentally. Validate before starting any test resource.
+for port in "$APP_PORT" "$DB_PORT"; do
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1024 || port > 65535 )); then
+        echo "invalid test port: $port"; exit 1
+    fi
+    if ss -H -ltn "sport = :$port" | rg -q .; then
+        echo "port $port is already in use; existing process left untouched"; exit 1
+    fi
+done
+if [ "$APP_PORT" = "$DB_PORT" ]; then echo "test ports must differ"; exit 1; fi
 
 say "Starting $DB_IMAGE on port $DB_PORT"
 # --user root: the 3.x image's default user cannot create the RocksDB directory
@@ -59,6 +61,7 @@ say "Starting $DB_IMAGE on port $DB_PORT"
 docker run -d --name "$CONTAINER" --user root \
     -p "127.0.0.1:$DB_PORT:8000" "$DB_IMAGE" \
     start --log warn --user itroot --pass itpass rocksdb:/data/it.db >/dev/null
+CONTAINER_STARTED=1
 
 for _ in $(seq 1 60); do
     curl -fsS "http://127.0.0.1:$DB_PORT/version" >/dev/null 2>&1 && break
@@ -69,35 +72,27 @@ echo
 
 say "Building"
 if command -v zig >/dev/null 2>&1; then ZIG=zig; else ZIG="$HOME/.local/zig/zig"; fi
-"$ZIG" build
+# Build artifacts and static files stay outside the checkout nginx serves.
+cp -a "$ROOT/public" "$WORKDIR/public"
+"$ZIG" build --prefix "$WORKDIR/build"
 
 say "Starting the application on port $APP_PORT"
 # A dedicated working directory: the binary reads ./.env and serves ./public,
 # and the real .env must not be picked up.
-ln -s "$ROOT/public" "$WORKDIR/public"
-cat > "$WORKDIR/.env" <<ENV
-SURREAL_URL=http://127.0.0.1:$DB_PORT
-SURREAL_NS=taskmanager_it
-SURREAL_DB=main
-SURREAL_USER=itroot
-SURREAL_PASS=itpass
-PORT=$APP_PORT
-INTERFACE=127.0.0.1
-CORS_ORIGIN=http://localhost:$APP_PORT
-APP_BASE_URL=http://127.0.0.1:$APP_PORT
-COOKIE_INSECURE=1
-LOG_LEVEL=info
-ENV
-
 FACIL_DIR="$(dirname "$(find "$ROOT/.zig-cache" -name 'libfacil.io.so' | head -1)")"
 
 # Refuse to start on a port something else already owns, rather than failing
 # with ListenError and then testing whatever was already there.
-if ss -tln 2>/dev/null | grep -q ":$APP_PORT "; then
+if ss -H -ltn "sport = :$APP_PORT" | rg -q .; then
     echo "port $APP_PORT is already in use"
     exit 1
 fi
-( cd "$WORKDIR" && LD_LIBRARY_PATH="$FACIL_DIR" "$ROOT/zig-out/bin/taskmanager" > "$WORKDIR/app.log" 2>&1 ) &
+( cd "$WORKDIR" && exec env -i PATH="$PATH" \
+    LD_LIBRARY_PATH="$FACIL_DIR" SURREAL_URL="http://127.0.0.1:$DB_PORT" \
+    SURREAL_NS=taskmanager_it SURREAL_DB=main SURREAL_USER=itroot SURREAL_PASS=itpass \
+    PORT="$APP_PORT" INTERFACE=127.0.0.1 CORS_ORIGIN="http://127.0.0.1:$APP_PORT" \
+    APP_BASE_URL="http://127.0.0.1:$APP_PORT" COOKIE_INSECURE=1 LOG_LEVEL=info \
+    SERVER_THREADS=4 "$WORKDIR/build/bin/taskmanager" > "$WORKDIR/app.log" 2>&1 ) &
 APP_PID=$!
 
 for _ in $(seq 1 45); do
@@ -122,3 +117,13 @@ echo
 
 say "Smoke suite"
 RUN_SMOKE=1 ./scripts/smoke_test.sh "http://127.0.0.1:$APP_PORT"
+
+if [ "${RUN_SECURITY:-0}" = 1 ]; then
+    say "Security regressions"
+    BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" \
+        node scripts/security_test.mjs
+fi
+if [ "${RUN_UI:-0}" = 1 ]; then
+    say "Browser suite"
+    BASE_URL="http://127.0.0.1:$APP_PORT" node scripts/ui_test.mjs
+fi

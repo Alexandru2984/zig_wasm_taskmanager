@@ -1,5 +1,9 @@
 # Roadmap
 
+The current prioritized plan is [DELIVERY-PLAN.md](DELIVERY-PLAN.md), informed
+by the [2026-09-06 audit](AUDIT-2026-09-06.md). The sections below describe the
+earlier baseline and retain useful historical context.
+
 This roadmap keeps the project useful as an app while making the engineering
 work visible for interviews and portfolio review.
 

@@ -18,7 +18,8 @@ fi
 # via `ps aux` (the previous script embedded the Bearer token directly in
 # every curl argv).
 COOKIE_JAR="$(mktemp --tmpdir smoke-cookies.XXXXXX)"
-trap 'rm -f "$COOKIE_JAR" /tmp/last_response.json' EXIT
+RESPONSE_FILE="$(mktemp --tmpdir smoke-response.XXXXXX)"
+trap 'rm -f "$COOKIE_JAR" "$RESPONSE_FILE"' EXIT
 
 # Colors
 GREEN='\033[0;32m'
@@ -82,7 +83,7 @@ test_endpoint() {
     if echo "$response" | grep -q "$expected" 2>/dev/null; then
         echo -e "${GREEN}✓ PASS${NC}"
         PASS=$((PASS + 1))
-        echo "$response" > /tmp/last_response.json
+        echo "$response" > "$RESPONSE_FILE"
         return 0
     else
         echo -e "${RED}✗ FAIL${NC}"
@@ -188,7 +189,7 @@ echo "=== Workspace Operations ==="
 test_endpoint "List Workspaces" "GET" "/api/workspaces" "" "Workspace" || true
 test_endpoint "Create Workspace Requires Verified Email" "POST" "/api/workspaces" \
     "{\"name\":\"Smoke Workspace\"}" "Email verification required" || true
-WORKSPACE_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
+WORKSPACE_ID=$(grep -o '"id":"[^"]*"' "$RESPONSE_FILE" | cut -d'"' -f4)
 if [ -n "$WORKSPACE_ID" ]; then
     echo "Created Workspace ID: $WORKSPACE_ID"
     test_endpoint "List Workspace Members" "GET" "/api/workspaces/$WORKSPACE_ID/members" "" "$EMAIL" || true
@@ -219,7 +220,7 @@ if [ -n "${WORKSPACE_ID:-}" ]; then
     TASK_PAYLOAD="{\"title\":\"Smoke Test Task\",\"priority\":\"high\",\"workspace_id\":\"$WORKSPACE_ID\"}"
 fi
 test_endpoint "Create Task" "POST" "/api/tasks" "$TASK_PAYLOAD" "Smoke Test Task" || true
-TASK_ID=$(cat /tmp/last_response.json | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
+TASK_ID=$(grep -o '"id":"[^"]*"' "$RESPONSE_FILE" | cut -d'"' -f4)
 
 if [ -n "$TASK_ID" ]; then
     echo "Created Task ID: $TASK_ID"
