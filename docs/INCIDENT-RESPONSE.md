@@ -37,6 +37,13 @@ service; validate readiness and public HTML. The initial migration from the
 old checkout also retains the prior unit as an emergency fallback, but that
 fallback restores the old `micu` identity and its security risks.
 
+For the 2026-09-07 first promotion, the private backup directory also retains
+the prior static files, executable and matching library. The working checkout
+may have newer files after Git synchronization: do not assume it is a complete
+old release. Restore the matching artifacts/configuration deliberately and
+validate them before reopening. Rejected canaries under `failed-canaries` are
+not known-good releases.
+
 ## Tabletop checklist
 
 Rehearse: a leaked runtime credential; a faulty release returning 500; loss of

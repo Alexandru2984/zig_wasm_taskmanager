@@ -5,6 +5,12 @@ verified and committed separately, using the existing repository identity and
 no coauthor trailers. Production promotion follows isolated tests and a
 documented rollback. Backlog entries are not claims of shipped functionality.
 
+Status on 2026-09-07: stages 1–4 are implemented and promoted (application
+release `973767a`), with 46 unit, 37 smoke, 23 security and 59 browser checks.
+Production runs with the dedicated Unix/DB identities. Stage 3's backup drill
+was local only; alert routing and off-host recovery remain stage 8 work.
+See the audit for the canary-discovered startup fixes and residual risks.
+
 | Stage | Deliverables | Acceptance |
 | --- | --- | --- |
 | 1. Safe verification | Owned test PIDs/ports/temp files; isolated DB; audit and regression suite | Occupied ports untouched; regressions reproduce old behavior |
