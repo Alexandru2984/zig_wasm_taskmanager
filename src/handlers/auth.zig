@@ -465,7 +465,11 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     // SECURITY: update password AND invalidate the reset token in a single
     // UPDATE so a partial failure can't leave the token reusable.
     const password_hash = try auth.hashPassword(req_alloc, request.new_password);
-    const changed = db.resetUserPasswordAndClearToken(req_alloc, user.id, password_hash, request.token) catch {
+    const changed = db.resetUserPasswordAndClearToken(req_alloc, user.id, password_hash, request.token) catch |err| {
+        if (err == error.Conflict) {
+            try http.jsonError(r, 400, "Reset could not complete. Request a fresh reset link.");
+            return;
+        }
         try http.jsonError(r, 500, "Failed to update password");
         return;
     };

@@ -356,7 +356,11 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         .status = request.status,
         .recurrence = request.recurrence,
         .assignee_id = request.assignee_id,
-    }) catch {
+    }) catch |err| {
+        if (err == error.Conflict) {
+            try http.jsonError(r, 409, "Task changed. Refresh and retry.");
+            return;
+        }
         try http.jsonError(r, 500, "Failed to update task");
         return;
     };
@@ -394,7 +398,11 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         return;
     }
 
-    const db_result = db.toggleTask(req_alloc, task_id) catch {
+    const db_result = db.toggleTask(req_alloc, task_id) catch |err| {
+        if (err == error.Conflict) {
+            try http.jsonError(r, 409, "Task changed. Refresh and retry.");
+            return;
+        }
         try http.jsonError(r, 500, "Failed to toggle task");
         return;
     };

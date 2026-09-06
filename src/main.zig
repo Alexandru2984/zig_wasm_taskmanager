@@ -45,11 +45,14 @@ pub fn main() !void {
     // Initialize SurrealDB schema, waiting for the DB to accept connections.
     // On a fresh `docker compose up` the database may not be ready the instant
     // the app boots, so retry a bounded number of times before giving up.
+    const migrate_only = std.mem.eql(u8, config.getOrDefault("DB_MIGRATE_ONLY", "0"), "1");
+    const auto_migrate = !std.mem.eql(u8, config.getOrDefault("DB_AUTO_MIGRATE", "1"), "0");
     {
         const max_attempts: u8 = 20;
         var attempt: u8 = 1;
         while (true) : (attempt += 1) {
-            if (db.initSchema(allocator)) |_| break else |err| {
+            const schema = if (migrate_only or auto_migrate) db.initSchema(allocator) else db.checkSchema(allocator);
+            if (schema) |_| break else |err| {
                 if (attempt >= max_attempts) {
                     log.err("DB schema init failed after {d} attempts: {}; refusing to serve", .{ attempt, err });
                     return err;
@@ -59,6 +62,8 @@ pub fn main() !void {
             }
         }
     }
+
+    if (migrate_only) return;
 
     // Initialize rate limiters
     rate_limiter.initAll(allocator);
@@ -297,6 +302,28 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
     }
 
     const req_method = r.method orelse "";
+    const unsafe_method = !std.mem.eql(u8, req_method, "GET") and !std.mem.eql(u8, req_method, "HEAD");
+    if (unsafe_method) {
+        // CORS controls response access, not HTML form submissions. Protect
+        // unauthenticated login/signup from cross-site session planting too.
+        if (r.getHeader("origin")) |origin| {
+            const allowed = config.get("CORS_ORIGIN") orelse "";
+            if (!std.mem.eql(u8, origin, allowed)) {
+                try http.jsonError(r, 403, "Origin not allowed");
+                return;
+            }
+        }
+        if (r.body) |body| {
+            if (body.len > 0) {
+                const content_type = r.getHeader("content-type") orelse "";
+                var parts = std.mem.splitScalar(u8, content_type, ';');
+                if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, parts.first(), " \t"), "application/json")) {
+                    try http.jsonError(r, 415, "Content-Type must be application/json");
+                    return;
+                }
+            }
+        }
+    }
     if (requiresCsrf(req_method, path) and !http.verifyCsrfToken(req_alloc, r)) {
         try http.jsonError(r, 403, "Invalid CSRF token");
         return;

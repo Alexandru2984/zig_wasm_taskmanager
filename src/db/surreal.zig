@@ -107,6 +107,10 @@ fn runMigration(allocator: std.mem.Allocator, version: []const u8, sql: []const 
 }
 
 // Initialize database schema
+pub fn checkSchema(allocator: std.mem.Allocator) !void {
+    if (!try migrationApplied(allocator, "011_recurrence_once")) return error.SchemaMigrationRequired;
+}
+
 pub fn initSchema(allocator: std.mem.Allocator) !void {
     std.debug.print("🗄️ Initializing SurrealDB schema...\n", .{});
 

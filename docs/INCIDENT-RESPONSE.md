@@ -1,0 +1,71 @@
+# Task Manager incident response
+
+Operator: VPS owner. Contact/alert destination must be supplied by the operator;
+this document does not claim alert delivery or an external responder exists.
+
+## Suspected account, application or host compromise
+
+1. Record UTC detection time, symptom, affected release and request IDs. Keep
+   copies of relevant journal/nginx logs with restricted permissions. Do not
+   paste cookies, passwords, reset links or private task contents into tickets.
+2. If account compromise is isolated, revoke its sessions through the verified
+   account flow. If active data exfiltration or host compromise is suspected,
+   stop `taskmanager` and block its vhost while preserving evidence. Consider
+   the shared host affected if Docker/root access was possible.
+3. Determine whether credentials were exposed: DB/SMTP secrets, session and
+   reset tokens, password hashes, other applications' files. Rotate affected
+   credentials through their owning services; revoke sessions/reset links.
+   Do not blindly rotate unrelated services without identifying dependencies.
+4. Preserve the compromised release and configuration privately. Restore a
+   known-good release or rebuild on a trusted host. Restore the database only
+   after deciding which writes must be recovered; never overwrite the only
+   copy of incident evidence.
+5. Verify service identity, Docker socket denial, DB scope, `/api/ready`, public
+   security/cache headers and isolated regression tests before reopening.
+6. Establish affected people/data/time range and assess notification duties
+   with the responsible operator and appropriate legal advice. Do not infer
+   compliance from a status code or from this runbook.
+7. Record timeline, root cause, recovery evidence and corrective actions.
+
+## Operational rollback
+
+Deployment keeps a protected backup of the prior unit/nginx configuration and
+a database export. New schema fields are additive; do not restore a database
+backup for a binary-only rollback because that would lose newer user writes.
+Point `/opt/taskmanager/current` to the preceding release and restart the
+service; validate readiness and public HTML. The initial migration from the
+old checkout also retains the prior unit as an emergency fallback, but that
+fallback restores the old `micu` identity and its security risks.
+
+## Tabletop checklist
+
+Rehearse: a leaked runtime credential; a faulty release returning 500; loss of
+the database. For each, identify who notices, who can isolate the application,
+where the backup is, how to restore into a disposable instance, and what
+proves recovery. Record actual results in the audit, not just checklist ticks.
+
+### Pre-promotion desk walkthrough — 2026-09-07
+
+- Leaked runtime credential: isolate this app, preserve logs, replace its DB
+  and affected SMTP secrets; a database EDITOR still exposes all app tenants.
+  Root DB access must be denied by the verification helper. There is no
+  established alert destination, so automatic detection is an unresolved gap.
+- Faulty release/500s: validate local readiness, restore the previous unit or
+  release symlink, restart only this service, then check nginx and public HTML.
+  Do not restore the DB over newer writes for a binary-only failure.
+- Database loss: the protected export is recoverable on this VPS, and a
+  disposable restore was exercised with matching account/task/session counts.
+  Loss of the entire VPS remains uncovered until off-host backups exist.
+
+This was a desk review with a technical restore exercise, not a staffed on-call
+or notification drill. No incidents were declared or messages sent. The VPS
+owner must designate the alert channel and validate human response times.
+
+## Draft incident communication (do not send automatically)
+
+“On [UTC date/time] we detected [confirmed event]. We have [containment].
+The data confirmed affected is [data types/time range]. [Actions required of
+users, if any]. Our next update is [time/channel]. Contact [operator].”
+
+Fill with verified facts and have the responsible operator approve recipients,
+timing and content. Avoid claiming no impact while investigation is ongoing.

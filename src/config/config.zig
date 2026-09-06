@@ -141,12 +141,12 @@ pub fn parseEnvFile(allocator: std.mem.Allocator, filename: []const u8) !StringH
 // override the .env file, so the app is fully configurable without a file
 // (12-factor / containers).
 const ENV_KEYS = [_][]const u8{
-    "SURREAL_URL",                "SURREAL_NS",    "SURREAL_DB",    "SURREAL_USER", "SURREAL_PASS",
-    "SMTP_HOST",                  "SMTP_PORT",     "SMTP_USER",     "SMTP_PASS",    "SMTP_FROM",
-    "SMTP_FROM_NAME",             "FROM_EMAIL",    "FROM_NAME",     "APP_BASE_URL", "TASK_REMINDERS_ENABLED",
-    "PORT",                       "INTERFACE",     "CORS_ORIGIN",   "HSTS_MAX_AGE", "TRUST_PROXY",
-    "COOKIE_INSECURE",            "METRICS_TOKEN", "LEGACY_SECRET", "LOG_LEVEL",    "SERVER_THREADS",
-    "TASK_REMINDER_LEAD_MINUTES",
+    "SURREAL_URL",                "SURREAL_NS",         "SURREAL_DB",      "SURREAL_USER",    "SURREAL_PASS",
+    "SMTP_HOST",                  "SMTP_PORT",          "SMTP_USER",       "SMTP_PASS",       "SMTP_FROM",
+    "SMTP_FROM_NAME",             "FROM_EMAIL",         "FROM_NAME",       "APP_BASE_URL",    "TASK_REMINDERS_ENABLED",
+    "PORT",                       "INTERFACE",          "CORS_ORIGIN",     "HSTS_MAX_AGE",    "TRUST_PROXY",
+    "COOKIE_INSECURE",            "METRICS_TOKEN",      "LEGACY_SECRET",   "LOG_LEVEL",       "SERVER_THREADS",
+    "TASK_REMINDER_LEAD_MINUTES", "SURREAL_AUTH_LEVEL", "DB_AUTO_MIGRATE", "DB_MIGRATE_ONLY",
 };
 
 // Overlay recognized process environment variables onto the map. Runs once at

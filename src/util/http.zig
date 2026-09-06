@@ -169,10 +169,7 @@ fn findCookieValue(cookie_header: []const u8, name: []const u8) ?[]const u8 {
 
 pub fn getSessionTokenFromCookie(r: zap.Request) ?[]const u8 {
     const cookie_header = r.getHeader("cookie") orelse return null;
-    if (findCookieValue(cookie_header, sessionCookieName())) |v| return v;
-    // Accept a cookie issued before the `__Host-` rename so existing sessions
-    // survive the deploy instead of every user being silently logged out.
-    return findCookieValue(cookie_header, SESSION_COOKIE_PLAIN);
+    return findCookieValue(cookie_header, sessionCookieName());
 }
 
 /// Verify CSRF for a cookie-authenticated unsafe request.

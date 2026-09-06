@@ -1,0 +1,48 @@
+[Unit]
+Description=Zig Task Manager
+After=network.target docker.service
+Requires=docker.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=taskmanager
+Group=taskmanager
+WorkingDirectory=/opt/taskmanager/current
+ExecStart=/opt/taskmanager/current/bin/taskmanager
+Environment=LD_LIBRARY_PATH=/opt/taskmanager/current/lib
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RemoveIPC=yes
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+InaccessiblePaths=-/run/docker.sock -/run/containerd -/run/dbus/system_bus_socket
+MemoryMax=1G
+TasksMax=128
+LimitNOFILE=16384
+
+[Install]
+WantedBy=multi-user.target

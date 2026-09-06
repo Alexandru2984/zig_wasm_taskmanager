@@ -49,6 +49,7 @@ pub const impl = @import("surreal.zig");
 // Convenience wrappers that delegate to implementation
 pub const query = impl.query;
 pub const initSchema = impl.initSchema;
+pub const checkSchema = impl.checkSchema;
 
 // User operations
 pub const createUser = impl.createUser;

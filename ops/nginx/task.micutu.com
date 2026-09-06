@@ -8,6 +8,7 @@
 server {
     include snippets/block-dotfiles.conf;
     server_name task.micutu.com;
+    include snippets/task-security.conf;
 
     # ACME must stay reachable regardless of how the request arrived, so it is
     # declared before the Cloudflare origin guard below and is exempt from it.
@@ -58,6 +59,8 @@ server {
         limit_req zone=task_api burst=60 nodelay;
 
         include snippets/task-security.conf;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "no-store" always;
 
         proxy_pass http://127.0.0.1:9000;
         proxy_http_version 1.1;
@@ -80,6 +83,8 @@ server {
         limit_req zone=task_auth burst=10 nodelay;
 
         include snippets/task-security.conf;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "no-store" always;
 
         proxy_pass http://127.0.0.1:9000;
         proxy_http_version 1.1;
@@ -97,7 +102,7 @@ server {
     # Served straight off disk: sendfile, ETag/If-None-Match revalidation and
     # gzip, none of which the app does. It read every file into a per-request
     # arena and called realpath() twice per hit.
-    root /home/micu/taskmanager/public;
+    root /opt/taskmanager/current/public;
     index index.html;
 
     # nginx's mime.types has no entry for .webmanifest, so without this the

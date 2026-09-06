@@ -42,4 +42,3 @@ db_settings.txt
 
 # JS test dependencies (the app itself has no npm build step)
 node_modules/
-package-lock.json

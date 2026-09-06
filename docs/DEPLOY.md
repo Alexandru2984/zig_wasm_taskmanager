@@ -1,210 +1,105 @@
-# VPS Deployment Guide
+# Production deployment
 
-## Prerequisites
+The service uses a dedicated `taskmanager` Unix user, immutable release files
+under `/opt/taskmanager/releases`, and a private runtime configuration at
+`/etc/taskmanager/runtime.env`. nginx serves the public directory in
+`/opt/taskmanager/current`; the app and SurrealDB listen on loopback.
 
-- VPS with Ubuntu 22.04+ (or similar)
-- Domain name pointed to VPS IP
-- SSH access
+Requirements: Zig 0.15.2, SurrealDB 3.2.4, Node for admin/test tooling, Docker
+for the database, and an existing nginx/TLS/Cloudflare configuration. This
+guide is specific to the versioned `task.micutu.com` vhost.
 
-## 1. Install Dependencies
+## Verify in a separate checkout
 
-```bash
-# Update system
-sudo apt update && sudo apt upgrade -y
-
-# Install Zig (check latest version at ziglang.org)
-wget https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz
-sudo tar -xf zig-linux-x86_64-0.14.0.tar.xz -C /opt/
-sudo ln -s /opt/zig-linux-x86_64-0.14.0/zig /usr/local/bin/zig
-
-# Install Docker (for SurrealDB)
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER
-```
-
-## 2. Deploy SurrealDB
+Do not edit a checkout directly served by nginx. Use a branch/worktree and
+keep production credentials out of it.
 
 ```bash
-# Create data directory
-sudo mkdir -p /var/lib/surrealdb
-
-# Run SurrealDB container
-docker run -d \
-  --name surrealdb \
-  --restart always \
-  -p 127.0.0.1:8000:8000 \
-  -v /var/lib/surrealdb:/data \
-  surrealdb/surrealdb:latest \
-  start --log info --user YOUR_DB_USER --pass YOUR_DB_PASS file:/data/database.db
+npm ci
+./scripts/check.sh
+OPTIMIZE=ReleaseSafe RUN_SECURITY=1 RUN_UI=1 ./scripts/integration_test.sh
+zig build -j4 -Doptimize=ReleaseSafe
+./scripts/stamp-assets.sh
 ```
 
-## 3. Deploy Application
+Review and commit the source and stamped URLs before promotion. The integration
+harness creates its own DB, migrates with root, then serves using a database
+EDITOR. It refuses occupied ports and never kills processes by port.
+
+## First-time identity and credentials
+
+Create a system user named `taskmanager` with its own group, no login shell,
+no home directory and no sudo/Docker supplementary groups. Install the
+versioned unit from `ops/taskmanager.service`.
+
+Keep administrative DB credentials in the existing private operator config.
+Take a backup with the source config path and an explicit NEW destination:
 
 ```bash
-# Clone repository
-cd /opt
-sudo git clone https://github.com/YOUR_REPO/zig_testing.git taskmanager
-cd taskmanager
-
-# Create .env file
-sudo nano .env
+sudo node scripts/db_admin.mjs backup /home/micu/taskmanager/.env /var/backups/taskmanager/RELEASE/pre-deploy.surql
+sudo node scripts/db_admin.mjs provision-runtime /home/micu/taskmanager/.env /etc/taskmanager/runtime.env
+sudo chown root:taskmanager /etc/taskmanager/runtime.env
+sudo chmod 0640 /etc/taskmanager/runtime.env
 ```
 
-### .env Configuration
+Create the backup parent directory as root mode 0700 and `/etc/taskmanager`
+as root:taskmanager mode 0750 first. Provisioning refuses to replace an existing
+runtime config/user and checks that root-level database access is denied.
+It stores only the scoped DB credential in runtime configuration and preserves
+the app/SMTP settings. Use separate config and a deliberate rotation procedure
+to replace an existing credential.
 
-```env
-# Database
-SURREAL_URL = http://127.0.0.1:8000
-SURREAL_NS = taskmanager
-SURREAL_DB = main
-SURREAL_USER = YOUR_DB_USER
-SURREAL_PASS = YOUR_DB_PASS
+Runtime settings: `SURREAL_AUTH_LEVEL=database`, `DB_AUTO_MIGRATE=0`,
+`SERVER_THREADS=4`. A system database EDITOR still trusts the application for
+tenant authorization; it is not database-enforced row-level isolation.
 
-# Email (SMTP)
-SMTP_HOST = smtp.yourdomain.com
-SMTP_PORT = 587
-SMTP_USER = noreply@yourdomain.com
-SMTP_PASS = replace-with-a-real-smtp-password
-SMTP_FROM = noreply@yourdomain.com
-SMTP_FROM_NAME = Task Manager
-FROM_EMAIL = noreply@yourdomain.com
-FROM_NAME = Task Manager
+## Stage, migrate, promote
 
-# App
-APP_URL = https://yourdomain.com
-CORS_ORIGIN = https://yourdomain.com
-```
+1. Stage the ReleaseSafe executable as `bin/taskmanager`, its matching
+   `libfacil.io.so` as `lib/libfacil.io.so`, and the complete `public/`
+   directory under a NEW release directory. Use root ownership and read/execute
+   permissions only for the service; directories/static files must also be
+   readable by nginx. Link release `.env` to the runtime configuration.
+2. Back up the old unit and task vhost privately. Keep the preceding release.
+   Run the NEW executable once with `DB_MIGRATE_ONLY=1`, the matching library
+   path, and the administrative configuration as its working-directory `.env`.
+   This migrates and exits without starting a listener. Never expose the
+   administrative config to the serving process.
+3. Point `/opt/taskmanager/current` atomically to the prepared release. Install
+   `ops/taskmanager.service`, reload systemd, and restart only `taskmanager`.
+4. Install the versioned task nginx files, run `nginx -t`, then reload nginx.
+   The vhost relies on existing `cloudflare-realip.conf` and
+   `cloudflare-origin-guard.conf` plus the shared dotfile/robots snippets.
+   Do not replace shared configuration for unrelated applications.
+5. Check `/api/ready` locally and through the public domain, verify API
+   `Cache-Control: no-store`, secure cookies, CSP, and matching asset hashes.
+   Check the process UID/groups and inability to open Docker/admin sockets
+   inside its service namespace. Browser mutation tests remain confined to
+   the disposable environment.
 
-### Build Application
+Migration 011 adds a recurrence marker and aligns board/completion state.
+Already-completed recurring tasks are marked to avoid recreating their next
+occurrence on an edit. These are additive schema changes: preserve user writes
+and prefer a binary rollback over restoring the entire database.
+
+## Backups and recovery
+
+Database exports include personal data, hashes and session records. Keep them
+mode 0600 in a root-only directory, with an explicit retention policy. An export
+on the same VPS is not off-host disaster recovery.
+
+For a restore drill, start an authenticated disposable database on an unused
+loopback port with fresh random credentials. Pass `TEST_DB_USER` and
+`TEST_DB_PASS` through the environment to:
 
 ```bash
-sudo zig build -Doptimize=ReleaseSafe
+node scripts/db_admin.mjs restore-test SOURCE_ENV http://127.0.0.1:TEST_PORT BACKUP_FILE
 ```
 
-## 4. Systemd Service
+The helper imports into that server and compares account/task/session counts.
+Keep the instance alive only for the drill and destroy its temporary data
+afterwards. Prefer a synthetic fixture for repeated development tests.
 
-```bash
-sudo nano /etc/systemd/system/taskmanager.service
-```
-
-```ini
-[Unit]
-Description=Zig Task Manager
-After=network.target docker.service
-Requires=docker.service
-
-[Service]
-Type=simple
-User=www-data
-Group=www-data
-WorkingDirectory=/opt/taskmanager
-ExecStart=/opt/taskmanager/zig-out/bin/taskmanager
-Restart=always
-RestartSec=5
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable taskmanager
-sudo systemctl start taskmanager
-sudo systemctl status taskmanager
-```
-
-## 5. Nginx Reverse Proxy
-
-The production configuration is versioned in `ops/nginx/` rather than written
-by hand on the server, so it can be reviewed, diffed and redeployed:
-
-| File | Installs to | Purpose |
-| --- | --- | --- |
-| `task.micutu.com` | `sites-available/` | The vhost |
-| `task-security.conf` | `snippets/` | Security headers, single source of truth |
-| `task-rate-limit.conf` | `conf.d/` | `limit_req` / `limit_conn` zones (http level) |
-
-```bash
-sudo cp ops/nginx/task-rate-limit.conf /etc/nginx/conf.d/
-sudo cp ops/nginx/task-security.conf   /etc/nginx/snippets/
-sudo cp ops/nginx/task.micutu.com      /etc/nginx/sites-available/
-sudo ln -sf /etc/nginx/sites-available/task.micutu.com /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-
-# TLS
-sudo certbot --nginx -d task.micutu.com
-```
-
-Four things this configuration does that a plain `proxy_pass` does not:
-
-**Only Cloudflare may reach the origin.** DNS points at Cloudflare, but the
-server still answers on its own address, so anyone who learns the origin IP can
-send `Host: task.micutu.com` directly and skip the WAF, bot management and DDoS
-absorption entirely. The vhost returns 403 unless the peer is a Cloudflare edge
-(or loopback, for local health checks), using the `$from_cloudflare_origin` map
-from `conf.d/cloudflare-origin-guard.conf`.
-
-**The real visitor IP reaches the app.** `conf.d/cloudflare-realip.conf` runs
-the real_ip module over Cloudflare's published ranges, so `$remote_addr` is the
-visitor rather than the edge before any rate-limit zone or log line sees it.
-`proxy_set_header` then overwrites `X-Real-IP` and clears `CF-Connecting-IP`, so
-a client cannot supply its own value; the app only trusts these headers from a
-peer listed in `TRUST_PROXY`.
-
-**Rate limits survive a deploy.** The app's own limiters live in process memory
-and reset on every restart. The nginx zones do not, and they reject a flood
-before it reaches a worker thread or opens a database connection.
-
-**One copy of every security header.** The app used to set its own headers while
-the shared `snippets/security-headers.conf` set a second, looser copy — two CSPs,
-and `X-Frame-Options: DENY` next to `SAMEORIGIN`. `task-security.conf` strips the
-upstream copies with `proxy_hide_header` and emits one authoritative set, which
-also covers responses the app never produces (502 during a restart, 413, 429).
-
-Static assets are served from disk by nginx with gzip and ETag revalidation;
-only `/api/` is proxied to Zig.
-
-## 6. Verify Deployment
-
-```bash
-# Check services
-sudo systemctl status taskmanager
-sudo systemctl status nginx
-docker ps | grep surrealdb
-
-# Test endpoints
-curl http://127.0.0.1:9000/api/health
-curl https://yourdomain.com/api/health
-```
-
-## Troubleshooting
-
-### View logs
-```bash
-sudo journalctl -u taskmanager -f
-docker logs surrealdb -f
-```
-
-### Restart services
-```bash
-sudo systemctl restart taskmanager
-docker restart surrealdb
-```
-
-### Rebuild after code changes
-```bash
-cd /home/micu/taskmanager
-git pull
-zig build -Doptimize=ReleaseSafe
-./scripts/stamp-assets.sh          # cache-bust the front-end assets
-sudo systemctl restart taskmanager
-```
-
-`stamp-assets.sh` is not optional. JS, CSS and WASM are served with
-`Cache-Control: no-cache` because their filenames carry no content hash;
-Cloudflare honours that at the edge and revalidates, but rewrites what the
-*browser* is told to `max-age=14400`. Without the stamp, a returning visitor
-can run four-hour-old JavaScript against a freshly deployed API. The script
-writes a content hash into the asset URLs in `public/*.html`, so a changed
-file is a changed URL. It is idempotent — run it as often as you like.
+See [INCIDENT-RESPONSE.md](INCIDENT-RESPONSE.md) for containment, recovery and
+incident communications. Record actual backup/restore and alert-delivery
+evidence; a documented procedure alone is not a tested control.

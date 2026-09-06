@@ -96,7 +96,7 @@ jobs:
           node-version: '22'
 
       - name: Install test dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Install Chromium
         run: npx --yes playwright@1.56.1 install --with-deps chromium
@@ -123,7 +123,7 @@ jobs:
           SURREAL_PASS=itpass
           PORT=9200
           INTERFACE=127.0.0.1
-          CORS_ORIGIN=http://localhost:9200
+          CORS_ORIGIN=http://127.0.0.1:9200
           APP_BASE_URL=http://127.0.0.1:9200
           COOKIE_INSECURE=1
           ENV

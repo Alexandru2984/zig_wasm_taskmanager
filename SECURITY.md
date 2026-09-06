@@ -29,17 +29,17 @@ Primary attacker capabilities:
 | Passwords | Argon2id with per-user random salt |
 | Sessions | Server-side SurrealDB sessions, 7-day expiry, hashed session tokens, HttpOnly cookie transport |
 | Cookies | `HttpOnly`, `SameSite=Strict`, `Secure`, and the `__Host-` prefix in production, which the browser refuses unless the cookie is Secure, Path=/ and carries no Domain — making it unsettable by any other host on the parent domain |
-| Password reset | Random 256-bit token, stored hashed, 1-hour expiry, token cleared atomically after use |
+| Password reset | Random 256-bit token, stored hashed, 1-hour expiry; conditional consumption, password update and session revocation in one transaction |
 | Email verification | Authenticated verification, hashed 6-digit code, expiry, per-user attempt cap |
-| Account enumeration | Uniform responses plus background email dispatch, so signup/login/reset/verify response times don't reveal whether an address exists |
+| Account enumeration | Generic login/reset errors; signup still reveals an existing address. Timing equivalence is not established |
 | Rate limiting | Separate buckets for signup, login IP/account, forgot/reset, verification, resend, task writes, password changes, and workspace invites; the per-account login bucket counts only failed attempts |
-| CSRF | Token minted with the session and stored hashed on the session row; verification compares the hash of the submitted header against it, so forging one requires reading the HttpOnly session cookie |
+| CSRF | Session-bound token hash; the submitted header is required for cookie-authenticated writes even when a Bearer header is also supplied; browser Origin and JSON content type checked |
 | Request bodies | 64 KiB JSON body cap, enforced at nginx as well as in the app |
 | Passwords | Rejected if they appear in a common-password list or are a single repeated character or a straight run, in addition to the length and composition rules |
 | Path parameters | Percent-decoded before use, with a malformed escape rejected rather than passed through altered |
 | Error handling | Any error escaping a handler is answered as 500; previously it produced HTTP 200 with an empty body, which a client reads as success |
 | Input validation | Email/name/password/task title/date validation before database writes |
-| Record references | Values naming a row are bound through a `RecordId` type that emits `type::record()` and validates the `table:key` shape first, so a record range — which would let one statement touch many rows — is refused |
+| Record references | Bound `RecordId` rejects ranges; task routes and repository require the `tasks:` table; parent links and assignees are workspace-validated |
 | Database access | SurrealQL variable binding helper for user-controlled values (unit-tested for quote/control-byte escaping; unsupported bind types are rejected at compile time); Surreal `ERR` results are treated as failed queries |
 | Password change | Re-authenticates the current password, rejects reuse, invalidates other sessions, and is rate-limited |
 | XSS defense | DOM rendering uses `textContent`; strict CSP for HTML responses |
@@ -48,39 +48,49 @@ Primary attacker capabilities:
 | Origin exposure | The origin answers only to Cloudflare edge addresses and loopback; a direct request to the server's own address is refused, so the WAF and rate limiting cannot be skipped by finding the origin IP |
 | Rate limiting (edge) | nginx `limit_req` zones in front of the app's own limiters, keyed on the real visitor address and surviving a restart, which the in-process buckets do not |
 | Email addresses | Normalized to lowercase before storage and lookup, so one mailbox cannot hold two accounts and a rate-limit bucket cannot be reset by changing capitalisation |
-| Account deletion | Requires the password again, not merely a live session, and removes every row referencing the user |
+| Account deletion | Requires the password again and performs related-record cleanup; atomicity and concurrent membership changes need further review |
 | Email | SMTP via mailcow; secrets stay in `.env`; curl config and payload files are private temp files |
 | Workspace invites | Invite tokens are stored hashed, deduplicated while pending, and gated behind verified inviter/recipient emails |
 | Metrics | `/api/metrics` disabled unless `METRICS_TOKEN` is configured |
-| Deployment | systemd sandboxing, non-root user, no Linux capabilities, private `/tmp`, read-only home/system views |
+| Deployment | Versioned dedicated `taskmanager` identity, inaccessible home/admin sockets, read-only releases, no capabilities, private `/tmp` and memory/task limits; see audit for live verification |
+| Database identity | Database-scoped runtime EDITOR with migrations performed separately using administrative credentials |
+| Cache and failures | API `no-store`; no automatic SQL write replay; schema failures refuse startup and task-list failures return an error |
+| Recurrence | Task completion and one-time successor creation share a version-checked transaction |
 
 ## Known Limitations
 
-- The application connects to SurrealDB with root credentials. The server is
-  now current (3.2.4), but a scoped database user with only the rights this
-  application needs would limit the blast radius of any escape from the query
-  builder. That is the largest outstanding item.
+- A database EDITOR is scoped to one database, not one tenant. Authorization
+  remains application-enforced; a compromised runtime can access all accounts
+  and tasks in that database. SMTP secrets are also readable by the service.
+- Some permission checks, invitation acceptance and account/password changes
+  span separate statements. Concurrent membership revocation and partial
+  failures need more transaction coverage. Signup enumeration remains open.
 - Bind variables are emitted as `LET $x = "…"` prefixes with hand-written
   escaping rather than a native parameter protocol, because SurrealDB's HTTP
   `/sql` endpoint takes no separate variables. The escaper is unit-tested and
   was probed against the live database — bare table names, record ranges and
   quote-breakout attempts all fail closed — but it remains a hand-rolled
   escaper in front of a database.
-- The common-password check is a short explicit list, not a breach corpus.
-  Have I Been Pwned's range API is the real answer and needs an outbound
-  request per signup.
+- The embedded common-password blocklist contains 21,493 truncated SHA-256
+  entries. It is not an exhaustive or continuously refreshed breach database;
+  corpus provenance/update policy, passkeys/MFA and recovery codes remain work.
 - Rate-limit state inside the application lives in process memory. The nginx
   zones in front of it cover a restart; the per-account login budget does not.
+- Durable email, quotas/pagination, tested alert delivery and encrypted off-host
+  backups remain operational priorities. A same-host export is not disaster
+  recovery. See the dated audit and delivery plan for the full backlog.
 
 ## Operational Notes
 
-- `.env` is ignored by git and must remain `0600`.
+- The administrative `.env` is ignored by git and remains `0600`. Production
+  runtime config is root:taskmanager `0640` under a `0750` private directory;
+  root owns release files and the service cannot modify them.
 - Rotate SMTP credentials immediately if a scanner reports a concrete leaked
   value. After rotation, verify SMTP auth and restart `taskmanager.service`.
 - The public app should remain behind nginx/TLS with `INTERFACE=127.0.0.1`.
 - `TRUST_PROXY` should contain only the immediate nginx peer addresses.
 - `COOKIE_INSECURE=1` is only for local HTTP development.
-- Configuration can come from a `0600` `.env` file or from process environment
+- Configuration can come from a private `.env` file or from process environment
   variables (the latter override the file), so secrets never need to enter the
   container image.
 - The Zap/facil.io response-header map has a practical cap on how many headers a
@@ -102,14 +112,13 @@ Run endpoint smoke tests only against a disposable/dev environment unless you
 intend to create test accounts and send verification mail:
 
 ```bash
-RUN_SMOKE=1 ./scripts/check.sh
+RUN_SECURITY=1 RUN_UI=1 ./scripts/integration_test.sh
 ```
 
 ## Known Follow-Ups
 
-- Add integration tests that run against an isolated SurrealDB test database
-  (unit tests already cover validation, rate limiting, query escaping, and the
-  Argon2 round-trip).
+- Expand the isolated integration suite with permission-revocation races,
+  invite replay, quota enforcement and browser accessibility checks.
 - Replace the curl SMTP subprocess with a native SMTP client if the dependency
   tradeoff becomes worthwhile.
 - The 6-digit email verification code is stored as an unsalted SHA-256 digest.

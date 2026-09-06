@@ -60,6 +60,12 @@ async function check(name, action) {
     catch (e) { console.error(`FAIL ${name}: ${e.message}`); failed++; }
 }
 const alice = people.alice;
+await check('cross-origin login is rejected before authentication', async () => {
+    assert.equal((await api(null, '/api/auth/login', 'POST', {}, { Origin: 'https://attacker.invalid' })).status, 403);
+});
+await check('HTML form-compatible content types cannot call login', async () => {
+    assert.equal((await api(null, '/api/auth/login', 'POST', {}, { 'Content-Type': 'text/plain' })).status, 415);
+});
 const parent = (await api(alice, '/api/tasks', 'POST', { title: 'Parent', workspace_id: wa })).data;
 assert.ok(parent.id, 'fixture task created');
 
@@ -134,6 +140,25 @@ await check('recurrence is generated only once across completion, edits and repl
     }
     const tasks = (await api(alice, '/api/tasks')).data;
     assert.equal(tasks.filter(t => t.title === recurring.title).length, 2);
+});
+await check('concurrent completion creates exactly one successor', async () => {
+    const task = (await api(alice, '/api/tasks', 'POST', {
+        title: `Concurrent ${run}`, workspace_id: wa, due_date: future, recurrence: 'weekly',
+    })).data;
+    const responses = await Promise.all([1, 2].map(() => api(alice, `/api/tasks/${task.id}`, 'PUT', { completed: true })));
+    assert.ok(responses.some(r => r.status === 200));
+    assert.ok(responses.every(r => [200, 409].includes(r.status)));
+    assert.equal((await api(alice, '/api/tasks')).data.filter(t => t.title === task.title).length, 2);
+});
+await check('old monthly recurrence skips missed dates without a duplicate backlog', async () => {
+    const taskId = id('tasks', 'old_monthly');
+    await sql(`CREATE ${taskId} SET user_id = ${alice.id}, workspace_id = ${wa}, title = 'Old monthly ${run}',
+        created_at = d'2020-01-01T09:00:00Z', due_date = d'2020-01-31T09:00:00Z', recurrence = 'monthly';`);
+    assert.equal((await api(alice, `/api/tasks/${taskId}`, 'PUT', { completed: true })).status, 200);
+    const tasks = (await api(alice, '/api/tasks')).data.filter(t => t.title === `Old monthly ${run}`);
+    assert.equal(tasks.length, 2);
+    const next = new Date(tasks.find(t => t.id !== taskId).due_date).getTime();
+    assert.ok(next > Date.now() && next < Date.now() + 32 * 86400000);
 });
 await check('exports retain status, recurrence and relationships', async () => {
     const response = await api(alice, '/api/export');

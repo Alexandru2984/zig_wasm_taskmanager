@@ -74,12 +74,28 @@ say "Building"
 if command -v zig >/dev/null 2>&1; then ZIG=zig; else ZIG="$HOME/.local/zig/zig"; fi
 # Build artifacts and static files stay outside the checkout nginx serves.
 cp -a "$ROOT/public" "$WORKDIR/public"
-"$ZIG" build --prefix "$WORKDIR/build"
+"$ZIG" build -j4 -Doptimize="${OPTIMIZE:-Debug}" --prefix "$WORKDIR/build"
 
 say "Starting the application on port $APP_PORT"
 # A dedicated working directory: the binary reads ./.env and serves ./public,
 # and the real .env must not be picked up.
-FACIL_DIR="$(dirname "$(find "$ROOT/.zig-cache" -name 'libfacil.io.so' | head -1)")"
+FACIL_LIBRARY="$(ldd "$WORKDIR/build/bin/taskmanager" | awk '/libfacil.io.so =>/ {print $3}')"
+test -f "$FACIL_LIBRARY"
+FACIL_DIR="$(dirname "$(realpath "$FACIL_LIBRARY")")"
+
+# Exercise the same separation as production: root applies migrations once;
+# the serving process has only a database-scoped EDITOR credential.
+( cd "$WORKDIR" && env -i PATH="$PATH" LD_LIBRARY_PATH="$FACIL_DIR" \
+    SURREAL_URL="http://127.0.0.1:$DB_PORT" SURREAL_NS=taskmanager_it SURREAL_DB=main \
+    SURREAL_USER=itroot SURREAL_PASS=itpass DB_MIGRATE_ONLY=1 \
+    "$WORKDIR/build/bin/taskmanager" > "$WORKDIR/app.log" 2>&1 )
+curl -fsS -u itroot:itpass -H 'surreal-ns: taskmanager_it' -H 'surreal-db: main' \
+    -H 'Accept: application/json' --data-binary \
+    'DEFINE USER itapp ON DATABASE PASSWORD "integration-only-app" ROLES EDITOR;' \
+    "http://127.0.0.1:$DB_PORT/sql" | node -e '
+        let s=""; process.stdin.on("data", x => s+=x); process.stdin.on("end", () => {
+            if (JSON.parse(s).some(r => r.status !== "OK")) process.exit(1);
+        });'
 
 # Refuse to start on a port something else already owns, rather than failing
 # with ListenError and then testing whatever was already there.
@@ -89,7 +105,8 @@ if ss -H -ltn "sport = :$APP_PORT" | rg -q .; then
 fi
 ( cd "$WORKDIR" && exec env -i PATH="$PATH" \
     LD_LIBRARY_PATH="$FACIL_DIR" SURREAL_URL="http://127.0.0.1:$DB_PORT" \
-    SURREAL_NS=taskmanager_it SURREAL_DB=main SURREAL_USER=itroot SURREAL_PASS=itpass \
+    SURREAL_NS=taskmanager_it SURREAL_DB=main SURREAL_USER=itapp SURREAL_PASS=integration-only-app \
+    SURREAL_AUTH_LEVEL=database DB_AUTO_MIGRATE=0 \
     PORT="$APP_PORT" INTERFACE=127.0.0.1 CORS_ORIGIN="http://127.0.0.1:$APP_PORT" \
     APP_BASE_URL="http://127.0.0.1:$APP_PORT" COOKIE_INSECURE=1 LOG_LEVEL=info \
     SERVER_THREADS=4 "$WORKDIR/build/bin/taskmanager" > "$WORKDIR/app.log" 2>&1 ) &

@@ -60,17 +60,20 @@ More: [docs/PORTFOLIO.md](docs/PORTFOLIO.md)
 
 ## Quick Start
 
-### With Docker (recommended)
+### Database with Docker
 
-Brings up the app and SurrealDB together; no local Zig toolchain required:
+The versioned Compose file runs the database only. Configure `.env` first,
+then start it and run the app from source as described below:
 
 ```bash
-docker compose up --build
+cp .env.example .env
+# Set a strong SURREAL_PASS and SURREAL_URL=http://127.0.0.1:8010 in .env.
+docker compose up -d surrealdb
 ```
 
-The app is served at `http://localhost:9000`. Configuration is passed via the
-`environment:` block in `docker-compose.yml`; set `SMTP_*` there to enable
-verification and reset email.
+The app serves `http://127.0.0.1:9000`. For local HTTP only, set
+`COOKIE_INSECURE=1` and `CORS_ORIGIN=http://127.0.0.1:9000`. The standalone
+Dockerfile can build an app image, but Compose does not deploy that image.
 
 ### From source
 
@@ -204,6 +207,9 @@ docker-compose.yml      app + SurrealDB stack
 ```
 
 ## Roadmap
+
+Current audit and delivery plan: [security audit](docs/AUDIT-2026-09-06.md),
+[prioritized stages](docs/DELIVERY-PLAN.md), [incident response](docs/INCIDENT-RESPONSE.md).
 
 The current roadmap focuses on making the app more useful while keeping the
 engineering work visible:

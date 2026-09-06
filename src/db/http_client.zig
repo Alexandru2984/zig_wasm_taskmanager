@@ -15,6 +15,7 @@ pub const HttpError = error{
     ResponseTooLarge,
     MissingConfig,
     QueryError,
+    Conflict,
 };
 
 /// Database config
@@ -24,16 +25,20 @@ const DbConfig = struct {
     db: []const u8,
     user: []const u8,
     pass: []const u8,
+    database_auth: bool,
 };
 
 /// Get DB config from .env
 fn getDbConfig() !DbConfig {
+    const level = config.getOrDefault("SURREAL_AUTH_LEVEL", "root");
+    if (!std.mem.eql(u8, level, "root") and !std.mem.eql(u8, level, "database")) return error.InvalidDbConfig;
     return DbConfig{
         .url = config.getRequired("SURREAL_URL") catch return HttpError.MissingConfig,
         .ns = config.getRequired("SURREAL_NS") catch return HttpError.MissingConfig,
         .db = config.getRequired("SURREAL_DB") catch return HttpError.MissingConfig,
         .user = config.getRequired("SURREAL_USER") catch return HttpError.MissingConfig,
         .pass = config.getRequired("SURREAL_PASS") catch return HttpError.MissingConfig,
+        .database_auth = std.mem.eql(u8, level, "database"),
     };
 }
 
@@ -83,6 +88,15 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
     const client = try getThreadLocalClient();
     var response_writer = std.Io.Writer.Allocating.init(allocator);
     defer response_writer.deinit();
+    const headers = [_]std.http.Header{
+        .{ .name = "Accept", .value = "application/json" },
+        .{ .name = "Content-Type", .value = "application/surrealql" },
+        .{ .name = "Authorization", .value = auth_header },
+        .{ .name = "surreal-ns", .value = db_cfg.ns },
+        .{ .name = "surreal-db", .value = db_cfg.db },
+        .{ .name = "surreal-auth-ns", .value = db_cfg.ns },
+        .{ .name = "surreal-auth-db", .value = db_cfg.db },
+    };
 
     // A failed response can follow a committed write. Replaying arbitrary SQL
     // would duplicate creates or reverse toggles, so only the caller may retry
@@ -91,13 +105,7 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
         .location = .{ .url = url },
         .method = .POST,
         .payload = sql,
-        .extra_headers = &[_]std.http.Header{
-            .{ .name = "Accept", .value = "application/json" },
-            .{ .name = "Content-Type", .value = "application/surrealql" },
-            .{ .name = "Authorization", .value = auth_header },
-            .{ .name = "surreal-ns", .value = db_cfg.ns },
-            .{ .name = "surreal-db", .value = db_cfg.db },
-        },
+        .extra_headers = headers[0..if (db_cfg.database_auth) @as(usize, 7) else 5],
         .response_writer = &response_writer.writer,
     });
     if (result.status != .ok and result.status != .created and result.status != .accepted) {
@@ -118,6 +126,18 @@ fn validateSurrealResponse(allocator: std.mem.Allocator, raw_response: []const u
 
     switch (parsed.value) {
         .array => |arr| {
+            // A rolled-back transaction contains generic failure rows before
+            // its useful error. Classify conflicts without replaying the SQL.
+            for (arr.items) |item| {
+                if (item != .object) continue;
+                const status = item.object.get("status") orelse continue;
+                if (status != .string or !std.mem.eql(u8, status.string, "ERR")) continue;
+                const result = item.object.get("result") orelse continue;
+                if (result != .string) continue;
+                if (std.mem.indexOf(u8, result.string, "Task changed; retry") != null or
+                    std.mem.indexOf(u8, result.string, "This transaction can be retried") != null)
+                    return HttpError.Conflict;
+            }
             for (arr.items) |item| {
                 const obj = switch (item) {
                     .object => |o| o,
@@ -394,6 +414,15 @@ test "validateSurrealResponse rejects Surreal ERR status" {
     try std.testing.expectError(HttpError.QueryError, validateSurrealResponse(allocator,
         \\[{"time":"1ms","status":"ERR","result":"Parse error"}]
     ));
+}
+
+test "transaction conflicts are classified without treating user content as errors" {
+    try std.testing.expectError(HttpError.Conflict, validateSurrealResponse(std.testing.allocator,
+        \\[{"status":"ERR","result":"Transaction failed"},{"status":"ERR","result":"Task changed; retry"}]
+    ));
+    try validateSurrealResponse(std.testing.allocator,
+        \\[{"status":"OK","result":"Task changed; retry"}]
+    );
 }
 
 test "extractLastSurrealResult keeps the final statement result" {
