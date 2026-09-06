@@ -284,10 +284,42 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD IF NOT EXISTS updated_at ON tasks TYPE option<datetime>;
     );
 
+    try runMigration(allocator, "011_recurrence_once",
+        \\DEFINE FIELD IF NOT EXISTS recurrence_spawned ON tasks TYPE bool DEFAULT false;
+        \\UPDATE tasks SET recurrence_spawned = true WHERE completed = true AND recurrence != "none";
+        \\UPDATE tasks SET status = "done" WHERE completed = true AND status != "done";
+        \\UPDATE tasks SET status = "todo" WHERE completed = false AND status = "done";
+    );
+
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
 }
 
 // ============== USER OPERATIONS ==============
+
+fn nextDueDate(allocator: std.mem.Allocator, due: []const u8, recurrence: []const u8) !?[]u8 {
+    const ts = validation.dueDateToTimestamp(due) orelse return null;
+    const now = std.time.timestamp();
+    const date = if (std.mem.eql(u8, recurrence, "daily") or std.mem.eql(u8, recurrence, "weekly")) blk: {
+        const step: i64 = if (std.mem.eql(u8, recurrence, "daily")) 86400 else 7 * 86400;
+        const count = @max(1, @divFloor(now - ts, step) + 1);
+        break :blk try validation.timestampToDueDate(allocator, ts + count * step);
+    } else if (std.mem.eql(u8, recurrence, "monthly")) blk: {
+        const today = try validation.timestampToDueDate(allocator, now);
+        defer allocator.free(today);
+        const year = try std.fmt.parseInt(i64, today[0..4], 10);
+        const month = try std.fmt.parseInt(i64, today[5..7], 10);
+        const due_year = try std.fmt.parseInt(i64, due[0..4], 10);
+        const due_month = try std.fmt.parseInt(i64, due[5..7], 10);
+        var months = @max(1, (year - due_year) * 12 + month - due_month);
+        const candidate = try validation.addMonthClamped(allocator, ts, months);
+        if ((validation.dueDateToTimestamp(candidate) orelse return error.InvalidDueDate) > now) break :blk candidate;
+        allocator.free(candidate);
+        months += 1;
+        break :blk try validation.addMonthClamped(allocator, ts, months);
+    } else return null;
+    defer allocator.free(date);
+    return try normalizeDueDate(allocator, date);
+}
 
 pub fn createUser(allocator: std.mem.Allocator, email: []const u8, password_hash: []const u8, name: []const u8, verification_token: []const u8, verification_expires: i64) ![]u8 {
     const verification_hash = hashToken(verification_token);
@@ -333,10 +365,19 @@ pub fn resetUserPasswordAndClearToken(
     allocator: std.mem.Allocator,
     user_id: []const u8,
     password_hash: []const u8,
-) ![]u8 {
-    return queryWithVars(allocator,
-        \\UPDATE $record_id SET password_hash = $password_hash, reset_token = NONE, reset_expires = NONE;
-    , .{ .record_id = rec(user_id), .password_hash = password_hash });
+    token: []const u8,
+) !bool {
+    const result = try queryWithVars(allocator,
+        \\BEGIN TRANSACTION;
+        \\LET $changed = (UPDATE $record_id SET password_hash = $password_hash, reset_token = NONE, reset_expires = NONE WHERE reset_token = $token_hash AND reset_expires != NONE AND reset_expires >= time::unix() RETURN AFTER);
+        \\IF array::len($changed) > 0 { DELETE sessions WHERE user_id = $record_id; };
+        \\RETURN $changed;
+        \\COMMIT TRANSACTION;
+    , .{ .record_id = rec(user_id), .password_hash = password_hash, .token_hash = hashToken(token) });
+    defer allocator.free(result);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.User), allocator, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    return parsed.value.len > 0 and parsed.value[0].result.len == 1;
 }
 
 pub fn setResetToken(allocator: std.mem.Allocator, user_id: []const u8, token: []const u8, expires: i64) ![]u8 {
@@ -690,7 +731,7 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
 
     try w.writeAll("user_id = $user_id, workspace_id = $workspace_id, title = $title, " ++
         "priority = $priority, notes = $notes, tags = $tags, status = $status, " ++
-        "recurrence = $recurrence, completed = false, reminder_sent = false, " ++
+        "recurrence = $recurrence, completed = $completed, reminder_sent = false, " ++
         "reminder_attempts = 0, created_at = time::now()");
 
     const has_due = task.due_date != null and task.due_date.?.len > 0;
@@ -718,6 +759,7 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
         .tags = task.tags,
         .status = task.status,
         .recurrence = task.recurrence,
+        .completed = std.mem.eql(u8, task.status, "done"),
         .due_date = due_bind,
         // Bound unconditionally because the bind list is comptime, but only
         // referenced by the statement when the caller supplied one.
@@ -741,13 +783,13 @@ pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
 /// Delete a task together with anything hanging off it, so completing the
 /// parent's removal cannot leave orphaned subtasks that no view will show.
 pub fn deleteTaskWithChildren(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
-    const children = try queryWithVars(allocator,
-        \\DELETE tasks WHERE parent_id = $record_id;
-    , .{ .record_id = rec(task_id) });
-    allocator.free(children);
-
     return queryWithVars(allocator,
-        \\DELETE $record_id RETURN BEFORE;
+        \\BEGIN TRANSACTION;
+        \\LET $parent = (SELECT * FROM ONLY $record_id);
+        \\DELETE tasks WHERE parent_id = $record_id AND workspace_id = $parent.workspace_id;
+        \\LET $deleted = (DELETE $record_id RETURN BEFORE);
+        \\RETURN $deleted;
+        \\COMMIT TRANSACTION;
     , .{ .record_id = rec(task_id) });
 }
 
@@ -773,9 +815,24 @@ pub const TaskPatch = struct {
     recurrence: ?[]const u8 = null,
     /// Same convention as due_date: empty clears the assignment.
     assignee_id: ?[]const u8 = null,
+    toggle: bool = false,
 };
 
 pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: TaskPatch) ![]u8 {
+    // Read a snapshot to calculate calendar-aware recurrence in Zig. The
+    // transaction below rechecks its version and writes the same row, so
+    // concurrent mutations conflict at commit under snapshot isolation.
+    const snapshot = try getTaskById(allocator, task_id);
+    defer allocator.free(snapshot);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Task), allocator, snapshot, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (parsed.value.len == 0 or parsed.value[0].result.len == 0) return error.NotFound;
+    const before = parsed.value[0].result[0];
+    const due = patch.due_date orelse before.due_date;
+    const recurrence = patch.recurrence orelse before.recurrence;
+    const next = if (due) |date| try nextDueDate(allocator, date, recurrence) else null;
+    defer if (next) |date| allocator.free(date);
+
     var sets = std.ArrayListUnmanaged(u8){};
     defer sets.deinit(allocator);
     const w = sets.writer(allocator);
@@ -784,7 +841,7 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
     if (patch.title != null) try w.writeAll(", title = $title");
     if (patch.priority != null) try w.writeAll(", priority = $priority");
     if (patch.notes != null) try w.writeAll(", notes = $notes");
-    if (patch.completed != null) try w.writeAll(", completed = $completed");
+    if (patch.completed != null or patch.toggle) try w.writeAll(", completed = $completed");
     if (patch.tags != null) try w.writeAll(", tags = $tags");
     if (patch.recurrence != null) try w.writeAll(", recurrence = $recurrence");
     // Completion and the board column are two views of one fact, so writing
@@ -797,7 +854,7 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
         } else {
             try w.writeAll(", completed = false");
         }
-    } else if (patch.completed) |done| {
+    } else if (if (patch.toggle) @as(?bool, !before.completed) else patch.completed) |done| {
         try w.writeAll(if (done) ", status = \"done\"" else ", status = \"todo\"");
     }
     if (patch.assignee_id) |a| {
@@ -808,6 +865,7 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
         }
     }
     if (patch.due_date) |dd| {
+        try w.writeAll(", reminder_sent = false, reminder_sent_at = NONE, reminder_attempts = 0");
         if (dd.len == 0) {
             try w.writeAll(", due_date = NONE");
         } else {
@@ -815,7 +873,22 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
         }
     }
 
-    const sql = try std.fmt.allocPrint(allocator, "UPDATE $record_id SET {s} RETURN AFTER;", .{sets.items});
+    const sql = try std.fmt.allocPrint(allocator,
+        \\BEGIN TRANSACTION;
+        \\LET $before = (SELECT * FROM ONLY $record_id);
+        \\IF $before.updated_at != <option<datetime>>$expected_updated OR $before.completed != $expected_completed {{ THROW "Task changed; retry"; }};
+        \\LET $changed = (UPDATE $record_id SET {s} RETURN AFTER);
+        \\LET $task = $changed[0];
+        \\IF $task.completed AND !$before.completed AND !$before.recurrence_spawned AND $next_due != NONE {{
+        \\    CREATE tasks SET user_id = $task.user_id, workspace_id = $task.workspace_id, title = $task.title,
+        \\        priority = $task.priority, notes = $task.notes, tags = $task.tags, recurrence = $task.recurrence,
+        \\        assignee_id = $task.assignee_id, parent_id = $task.parent_id,
+        \\        due_date = <datetime>$next_due, status = "todo", completed = false;
+        \\    UPDATE $record_id SET recurrence_spawned = true;
+        \\}};
+        \\RETURN $changed;
+        \\COMMIT TRANSACTION;
+    , .{sets.items});
     defer allocator.free(sql);
 
     // due_date is normalised to a form SurrealDB accepts before binding.
@@ -836,12 +909,15 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
         .title = patch.title orelse "",
         .priority = patch.priority orelse "normal",
         .notes = patch.notes orelse "",
-        .completed = patch.completed orelse false,
+        .completed = if (patch.toggle) !before.completed else patch.completed orelse false,
         .tags = patch.tags orelse &[_][]const u8{},
         .due_date = due_bind,
         .status = patch.status orelse "todo",
         .recurrence = patch.recurrence orelse "none",
         .assignee_id = rec(if (patch.assignee_id) |a| (if (a.len == 0) "users:unset" else a) else "users:unset"),
+        .expected_updated = before.updated_at,
+        .expected_completed = before.completed,
+        .next_due = next,
     });
 }
 
@@ -856,9 +932,7 @@ fn normalizeDueDate(allocator: std.mem.Allocator, due_date: []const u8) ![]u8 {
 }
 
 pub fn toggleTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
-    return queryWithVars(allocator,
-        \\UPDATE $record_id SET completed = !completed;
-    , .{ .record_id = rec(task_id) });
+    return updateTask(allocator, task_id, .{ .toggle = true });
 }
 
 pub fn deleteTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
@@ -930,7 +1004,7 @@ pub fn deleteOtherUserSessions(allocator: std.mem.Allocator, user_id: []const u8
 /// join result it would only have to take apart again.
 pub fn exportUserTasks(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
-        \\SELECT id, title, notes, tags, completed, priority, due_date, created_at, updated_at, workspace_id FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE) ORDER BY created_at DESC;
+        \\SELECT id, title, notes, tags, completed, priority, due_date, created_at, updated_at, workspace_id, status, recurrence, parent_id, assignee_id FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE) ORDER BY created_at DESC;
     , .{ .user_id = rec(user_id) });
 }
 
@@ -1001,6 +1075,7 @@ pub fn getTaskOwner(allocator: std.mem.Allocator, task_id: []const u8) !?[]const
 }
 
 pub fn canWriteTask(allocator: std.mem.Allocator, task_id: []const u8, user_id: []const u8) !bool {
+    if (!http_client.validRecordIdFor(task_id, "tasks")) return false;
     const result = try queryWithVars(allocator,
         \\SELECT user_id, workspace_id FROM $record_id;
     , .{ .record_id = rec(task_id) });
@@ -1022,6 +1097,11 @@ pub fn canWriteTask(allocator: std.mem.Allocator, task_id: []const u8, user_id: 
     }
 
     return std.mem.eql(u8, task.user_id, user_id);
+}
+
+pub fn getTaskById(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
+    if (!http_client.validRecordIdFor(task_id, "tasks")) return error.InvalidRecordId;
+    return queryWithVars(allocator, "SELECT * FROM $record_id;", .{ .record_id = rec(task_id) });
 }
 
 pub fn verifyTaskOwnership(allocator: std.mem.Allocator, task_id: []const u8, user_id: []const u8) !bool {

@@ -465,16 +465,15 @@ pub fn handleResetPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     // SECURITY: update password AND invalidate the reset token in a single
     // UPDATE so a partial failure can't leave the token reusable.
     const password_hash = try auth.hashPassword(req_alloc, request.new_password);
-    const upd = db.resetUserPasswordAndClearToken(req_alloc, user.id, password_hash) catch {
+    const changed = db.resetUserPasswordAndClearToken(req_alloc, user.id, password_hash, request.token) catch {
         try http.jsonError(r, 500, "Failed to update password");
         return;
     };
-    req_alloc.free(upd);
-
-    // SECURITY: force re-login on all devices after a password reset.
-    db.deleteUserSessions(req_alloc, user.id) catch |err| {
-        log.warn("Failed to invalidate sessions for {s}: {}", .{ user.id, err });
-    };
+    if (!changed) {
+        try http.jsonError(r, 400, "Invalid or expired token");
+        return;
+    }
+    db.logActivity(req_alloc, user.id, "reset_password", "user", user.id) catch {};
 
     try http.jsonSuccess(r, models.SuccessResponse{ .status = "Password reset successfully" });
 }

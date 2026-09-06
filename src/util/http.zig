@@ -186,10 +186,8 @@ pub fn getSessionTokenFromCookie(r: zap.Request) ?[]const u8 {
 /// Requests carrying no session cookie are not CSRFable — there is nothing to
 /// ride on — and Bearer clients do not send browser cookies at all.
 pub fn verifyCsrfToken(allocator: std.mem.Allocator, r: zap.Request) bool {
-    if (r.getHeader("authorization")) |auth_header| {
-        if (std.mem.startsWith(u8, auth_header, "Bearer ")) return true;
-    }
-
+    // Authentication prefers the cookie, so an additional Bearer header must
+    // never exempt that cookie from CSRF validation (even a valid Bearer).
     const session_cookie = getSessionTokenFromCookie(r) orelse return true;
     if (session_cookie.len == 0) return true;
 

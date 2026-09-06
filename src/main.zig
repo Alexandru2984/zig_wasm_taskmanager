@@ -51,8 +51,8 @@ pub fn main() !void {
         while (true) : (attempt += 1) {
             if (db.initSchema(allocator)) |_| break else |err| {
                 if (attempt >= max_attempts) {
-                    log.warn("DB schema init failed after {d} attempts: {} (continuing)", .{ attempt, err });
-                    break;
+                    log.err("DB schema init failed after {d} attempts: {}; refusing to serve", .{ attempt, err });
+                    return err;
                 }
                 log.warn("DB not ready ({}); retry {d}/{d}…", .{ err, attempt, max_attempts });
                 std.Thread.sleep(1 * std.time.ns_per_s);
@@ -246,6 +246,7 @@ fn handleRequest(r: zap.Request) anyerror!void {
 
 fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !void {
     r.setHeader("Content-Type", "application/json") catch {};
+    r.setHeader("Cache-Control", "no-store") catch {};
 
     // SECURITY: CORS_ORIGIN must be explicitly set in .env. We refuse to send
     // "*" combined with Allow-Credentials (browsers reject it anyway, but
@@ -521,6 +522,10 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
             try http.jsonError(r, 400, "Invalid ID");
             return;
         };
+        if (!@import("db/http_client.zig").validRecordIdFor(task_id, "tasks")) {
+            try http.jsonError(r, 400, "Invalid task ID");
+            return;
+        }
 
         if (r.method) |method| {
             if (std.mem.eql(u8, method, "PUT")) {

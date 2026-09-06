@@ -72,6 +72,8 @@ jobs:
       # compiles cleanly and passes every unit test. Only talking to a real
       # database catches it.
       - name: Integration test
+        env:
+          RUN_SECURITY: '1'
         run: ./scripts/integration_test.sh
 
   ui:

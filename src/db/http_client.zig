@@ -7,10 +7,6 @@ const std = @import("std");
 const log = @import("../util/log.zig");
 const config = @import("../config/config.zig");
 
-// Retry configuration
-const MAX_RETRIES: u8 = 3;
-const RETRY_DELAYS_MS = [_]u64{ 200, 500, 1000 }; // 200ms, 500ms, 1s backoff
-
 pub const HttpError = error{
     ConnectionFailed,
     RequestFailed,
@@ -84,77 +80,34 @@ pub fn executeQuery(allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
     const auth_header = try buildAuthHeader(allocator, db_cfg.user, db_cfg.pass);
     defer allocator.free(auth_header);
 
-    var last_error: ?anyerror = null;
+    const client = try getThreadLocalClient();
+    var response_writer = std.Io.Writer.Allocating.init(allocator);
+    defer response_writer.deinit();
 
-    // Retry loop
-    var attempt: u8 = 0;
-    while (attempt < MAX_RETRIES) : (attempt += 1) {
-        // Get thread-local client
-        const client = getThreadLocalClient() catch |err| {
-            log.warn("❌ Failed to get HTTP client: {}", .{err});
-            return err;
-        };
-
-        // Response writer - allocating in request arena (allocator passed in)
-        var response_writer = std.Io.Writer.Allocating.init(allocator);
-        defer if (response_writer.writer.buffer.len > 0) allocator.free(response_writer.writer.buffer);
-
-        // Use fetch API with response_writer
-        const result = client.fetch(.{
-            .location = .{ .url = url },
-            .method = .POST,
-            .payload = sql,
-            .extra_headers = &[_]std.http.Header{
-                .{ .name = "Accept", .value = "application/json" },
-                .{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" },
-                .{ .name = "Authorization", .value = auth_header },
-                .{ .name = "surreal-ns", .value = db_cfg.ns },
-                .{ .name = "surreal-db", .value = db_cfg.db },
-                // Connection: keep-alive is default in Zig std.http.Client
-            },
-            .response_writer = &response_writer.writer,
-        }) catch |err| {
-            last_error = err;
-            log.warn("⚠️ DB attempt {d}/{d} failed: {}", .{ attempt + 1, MAX_RETRIES, err });
-
-            // If connection failed, maybe we need to reset the client?
-            // std.http.Client handles this mostly, but if it's stuck, we might want to deinit and null it.
-            // For now, let's assume it recovers or next retry works.
-
-            if (attempt < MAX_RETRIES - 1) {
-                std.Thread.sleep(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms);
-            }
-            continue;
-        };
-
-        // Check status
-        const status = result.status;
-        if (status == .ok or status == .created or status == .accepted) {
-            const raw_response = response_writer.toOwnedSlice() catch return HttpError.InvalidResponse;
-            errdefer allocator.free(raw_response);
-            try validateSurrealResponse(allocator, raw_response);
-            return raw_response;
-        } else if (@intFromEnum(status) >= 500) {
-            // Server error - retry
-            log.warn("⚠️ DB attempt {d}/{d}: HTTP {d}", .{ attempt + 1, MAX_RETRIES, @intFromEnum(status) });
-            last_error = HttpError.ServerError;
-
-            if (attempt < MAX_RETRIES - 1) {
-                std.Thread.sleep(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms);
-            }
-        } else {
-            // Client error (4xx) - don't retry
-            log.warn("❌ DB query error: HTTP {d}", .{@intFromEnum(status)});
-            const body = response_writer.writer.buffer;
-            const preview_len = @min(body.len, 200);
-            log.warn("   Response: {s}", .{body[0..preview_len]});
-            return HttpError.RequestFailed;
-        }
+    // A failed response can follow a committed write. Replaying arbitrary SQL
+    // would duplicate creates or reverse toggles, so only the caller may retry
+    // an operation whose idempotency it can establish.
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = sql,
+        .extra_headers = &[_]std.http.Header{
+            .{ .name = "Accept", .value = "application/json" },
+            .{ .name = "Content-Type", .value = "application/surrealql" },
+            .{ .name = "Authorization", .value = auth_header },
+            .{ .name = "surreal-ns", .value = db_cfg.ns },
+            .{ .name = "surreal-db", .value = db_cfg.db },
+        },
+        .response_writer = &response_writer.writer,
+    });
+    if (result.status != .ok and result.status != .created and result.status != .accepted) {
+        log.warn("Database request failed: HTTP {d}", .{@intFromEnum(result.status)});
+        return HttpError.RequestFailed;
     }
-
-    // All retries exhausted
-    log.warn("❌ DB query failed after {d} attempts", .{MAX_RETRIES});
-    return last_error orelse HttpError.ConnectionFailed;
+    const raw = try response_writer.toOwnedSlice();
+    errdefer allocator.free(raw);
+    try validateSurrealResponse(allocator, raw);
+    return raw;
 }
 
 fn validateSurrealResponse(allocator: std.mem.Allocator, raw_response: []const u8) !void {
@@ -242,7 +195,7 @@ pub fn rec(id: []const u8) RecordId {
 /// database: `type::record()` would reject it anyway, but failing here keeps a
 /// malformed id from costing a round trip and gives a single place to reason
 /// about what shapes are accepted.
-fn validRecordId(value: []const u8) bool {
+pub fn validRecordId(value: []const u8) bool {
     const colon = std.mem.indexOfScalar(u8, value, ':') orelse return false;
     if (colon == 0 or colon + 1 >= value.len) return false;
 
@@ -260,6 +213,11 @@ fn validRecordId(value: []const u8) bool {
         if (!ok) return false;
     }
     return true;
+}
+
+pub fn validRecordIdFor(value: []const u8, table: []const u8) bool {
+    return validRecordId(value) and std.mem.startsWith(u8, value, table) and
+        value.len > table.len and value[table.len] == ':';
 }
 
 /// Same escaping as writeEscapedString, but without the trailing `;\n` that
@@ -379,10 +337,16 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
 
     // With LET prefixes SurrealDB returns one result per statement; keep only
     // the last (the actual query), matching what the callers' parsers expect.
-    return try extractLastSurrealResult(allocator, raw_response);
+    // SurrealDB 3 emits a null result for COMMIT after the explicit RETURN.
+    const transaction = std.mem.endsWith(u8, std.mem.trim(u8, query_template, " \t\r\n"), "COMMIT TRANSACTION;");
+    return try extractSurrealResult(allocator, raw_response, if (transaction) 2 else 1);
 }
 
 fn extractLastSurrealResult(allocator: std.mem.Allocator, raw_response: []const u8) ![]u8 {
+    return extractSurrealResult(allocator, raw_response, 1);
+}
+
+fn extractSurrealResult(allocator: std.mem.Allocator, raw_response: []const u8, from_end: usize) ![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw_response, .{}) catch {
         return HttpError.InvalidResponse;
     };
@@ -394,7 +358,8 @@ fn extractLastSurrealResult(allocator: std.mem.Allocator, raw_response: []const 
     };
     if (arr.items.len == 0) return try allocator.dupe(u8, "[]");
 
-    const last = arr.items[arr.items.len - 1];
+    if (arr.items.len < from_end) return HttpError.InvalidResponse;
+    const last = arr.items[arr.items.len - from_end];
     var out = std.ArrayListUnmanaged(u8){};
     errdefer out.deinit(allocator);
 
@@ -407,6 +372,21 @@ fn extractLastSurrealResult(allocator: std.mem.Allocator, raw_response: []const 
     try out.append(allocator, ']');
 
     return try out.toOwnedSlice(allocator);
+}
+
+test "transaction result is RETURN before COMMIT, including empty replay result" {
+    const result = try extractSurrealResult(std.testing.allocator,
+        \\[{"status":"OK","result":null},{"status":"OK","result":[]},{"status":"OK","result":null}]
+    , 2);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("[{\"status\":\"OK\",\"result\":[]}]", result);
+}
+
+test "task references reject other tables and ranges" {
+    try std.testing.expect(validRecordIdFor("tasks:abc_123", "tasks"));
+    try std.testing.expect(!validRecordIdFor("workspace_members:abc", "tasks"));
+    try std.testing.expect(!validRecordIdFor("tasks:abc..zzz", "tasks"));
+    try std.testing.expect(!validRecordIdFor("tasks:", "tasks"));
 }
 
 test "validateSurrealResponse rejects Surreal ERR status" {

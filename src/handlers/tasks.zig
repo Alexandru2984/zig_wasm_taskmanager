@@ -31,7 +31,7 @@ pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     };
 
     const db_result = db.getTasksByUser(req_alloc, user_id) catch {
-        try http.jsonSuccess(r, [0]models.TaskResponse{});
+        try http.jsonError(r, 503, "Tasks are temporarily unavailable. Please retry.");
         return;
     };
     defer req_alloc.free(db_result);
@@ -117,6 +117,23 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         const parent_writable = db.canWriteTask(req_alloc, parent, user_id) catch false;
         if (!parent_writable) {
             try http.jsonError(r, 403, "Forbidden: parent task is not yours");
+            return;
+        }
+        const parent_result = try db.getTaskById(req_alloc, parent);
+        defer req_alloc.free(parent_result);
+        const parsed_parent = try std.json.parseFromSlice([]models.SurrealResponse(models.Task), req_alloc, parent_result, .{ .ignore_unknown_fields = true });
+        defer parsed_parent.deinit();
+        if (parsed_parent.value.len == 0 or parsed_parent.value[0].result.len == 0) {
+            try http.jsonError(r, 400, "Parent task is unavailable");
+            return;
+        }
+        const parent_task = parsed_parent.value[0].result[0];
+        if (parent_task.workspace_id == null or !std.mem.eql(u8, parent_task.workspace_id.?, workspace_id)) {
+            try http.jsonError(r, 400, "Parent task must belong to the same workspace");
+            return;
+        }
+        if (parent_task.parent_id != null) {
+            try http.jsonError(r, 400, "Subtasks support one level of nesting");
             return;
         }
     }
@@ -251,64 +268,6 @@ fn validateTags(tags: []const []const u8) bool {
     return true;
 }
 
-/// Advance a due date by one recurrence step.
-///
-/// Month arithmetic clamps rather than overflowing: the 31st of a month
-/// followed by a 30-day month lands on the 30th, not the 1st of the month
-/// after. Anyone who has had a monthly task quietly drift a day later every
-/// other month knows why that matters.
-fn nextDueDate(allocator: std.mem.Allocator, due: []const u8, recurrence: []const u8) !?[]u8 {
-    const ts = validation.dueDateToTimestamp(due) orelse return null;
-
-    if (std.mem.eql(u8, recurrence, "daily")) {
-        return try validation.timestampToDueDate(allocator, ts + 24 * 60 * 60);
-    }
-    if (std.mem.eql(u8, recurrence, "weekly")) {
-        return try validation.timestampToDueDate(allocator, ts + 7 * 24 * 60 * 60);
-    }
-    if (std.mem.eql(u8, recurrence, "monthly")) {
-        return try validation.addMonthClamped(allocator, ts, 1);
-    }
-    return null;
-}
-
-/// Create the next instance of a recurring task.
-///
-/// Failures here are logged, not surfaced: the user completed a task and that
-/// succeeded. Telling them the completion failed because the follow-up could
-/// not be created would be both untrue and unhelpful.
-fn spawnRecurrence(r: zap.Request, req_alloc: std.mem.Allocator, user_id: []const u8, task: models.Task) void {
-    _ = r;
-    if (std.mem.eql(u8, task.recurrence, "none")) return;
-    if (!task.completed) return;
-    const due = task.due_date orelse return;
-
-    const next = nextDueDate(req_alloc, due, task.recurrence) catch |err| {
-        log.warn("Could not compute the next due date for {s}: {}", .{ task.id, err });
-        return;
-    } orelse return;
-    defer req_alloc.free(next);
-
-    const workspace_id = task.workspace_id orelse return;
-    const created = db.createTask(req_alloc, .{
-        .user_id = user_id,
-        .workspace_id = workspace_id,
-        .title = task.title,
-        .priority = task.priority,
-        .notes = task.notes,
-        .tags = task.tags,
-        .due_date = next,
-        .status = "todo",
-        .recurrence = task.recurrence,
-        .assignee_id = task.assignee_id,
-    }) catch |err| {
-        log.warn("Could not create the next occurrence of {s}: {}", .{ task.id, err });
-        return;
-    };
-    req_alloc.free(created);
-    log.info("Created the next occurrence of a {s} task", .{task.recurrence});
-}
-
 /// PUT /api/tasks/:id
 ///
 /// A body with fields patches those fields. A body-less PUT toggles
@@ -319,14 +278,13 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         try http.jsonError(r, 401, "Unauthorized");
         return;
     };
-    if (!try rateLimitWrite(r, user_id)) return;
-
     const body = r.body orelse "";
     const has_body = std.mem.trim(u8, body, " \t\r\n").len > 0;
     if (!has_body) {
         try toggleTask(r, task_id, req_alloc);
         return;
     }
+    if (!try rateLimitWrite(r, user_id)) return;
 
     const request = http.parseBody(req_alloc, r, models.UpdateTaskRequest) catch {
         try http.jsonError(r, 400, "Invalid JSON body");
@@ -366,6 +324,28 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         return;
     }
 
+    if (request.assignee_id) |assignee| {
+        if (assignee.len > 0) {
+            if (!@import("../db/http_client.zig").validRecordIdFor(assignee, "users")) {
+                try http.jsonError(r, 400, "Invalid assignee ID");
+                return;
+            }
+            const task_result = try db.getTaskById(req_alloc, task_id);
+            defer req_alloc.free(task_result);
+            const current = try std.json.parseFromSlice([]models.SurrealResponse(models.Task), req_alloc, task_result, .{ .ignore_unknown_fields = true });
+            defer current.deinit();
+            if (current.value.len == 0 or current.value[0].result.len == 0) {
+                try http.jsonError(r, 404, "Task not found");
+                return;
+            }
+            const workspace = current.value[0].result[0].workspace_id;
+            if (workspace == null or !try assigneeIsMember(req_alloc, assignee, workspace.?)) {
+                try http.jsonError(r, 400, "The assignee is not a member of this workspace");
+                return;
+            }
+        }
+    }
+
     const db_result = db.updateTask(req_alloc, task_id, .{
         .title = request.title,
         .priority = request.priority,
@@ -393,7 +373,6 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
     db.logActivity(req_alloc, user_id, "update_task", "task", task.id) catch |err| {
         log.warn("Failed to log update task activity: {}", .{err});
     };
-    spawnRecurrence(r, req_alloc, user_id, task);
 
     try http.jsonSuccess(r, toResponse(task));
 }
@@ -434,7 +413,6 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
     db.logActivity(req_alloc, user_id, "toggle_task", "task", task.id) catch |err| {
         log.warn("Failed to log toggle task activity: {}", .{err});
     };
-    spawnRecurrence(r, req_alloc, user_id, task);
 
     try http.jsonSuccess(r, toResponse(task));
 }

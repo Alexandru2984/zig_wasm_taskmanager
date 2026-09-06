@@ -250,6 +250,10 @@ pub const DeleteAccountRequest = struct {
 };
 
 pub const ExportTask = struct {
+    status: []const u8 = "todo",
+    recurrence: []const u8 = "none",
+    parent_id: ?[]const u8 = null,
+    assignee_id: ?[]const u8 = null,
     id: []const u8,
     title: []const u8,
     notes: []const u8 = "",

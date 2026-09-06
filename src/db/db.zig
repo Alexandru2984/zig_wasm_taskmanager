@@ -105,6 +105,7 @@ pub const removeWorkspaceMember = impl.removeWorkspaceMember;
 pub const listPendingWorkspaceInvites = impl.listPendingWorkspaceInvites;
 pub const deleteWorkspaceInviteScoped = impl.deleteWorkspaceInviteScoped;
 pub const canWriteTask = impl.canWriteTask;
+pub const getTaskById = impl.getTaskById;
 
 // Session operations
 pub const generateSecureToken = impl.generateSecureToken;
