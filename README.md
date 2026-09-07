@@ -29,16 +29,16 @@ systemd-sandboxed VPS deployment.
 - Keyboard shortcuts, and a CSV export that runs in the browser.
 - Multi-workspace task tenancy with owner/admin/member/viewer roles, member
   listing, and email invite acceptance.
-- Email verification and password reset through SMTP, dispatched on a background
-  queue so response time never reveals whether an address exists.
-- Optional email reminders for overdue incomplete tasks.
+- Email verification and password reset through SMTP with background dispatch.
+  Signup still reveals existing addresses; timing equivalence is not established.
+- Optional email reminders before task deadlines.
 - Activity log for account and task actions, with a UI to read it.
 - Session management: see where you are signed in and revoke a device.
 - JSON data export and account deletion, both reachable from the app.
 - Per-route rate limiting, strict CORS, CSP, HSTS, safe static-file serving,
   CSRF protection, and protected metrics.
-- One-command Docker Compose stack (app + SurrealDB) and 12-factor configuration
-  via `.env` or environment variables.
+- Docker Compose for the database and a separate app Dockerfile; configuration
+  via `.env` or recognized environment variables.
 - Production deployment behind nginx/TLS with a hardened systemd service.
 
 ## Portfolio Summary
@@ -98,7 +98,8 @@ by a process environment variable of the same name.
 ```bash
 ./scripts/check.sh            # formatting, build, unit tests
 ./scripts/integration_test.sh # API against a throwaway SurrealDB
-npm install && node scripts/ui_test.mjs   # browser checks
+npm ci
+RUN_SECURITY=1 RUN_UI=1 ./scripts/integration_test.sh # isolated full suite
 ```
 
 All three run in CI on every push.
@@ -168,15 +169,14 @@ Current controls include:
 
 - Argon2id password hashing
 - server-side sessions with HttpOnly cookies and hashed DB tokens
-- CSRF tokens bound to the session they were issued with — the token's hash is
-  stored on the session row, so forging one requires reading the HttpOnly
-  session cookie
+- CSRF tokens bound to the session they were issued with; cookie-authenticated
+  writes still require the token when a Bearer header is also supplied
 - `__Host-` cookie prefixes, which the browser refuses unless the cookie is
   Secure, Path=/ and has no Domain, making it unsettable by sibling subdomains
 - workspace membership checks for task reads/writes
 - reset-token invalidation and session invalidation after password reset/password change
 - authenticated email verification with per-user attempt caps
-- background email dispatch so reset/verify response time can't be used to enumerate accounts
+- background email dispatch; no guarantee of account-enumeration timing equivalence
 - route-specific rate limiting; the per-account login limit counts only failed attempts, and password changes are throttled
 - nginx `limit_req` zones in front of the in-process limiters, which survive a restart
 - the origin answers only Cloudflare edge addresses, so the WAF cannot be skipped by finding the server's IP
@@ -203,12 +203,13 @@ scripts/check.sh        local verification entry point
 scripts/smoke_test.sh   optional API smoke tests
 docs/                   deployment, architecture, roadmap, OpenAPI, portfolio
 Dockerfile              multi-stage build (Zig builder + slim runtime)
-docker-compose.yml      app + SurrealDB stack
+docker-compose.yml      SurrealDB service (app deployed separately)
 ```
 
 ## Roadmap
 
 Current audit and delivery plan: [security audit](docs/AUDIT-2026-09-06.md),
+[product implementation](docs/PRODUCT-IMPLEMENTATION.md),
 [prioritized stages](docs/DELIVERY-PLAN.md), [incident response](docs/INCIDENT-RESPONSE.md).
 
 The current roadmap focuses on making the app more useful while keeping the

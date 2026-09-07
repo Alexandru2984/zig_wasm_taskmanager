@@ -1,5 +1,9 @@
 # Delivery plan — 2026-09-06
 
+The current execution order is [PRODUCT-IMPLEMENTATION.md](PRODUCT-IMPLEMENTATION.md).
+External backup is deferred by the owner as of 2026-09-07; it is not counted as
+implemented or a prerequisite for starting the remaining development batches.
+
 Baseline and risks: [audit](AUDIT-2026-09-06.md). Each completed stage is
 verified and committed separately, using the existing repository identity and
 no coauthor trailers. Production promotion follows isolated tests and a
