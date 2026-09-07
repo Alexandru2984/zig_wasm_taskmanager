@@ -62,3 +62,35 @@ credential rotation/recovery permissions, persistent data/root/runtime access,
 runtime root denial, startup without secrets and rollback to the original
 container. Owned test containers and data are removed afterwards. It never
 reads production configuration or changes production containers.
+
+## Production evidence — 2026-09-08
+
+Implementation commit: `e7ee103`. The disposable persistent drill passed,
+including shared-namespace refusal, rotation, recovery-file permissions,
+old-password denial, restricted runtime access and container rollback.
+
+On the dedicated production DB, `main/main` was confirmed to have no schema,
+users or access definitions; the only application namespace is `taskmanager`.
+The exposed administrator password was rotated. New admin access worked, old
+Basic authentication returned 401, and database EDITOR access still worked
+while root access was denied. The original admin configuration was atomically
+updated with its existing ownership; runtime credentials were unchanged.
+
+The original image ID, RocksDB bind mount, log volume, bridge network and
+loopback port 8010 were preserved. The running replacement container contains
+no bootstrap credential arguments or environment variables. The former
+container is retained stopped as `surrealdb-taskmanager-v3-before-20260908`,
+with automatic restart disabled. Never start it while the replacement uses
+the same database directory.
+
+Protected pre/post exports (31,557 bytes each), old container inspection,
+previous admin config and new admin recovery config are under
+`/var/backups/taskmanager/20260908-db-hardening` (root-only directory; files
+mode 0600). No production database export was imported, and no customer data
+was deleted. Temporary drill containers/data were removed; source backups
+remain recoverable. No external upload occurred.
+
+Local and public `/api/ready` returned ready/connected after the controlled
+restart. Application release remained `84d1936`, active with zero automatic
+restarts. This closes the specific active startup-secret exposure, not every
+possible host compromise or prior administrative bearer-token exposure.
