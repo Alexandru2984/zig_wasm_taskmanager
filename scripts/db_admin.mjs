@@ -1,11 +1,12 @@
 // Local deployment operations. Secrets are read from a private file, never
 // interpolated into command arguments or printed. Backup output is mode 0600.
 import fs from 'node:fs';
+import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
 
 const [action, source, destination] = process.argv.slice(2);
-assert.ok(['backup', 'restore-test', 'provision-runtime', 'verify-runtime'].includes(action));
+assert.ok(['backup', 'restore-test', 'provision-runtime', 'verify-runtime', 'rotate-admin', 'verify-admin'].includes(action));
 assert.ok(source && destination, 'usage: db_admin.mjs action env-file output-path-or-test-url');
 const raw = fs.readFileSync(source, 'utf8');
 const cfg = {};
@@ -42,7 +43,59 @@ function successful(rows) {
     return rows;
 }
 
-if (action === 'backup') {
+if (action === 'rotate-admin') {
+    // A durable recovery file is created BEFORE changing the database. If the
+    // HTTP response or final config replacement is lost, that file contains
+    // the candidate credential; never generate another candidate blindly.
+    assert.notEqual(cfg.SURREAL_AUTH_LEVEL, 'database');
+    assert.match(cfg.SURREAL_USER, /^[a-zA-Z_][a-zA-Z0-9_]*$/);
+    const original = fs.lstatSync(source);
+    assert.ok(original.isFile() && !original.isSymbolicLink(), 'source must be a regular private config');
+    assert.equal(original.mode & 0o077, 0, 'source config must be private');
+    const parent = fs.statSync(path.dirname(destination));
+    assert.ok(parent.isDirectory() && (parent.mode & 0o077) === 0, 'recovery directory must be private');
+    assert.ok(!fs.existsSync(destination), 'recovery config already exists; inspect it before retrying');
+    const info = successful(await query('INFO FOR ROOT;'))[0].result;
+    assert.ok(Object.hasOwn(info.users, cfg.SURREAL_USER), 'configured root identity must exist');
+    assert.ok(Object.hasOwn(info.namespaces, cfg.SURREAL_NS));
+    for (const other of Object.keys(info.namespaces).filter(name => name !== cfg.SURREAL_NS)) {
+        // SurrealDB 3.x creates an empty main/main at bootstrap. Accept that
+        // exact empty default, not another application's namespace or schema.
+        assert.equal(other, 'main', 'shared DB server requires a separate rotation review');
+        const defaultHeaders = { ...headers, 'surreal-ns': 'main', 'surreal-db': 'main' };
+        const ns = successful(await query('INFO FOR NS;', url, defaultHeaders))[0].result;
+        assert.deepEqual(Object.keys(ns.databases), ['main']);
+        assert.ok(Object.entries(ns).filter(([key]) => key !== 'databases').every(([, value]) => Object.keys(value).length === 0));
+        const database = successful(await query('INFO FOR DB;', url, defaultHeaders))[0].result;
+        assert.ok(Object.values(database).every(value => Object.keys(value).length === 0), 'default namespace contains resources; review shared scope');
+    }
+    const password = randomBytes(48).toString('base64url');
+    const filtered = raw.split('\n').filter(line => !/^\s*(?:export\s+)?SURREAL_PASS\s*=/.test(line)).join('\n');
+    const replacement = `${filtered}\nSURREAL_PASS=${password}\n`;
+    function durableFile(filename, uid, gid) {
+        const fd = fs.openSync(filename, 'wx', 0o600);
+        try { fs.writeFileSync(fd, replacement); fs.fchownSync(fd, uid, gid); fs.fsyncSync(fd); }
+        finally { fs.closeSync(fd); }
+        const dir = fs.openSync(path.dirname(filename), 'r');
+        try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+    }
+    durableFile(destination, process.getuid(), process.getgid());
+    // ALTER changes only the password, preserving the existing role/duration.
+    successful(await query(`ALTER USER ${cfg.SURREAL_USER} ON ROOT PASSWORD '${password}';`));
+    const rotatedHeaders = { ...headers, Authorization: `Basic ${Buffer.from(`${cfg.SURREAL_USER}:${password}`).toString('base64')}` };
+    successful(await query('INFO FOR ROOT;', url, rotatedHeaders));
+    const old = await fetch(new URL('/sql', url), { method: 'POST', headers, body: 'INFO FOR ROOT;' });
+    assert.equal(old.status, 401, 'old administrator password must no longer authenticate');
+    const next = `${source}.rotation-${randomBytes(8).toString('hex')}`;
+    durableFile(next, original.uid, original.gid);
+    fs.renameSync(next, source);
+    const directory = fs.openSync(path.dirname(source), 'r');
+    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    console.log('Administrator credential rotated; old authentication denied; private source and recovery configs saved.');
+} else if (action === 'verify-admin') {
+    successful(await query('INFO FOR ROOT;'));
+    console.log('Administrator authentication verified (details withheld).');
+} else if (action === 'backup') {
     const response = await fetch(new URL('/export', url), { headers: { ...headers, Accept: 'application/octet-stream' } });
     assert.equal(response.status, 200, 'export failed');
     const data = Buffer.from(await response.arrayBuffer());

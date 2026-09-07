@@ -1,13 +1,7 @@
-# task.micutu.com — SurrealDB backing store for the Zig taskmanager
-#
-# On OVH this ran as a hand-started `docker run`. Recreated here as compose so it
-# survives a reboot and is describable. Image pinned by digest to match OVH.
-# The data directory is a bind mount, not a named volume, exactly as on OVH.
-#
-# SECURITY: credentials are never written here. Compose reads them from the
-# adjacent .env (git-ignored, mode 0600), the same file the app itself parses,
-# so there is exactly one place holding the database password.
-# Required keys: SURREAL_USER, SURREAL_PASS.
+# Existing-installation database service. Root identity persists in RocksDB;
+# ordinary startup must not expose bootstrap secrets in argv or environment.
+# For a NEW empty store only, use docker-compose.bootstrap.yml once and then
+# recreate with this file alone. See docs/DATABASE-HARDENING.md.
 
 services:
   surrealdb:
@@ -24,15 +18,10 @@ services:
       - info
       # `--auth` was removed in 3.x: authentication is always on, and passing
       # the flag now makes the server refuse to start.
-      - --user
-      - "${SURREAL_USER:?SURREAL_USER must be set in .env}"
-      - --pass
-      - "${SURREAL_PASS:?SURREAL_PASS must be set in .env}"
       # `file:` was an alias for rocksdb: and is gone in 3.x.
       - rocksdb:/data/database.db
     volumes:
       - /var/lib/surrealdb-taskmanager-v3:/data
-    # Bound to loopback only: the database is reachable from the host app and
-    # nothing else. nginx never proxies to it.
+    # Loopback excludes remote clients, not other processes on this host.
     ports:
       - "127.0.0.1:8010:8000"

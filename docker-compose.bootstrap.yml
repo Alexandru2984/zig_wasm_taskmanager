@@ -1,0 +1,9 @@
+# NEW empty stores only. Secrets reach the first server through environment,
+# not arguments. Recreate WITHOUT this override after root identity persists.
+# Docker administrators can inspect this environment; they already control DB
+# storage. Never print `docker compose config` with the private environment.
+services:
+  surrealdb:
+    environment:
+      SURREAL_USER: ${SURREAL_USER:?Bootstrap administrator name required}
+      SURREAL_PASS: ${SURREAL_PASS:?Bootstrap administrator password required}

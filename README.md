@@ -68,7 +68,10 @@ then start it and run the app from source as described below:
 ```bash
 cp .env.example .env
 # Set a strong SURREAL_PASS and SURREAL_URL=http://127.0.0.1:8010 in .env.
-docker compose up -d surrealdb
+# New empty database only (omit the bootstrap override for an existing store):
+docker compose -f docker-compose.yml -f docker-compose.bootstrap.yml up -d surrealdb
+# After initialization, recreate without bootstrap credentials; see
+# docs/DATABASE-HARDENING.md for the complete bootstrap/runtime separation.
 ```
 
 The app serves `http://127.0.0.1:9000`. For local HTTP only, set
