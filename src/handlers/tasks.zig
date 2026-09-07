@@ -163,7 +163,7 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         .assignee_id = request.assignee_id,
     }) catch |err| {
         log.warn("Failed to create task: {}", .{err});
-        try http.jsonError(r, 500, "Failed to create task");
+        try http.mutationError(r, err, "Failed to create task");
         return;
     };
     defer req_alloc.free(db_result);
@@ -346,7 +346,7 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         }
     }
 
-    const db_result = db.updateTask(req_alloc, task_id, .{
+    const db_result = db.updateTask(req_alloc, task_id, user_id, .{
         .title = request.title,
         .priority = request.priority,
         .notes = request.notes,
@@ -361,7 +361,7 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
             try http.jsonError(r, 409, "Task changed. Refresh and retry.");
             return;
         }
-        try http.jsonError(r, 500, "Failed to update task");
+        try http.mutationError(r, err, "Failed to update task");
         return;
     };
     defer req_alloc.free(db_result);
@@ -398,12 +398,12 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         return;
     }
 
-    const db_result = db.toggleTask(req_alloc, task_id) catch |err| {
+    const db_result = db.toggleTask(req_alloc, task_id, user_id) catch |err| {
         if (err == error.Conflict) {
             try http.jsonError(r, 409, "Task changed. Refresh and retry.");
             return;
         }
-        try http.jsonError(r, 500, "Failed to toggle task");
+        try http.mutationError(r, err, "Failed to toggle task");
         return;
     };
     defer req_alloc.free(db_result);
@@ -444,8 +444,8 @@ pub fn deleteTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
 
     // Subtasks go with the parent. Leaving them behind would strand rows that
     // no view lists, since a subtask is only ever shown under its parent.
-    _ = db.deleteTaskWithChildren(req_alloc, task_id) catch {
-        try http.jsonError(r, 500, "Failed to delete task");
+    _ = db.deleteTaskWithChildren(req_alloc, task_id, user_id) catch |err| {
+        try http.mutationError(r, err, "Failed to delete task");
         return;
     };
     db.logActivity(req_alloc, user_id, "delete_task", "task", task_id) catch |err| {

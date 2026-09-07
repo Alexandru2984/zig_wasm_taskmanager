@@ -60,8 +60,8 @@ pub fn createWorkspace(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     }
 
-    const db_result = db.createWorkspace(req_alloc, user_id, request.name) catch {
-        try http.jsonError(r, 500, "Failed to create workspace");
+    const db_result = db.createWorkspace(req_alloc, user_id, request.name) catch |err| {
+        try http.mutationError(r, err, "Failed to create workspace");
         return;
     };
     defer req_alloc.free(db_result);
@@ -176,8 +176,8 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
 
     const token = db.generateSecureToken();
     const expires_at = now + (7 * 24 * 60 * 60);
-    const invite_result = db.createWorkspaceInvite(req_alloc, workspace_id, invite_email, request.role, user_id, token[0..], expires_at) catch {
-        try http.jsonError(r, 500, "Failed to create invite");
+    const invite_result = db.createWorkspaceInvite(req_alloc, workspace_id, invite_email, request.role, user_id, token[0..], expires_at) catch |err| {
+        try http.mutationError(r, err, "Failed to create invite");
         return;
     };
     defer req_alloc.free(invite_result);
@@ -281,12 +281,9 @@ pub fn acceptInvite(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     }
 
-    db.addWorkspaceMember(req_alloc, invite.workspace_id, user_id, invite.role) catch {
-        try http.jsonError(r, 500, "Failed to join workspace");
+    db.acceptWorkspaceInviteAtomic(req_alloc, user_id, request.token) catch |err| {
+        try http.mutationError(r, err, "Failed to join workspace");
         return;
-    };
-    db.markWorkspaceInviteAccepted(req_alloc, invite.id, now) catch |err| {
-        log.warn("Failed to mark invite accepted: {}", .{err});
     };
     db.logActivity(req_alloc, user_id, "accept_workspace_invite", "workspace", invite.workspace_id) catch |err| {
         log.warn("Failed to log accept invite activity: {}", .{err});
@@ -343,8 +340,8 @@ pub fn changeMemberRole(r: zap.Request, workspace_id: []const u8, req_alloc: std
         return;
     }
 
-    const upd = db.updateWorkspaceMemberRole(req_alloc, workspace_id, request.user_id, request.role) catch {
-        try http.jsonError(r, 500, "Failed to update role");
+    const upd = db.updateWorkspaceMemberRole(req_alloc, user_id, workspace_id, request.user_id, request.role) catch |err| {
+        try http.mutationError(r, err, "Failed to update role");
         return;
     };
     defer req_alloc.free(upd);
@@ -393,8 +390,8 @@ pub fn removeMember(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
         return;
     }
 
-    const del = db.removeWorkspaceMember(req_alloc, workspace_id, request.user_id) catch {
-        try http.jsonError(r, 500, "Failed to remove member");
+    const del = db.removeWorkspaceMember(req_alloc, user_id, workspace_id, request.user_id) catch |err| {
+        try http.mutationError(r, err, "Failed to remove member");
         return;
     };
     defer req_alloc.free(del);
@@ -454,8 +451,8 @@ pub fn revokeInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
         return;
     }
 
-    const del = db.deleteWorkspaceInviteScoped(req_alloc, request.invite_id, workspace_id) catch {
-        try http.jsonError(r, 500, "Failed to revoke invite");
+    const del = db.deleteWorkspaceInviteScoped(req_alloc, user_id, request.invite_id, workspace_id) catch |err| {
+        try http.mutationError(r, err, "Failed to revoke invite");
         return;
     };
     defer req_alloc.free(del);

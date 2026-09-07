@@ -68,6 +68,31 @@ This was a desk review with a technical restore exercise, not a staffed on-call
 or notification drill. No incidents were declared or messages sent. The VPS
 owner must designate the alert channel and validate human response times.
 
+### P1 affected-scenario walkthrough — 2026-09-07
+
+- Password/session failure: a synthetic session-creation failure leaves the
+  existing password, reset token and sessions unchanged. Concurrent changes
+  have one winner; a login using a stale verified hash cannot leave a late
+  session after rotation. On a real ambiguous response, do not blindly replay
+  writes; check authentication/session state and use the recovery flow.
+- Invite/member failure: synthetic membership failure leaves the invite
+  unconsumed. Revoked invites and demoted issuers cannot grant stale authority.
+  A delayed task write conflicts with administrative permission revocation.
+  On a real incident, examine scoped membership and invite state privately;
+  do not expose invitation tokens in support messages.
+- Account-deletion failure: a synthetic deletion failure rolls back account,
+  workspace, membership, session and task removal together. A successful
+  deletion remains deliberately destructive, not undoable. Stop further
+  destructive actions if mistaken deletion is reported; preserve current
+  state and assess recovery from a separate restored local export before
+  deciding what can safely be reintroduced.
+
+These are disposable technical failure exercises plus an operator desk review,
+not production account mutations or a human alert-delivery drill. Before P1
+promotion take a new protected local export and preserve release `973767a`.
+Migration 012 is additive: binary rollback must not erase newer customer writes,
+and it temporarily removes P1's race protections. No off-host recovery exists.
+
 ## Draft incident communication (do not send automatically)
 
 “On [UTC date/time] we detected [confirmed event]. We have [containment].

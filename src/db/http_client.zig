@@ -16,6 +16,9 @@ pub const HttpError = error{
     MissingConfig,
     QueryError,
     Conflict,
+    PermissionDenied,
+    InvalidOperation,
+    NotFound,
 };
 
 /// Database config
@@ -134,7 +137,11 @@ fn validateSurrealResponse(allocator: std.mem.Allocator, raw_response: []const u
                 if (status != .string or !std.mem.eql(u8, status.string, "ERR")) continue;
                 const result = item.object.get("result") orelse continue;
                 if (result != .string) continue;
+                if (std.mem.indexOf(u8, result.string, "APP_FORBIDDEN") != null) return HttpError.PermissionDenied;
+                if (std.mem.indexOf(u8, result.string, "APP_INVALID") != null) return HttpError.InvalidOperation;
+                if (std.mem.indexOf(u8, result.string, "APP_NOT_FOUND") != null) return HttpError.NotFound;
                 if (std.mem.indexOf(u8, result.string, "Task changed; retry") != null or
+                    std.mem.indexOf(u8, result.string, "APP_CONFLICT") != null or
                     std.mem.indexOf(u8, result.string, "This transaction can be retried") != null)
                     return HttpError.Conflict;
             }
@@ -422,6 +429,27 @@ test "transaction conflicts are classified without treating user content as erro
     ));
     try validateSurrealResponse(std.testing.allocator,
         \\[{"status":"OK","result":"Task changed; retry"}]
+    );
+    try std.testing.expectError(HttpError.Conflict, validateSurrealResponse(std.testing.allocator,
+        \\[{"status":"ERR","result":"The query was not executed due to a failed transaction"},{"status":"ERR","result":"Cannot COMMIT: Transaction conflict: Write conflict, retry the transaction. This transaction can be retried"}]
+    ));
+}
+
+test "transaction authorization errors are classified past rollback rows" {
+    try std.testing.expectError(HttpError.PermissionDenied, validateSurrealResponse(std.testing.allocator,
+        \\[{"status":"ERR","result":"Transaction failed"},{"status":"ERR","result":"An error occurred: APP_FORBIDDEN"}]
+    ));
+    try std.testing.expectError(HttpError.InvalidOperation, validateSurrealResponse(std.testing.allocator,
+        \\[{"status":"ERR","result":"APP_INVALID"}]
+    ));
+    try std.testing.expectError(HttpError.NotFound, validateSurrealResponse(std.testing.allocator,
+        \\[{"status":"ERR","result":"APP_NOT_FOUND"}]
+    ));
+    try std.testing.expectError(HttpError.Conflict, validateSurrealResponse(std.testing.allocator,
+        \\[{"status":"ERR","result":"APP_CONFLICT"}]
+    ));
+    try validateSurrealResponse(std.testing.allocator,
+        \\[{"status":"OK","result":"APP_FORBIDDEN APP_INVALID APP_NOT_FOUND APP_CONFLICT"}]
     );
 }
 

@@ -238,8 +238,8 @@ pub fn deleteAccount(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     }
 
-    db.deleteUserAccount(req_alloc, user_id) catch {
-        try http.jsonError(r, 500, "Failed to delete account");
+    db.deleteUserAccount(req_alloc, user_id, user.password_hash) catch |err| {
+        try http.mutationError(r, err, "Failed to delete account");
         return;
     };
 

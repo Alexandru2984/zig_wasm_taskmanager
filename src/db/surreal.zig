@@ -76,6 +76,36 @@ pub fn queryWithVars(allocator: std.mem.Allocator, sql: []const u8, vars: anytyp
 pub const rec = http_client.rec;
 pub const RecordId = http_client.RecordId;
 
+// These writes are intentional serialization fences. Snapshot reads alone
+// cannot prevent a permission change from racing a write to a different row.
+// All protected workspace mutations share its fence; account-sensitive writes
+// also touch the actor row so account deletion cannot leave new child records.
+const actorFence =
+    \\LET $actor = (UPDATE users SET security_revision = (security_revision ?? 0) + 1 WHERE id = $actor_id RETURN AFTER);
+    \\IF array::len($actor) != 1 { THROW "APP_FORBIDDEN"; };
+++ "\n";
+const workspaceFence =
+    \\LET $scope = (UPDATE workspaces SET security_revision = (security_revision ?? 0) + 1 WHERE id = $workspace_id RETURN AFTER);
+    \\IF array::len($scope) != 1 { THROW "APP_NOT_FOUND"; };
+++ "\n";
+const workspaceRole =
+    \\LET $role = (SELECT VALUE role FROM workspace_members WHERE workspace_id = $workspace_id AND user_id = $actor_id)[0];
+++ "\n";
+const adminFence = actorFence ++ workspaceFence ++ workspaceRole ++
+    \\IF !($role INSIDE ["owner", "admin"]) { THROW "APP_FORBIDDEN"; };
+++ "\n";
+const taskFence = actorFence ++
+    \\LET $before = (SELECT * FROM ONLY $record_id);
+    \\IF $before == NONE { THROW "APP_NOT_FOUND"; };
+    \\LET $workspace_id = $before.workspace_id;
+    \\IF $workspace_id == NONE {
+    \\    IF $before.user_id != $actor_id { THROW "APP_FORBIDDEN"; };
+    \\} ELSE {
+++ "\n" ++ workspaceFence ++ workspaceRole ++
+    \\    IF !($role INSIDE ["owner", "admin", "member"]) { THROW "APP_FORBIDDEN"; };
+    \\};
+++ "\n";
+
 const MigrationRow = struct {
     version: []const u8,
 };
@@ -108,7 +138,7 @@ fn runMigration(allocator: std.mem.Allocator, version: []const u8, sql: []const 
 
 // Initialize database schema
 pub fn checkSchema(allocator: std.mem.Allocator) !void {
-    if (!try migrationApplied(allocator, "011_recurrence_once")) return error.SchemaMigrationRequired;
+    if (!try migrationApplied(allocator, "012_authorization_fences")) return error.SchemaMigrationRequired;
 }
 
 pub fn initSchema(allocator: std.mem.Allocator) !void {
@@ -295,6 +325,11 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\UPDATE tasks SET status = "todo" WHERE completed = false AND status = "done";
     );
 
+    try runMigration(allocator, "012_authorization_fences",
+        \\DEFINE FIELD IF NOT EXISTS security_revision ON users TYPE int DEFAULT 0;
+        \\DEFINE FIELD IF NOT EXISTS security_revision ON workspaces TYPE int DEFAULT 0;
+    );
+
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
 }
 
@@ -357,10 +392,19 @@ pub fn updateUserName(allocator: std.mem.Allocator, user_id: []const u8, name: [
     , .{ .record_id = rec(user_id), .name = name });
 }
 
-pub fn updateUserPassword(allocator: std.mem.Allocator, user_id: []const u8, password_hash: []const u8) ![]u8 {
-    return queryWithVars(allocator,
-        \\UPDATE $record_id SET password_hash = $password_hash;
-    , .{ .record_id = rec(user_id), .password_hash = password_hash });
+pub fn changePasswordAtomic(allocator: std.mem.Allocator, user_id: []const u8, expected_hash: []const u8, password_hash: []const u8) !NewSession {
+    const session = NewSession{ .token = generateSecureToken(), .csrf = generateSecureToken() };
+    const result = try queryWithVars(allocator,
+        \\BEGIN TRANSACTION;
+        \\LET $changed = (UPDATE users SET password_hash = $password_hash, reset_token = NONE, reset_expires = NONE WHERE id = $record_id AND password_hash = $expected_hash RETURN AFTER);
+        \\IF array::len($changed) != 1 { THROW "APP_CONFLICT"; };
+        \\DELETE sessions WHERE user_id = $record_id;
+        \\CREATE sessions SET user_id = $record_id, token = $session_hash, csrf_hash = $csrf_hash, expires_at = time::now() + 7d;
+        \\RETURN [];
+        \\COMMIT TRANSACTION;
+    , .{ .record_id = rec(user_id), .expected_hash = expected_hash, .password_hash = password_hash, .session_hash = hashToken(&session.token), .csrf_hash = hashToken(&session.csrf) });
+    allocator.free(result);
+    return session;
 }
 
 /// Atomic reset: set new password hash AND clear reset_token/expires in one
@@ -490,41 +534,36 @@ pub fn ensurePersonalWorkspace(allocator: std.mem.Allocator, user_id: []const u8
         try allocator.dupe(u8, "Personal Workspace");
     defer allocator.free(workspace_name);
 
-    const created = try createWorkspace(allocator, user_id, workspace_name);
-    defer allocator.free(created);
+    // Recheck inside the actor fence: concurrent first logins must not both
+    // create a default workspace. Legacy task attachment belongs to the same
+    // transaction, so failure cannot leave partial initialization behind.
+    const initialized = try queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ actorFence ++
+        \\LET $existing = (SELECT workspace_id FROM workspace_members WHERE user_id = $actor_id LIMIT 1);
+        \\LET $selected = IF array::len($existing) > 0 { $existing; } ELSE {
+        \\    LET $created = (CREATE workspaces SET name = $name, owner_id = $actor_id, created_at = time::now());
+        \\    CREATE workspace_members SET workspace_id = $created[0].id, user_id = $actor_id, role = "owner", created_at = time::now();
+        \\    UPDATE tasks SET workspace_id = $created[0].id WHERE user_id = $actor_id AND workspace_id = NONE;
+        \\    [{ workspace_id: $created[0].id }];
+        \\};
+        \\RETURN $selected;
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(user_id), .name = workspace_name });
+    defer allocator.free(initialized);
 
-    const parsed_created = try std.json.parseFromSlice([]models.SurrealResponse(models.Workspace), allocator, created, .{ .ignore_unknown_fields = true });
-    defer parsed_created.deinit();
+    const parsed_initialized = try std.json.parseFromSlice([]models.SurrealResponse(ExistingRow), allocator, initialized, .{ .ignore_unknown_fields = true });
+    defer parsed_initialized.deinit();
+    if (parsed_initialized.value.len == 0 or parsed_initialized.value[0].result.len == 0) return error.WorkspaceCreateFailed;
 
-    if (parsed_created.value.len == 0 or parsed_created.value[0].result.len == 0) return error.WorkspaceCreateFailed;
-    const workspace_id = parsed_created.value[0].result[0].id;
-
-    const update_tasks = try queryWithVars(allocator,
-        \\UPDATE tasks SET workspace_id = $workspace_id WHERE user_id = $user_id AND workspace_id = NONE;
-    , .{ .workspace_id = rec(workspace_id), .user_id = rec(user_id) });
-    allocator.free(update_tasks);
-
-    return try allocator.dupe(u8, workspace_id);
+    return try allocator.dupe(u8, parsed_initialized.value[0].result[0].workspace_id);
 }
 
 pub fn createWorkspace(allocator: std.mem.Allocator, owner_id: []const u8, name: []const u8) ![]u8 {
-    const workspace_result = try queryWithVars(allocator,
-        \\CREATE workspaces SET name = $name, owner_id = $owner_id, created_at = time::now();
-    , .{ .name = name, .owner_id = rec(owner_id) });
-    errdefer allocator.free(workspace_result);
-
-    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Workspace), allocator, workspace_result, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-
-    if (parsed.value.len == 0 or parsed.value[0].result.len == 0) return error.WorkspaceCreateFailed;
-    const workspace = parsed.value[0].result[0];
-
-    const member_result = try queryWithVars(allocator,
-        \\CREATE workspace_members SET workspace_id = $workspace_id, user_id = $owner_id, role = "owner", created_at = time::now();
-    , .{ .workspace_id = rec(workspace.id), .owner_id = rec(owner_id) });
-    allocator.free(member_result);
-
-    return workspace_result;
+    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ actorFence ++
+        \\LET $created = (CREATE workspaces SET name = $name, owner_id = $actor_id, created_at = time::now());
+        \\CREATE workspace_members SET workspace_id = $created[0].id, user_id = $actor_id, role = "owner", created_at = time::now();
+        \\RETURN $created;
+        \\COMMIT TRANSACTION;
+    , .{ .name = name, .actor_id = rec(owner_id) });
 }
 
 pub fn getWorkspaceById(allocator: std.mem.Allocator, workspace_id: []const u8) ![]u8 {
@@ -623,14 +662,18 @@ pub fn createWorkspaceInvite(
     expires_at: i64,
 ) ![]u8 {
     const token_hash = hashToken(token);
-    return queryWithVars(allocator,
-        \\CREATE workspace_invites SET workspace_id = $workspace_id, email = $email, role = $role, token = $invite_token, invited_by = $invited_by, expires_at = $expires_at, accepted_at = NONE, created_at = time::now();
+    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ adminFence ++
+        \\IF !$actor[0].email_verified { THROW "APP_FORBIDDEN"; };
+        \\IF array::len(SELECT id FROM workspace_invites WHERE workspace_id = $workspace_id AND email = $email AND accepted_at = NONE AND expires_at >= time::unix()) > 0 { THROW "APP_INVALID"; };
+        \\LET $created = (CREATE workspace_invites SET workspace_id = $workspace_id, email = $email, role = $invite_role, token = $invite_token, invited_by = $actor_id, expires_at = $expires_at, accepted_at = NONE, created_at = time::now());
+        \\RETURN $created;
+        \\COMMIT TRANSACTION;
     , .{
         .workspace_id = rec(workspace_id),
         .email = email,
-        .role = role,
+        .invite_role = role,
         .invite_token = token_hash,
-        .invited_by = rec(invited_by),
+        .actor_id = rec(invited_by),
         .expires_at = expires_at,
     });
 }
@@ -654,41 +697,48 @@ pub fn getWorkspaceInviteByToken(allocator: std.mem.Allocator, token: []const u8
     , .{ .invite_token = token_hash });
 }
 
-pub fn deleteWorkspaceInviteById(allocator: std.mem.Allocator, invite_id: []const u8) !void {
-    const result = try queryWithVars(allocator,
-        \\DELETE $invite_id;
-    , .{ .invite_id = rec(invite_id) });
-    allocator.free(result);
-}
-
-pub fn addWorkspaceMember(allocator: std.mem.Allocator, workspace_id: []const u8, user_id: []const u8, role: []const u8) !void {
-    const result = try queryWithVars(allocator,
-        \\CREATE workspace_members SET workspace_id = $workspace_id, user_id = $user_id, role = $role, created_at = time::now();
-    , .{ .workspace_id = rec(workspace_id), .user_id = rec(user_id), .role = role });
-    allocator.free(result);
-}
-
-pub fn markWorkspaceInviteAccepted(allocator: std.mem.Allocator, invite_id: []const u8, accepted_at: i64) !void {
-    const result = try queryWithVars(allocator,
-        \\UPDATE $invite_id SET accepted_at = $accepted_at;
-    , .{ .invite_id = rec(invite_id), .accepted_at = accepted_at });
+pub fn acceptWorkspaceInviteAtomic(allocator: std.mem.Allocator, user_id: []const u8, token: []const u8) !void {
+    const result = try queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ actorFence ++
+        \\LET $invite = (SELECT * FROM workspace_invites WHERE token = $token_hash)[0];
+        \\IF $invite == NONE { THROW "APP_NOT_FOUND"; };
+        \\LET $workspace_id = $invite.workspace_id;
+    ++ "\n" ++ workspaceFence ++
+        \\IF !$actor[0].email_verified OR string::lowercase($actor[0].email) != string::lowercase($invite.email) { THROW "APP_FORBIDDEN"; };
+        \\LET $issuer_role = (SELECT VALUE role FROM workspace_members WHERE user_id = $invite.invited_by AND workspace_id = $workspace_id)[0];
+        \\IF !($issuer_role INSIDE ["owner", "admin"]) { THROW "APP_FORBIDDEN"; };
+        \\IF $invite.accepted_at != NONE OR $invite.expires_at < time::unix() { THROW "APP_INVALID"; };
+        \\IF array::len(SELECT id FROM workspace_members WHERE user_id = $actor_id AND workspace_id = $workspace_id) > 0 { THROW "APP_INVALID"; };
+        \\UPDATE $invite.id SET accepted_at = time::unix();
+        \\CREATE workspace_members SET workspace_id = $workspace_id, user_id = $actor_id, role = $invite.role, created_at = time::now();
+        \\RETURN [];
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(user_id), .token_hash = hashToken(token) });
     allocator.free(result);
 }
 
 /// Change a member's role. Scoped by workspace_id + user_id and returns the
 /// updated row(s), so an empty result means the user wasn't a member.
-pub fn updateWorkspaceMemberRole(allocator: std.mem.Allocator, workspace_id: []const u8, user_id: []const u8, role: []const u8) ![]u8 {
-    return queryWithVars(allocator,
-        \\UPDATE workspace_members SET role = $role WHERE workspace_id = $workspace_id AND user_id = $user_id RETURN AFTER;
-    , .{ .workspace_id = rec(workspace_id), .user_id = rec(user_id), .role = role });
+pub fn updateWorkspaceMemberRole(allocator: std.mem.Allocator, actor_id: []const u8, workspace_id: []const u8, user_id: []const u8, role: []const u8) ![]u8 {
+    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ adminFence ++
+        \\IF $target_role == "owner" { THROW "APP_FORBIDDEN"; };
+        \\LET $changed = (UPDATE workspace_members SET role = $target_role WHERE workspace_id = $workspace_id AND user_id = $user_id AND role != "owner" RETURN AFTER);
+        \\RETURN $changed;
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(actor_id), .workspace_id = rec(workspace_id), .user_id = rec(user_id), .target_role = role });
 }
 
 /// Remove a member from a workspace. RETURN BEFORE yields the deleted row(s),
 /// so an empty result means there was nothing to remove.
-pub fn removeWorkspaceMember(allocator: std.mem.Allocator, workspace_id: []const u8, user_id: []const u8) ![]u8 {
-    return queryWithVars(allocator,
-        \\DELETE workspace_members WHERE workspace_id = $workspace_id AND user_id = $user_id RETURN BEFORE;
-    , .{ .workspace_id = rec(workspace_id), .user_id = rec(user_id) });
+pub fn removeWorkspaceMember(allocator: std.mem.Allocator, actor_id: []const u8, workspace_id: []const u8, user_id: []const u8) ![]u8 {
+    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ adminFence ++
+        \\LET $deleted = (DELETE workspace_members WHERE workspace_id = $workspace_id AND user_id = $user_id AND role != "owner" RETURN BEFORE);
+        \\IF array::len($deleted) > 0 {
+        \\    UPDATE tasks SET assignee_id = NONE WHERE workspace_id = $workspace_id AND assignee_id = $user_id;
+        \\    DELETE workspace_invites WHERE workspace_id = $workspace_id AND invited_by = $user_id AND accepted_at = NONE;
+        \\};
+        \\RETURN $deleted;
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(actor_id), .workspace_id = rec(workspace_id), .user_id = rec(user_id) });
 }
 
 pub fn listPendingWorkspaceInvites(allocator: std.mem.Allocator, workspace_id: []const u8, now_ts: i64) ![]u8 {
@@ -699,10 +749,12 @@ pub fn listPendingWorkspaceInvites(allocator: std.mem.Allocator, workspace_id: [
 
 /// Revoke a pending invite, scoped to its workspace so an admin can't delete
 /// another workspace's invite by guessing its id. RETURN BEFORE reports a match.
-pub fn deleteWorkspaceInviteScoped(allocator: std.mem.Allocator, invite_id: []const u8, workspace_id: []const u8) ![]u8 {
-    return queryWithVars(allocator,
-        \\DELETE workspace_invites WHERE id = $invite_id AND workspace_id = $workspace_id RETURN BEFORE;
-    , .{ .invite_id = rec(invite_id), .workspace_id = rec(workspace_id) });
+pub fn deleteWorkspaceInviteScoped(allocator: std.mem.Allocator, actor_id: []const u8, invite_id: []const u8, workspace_id: []const u8) ![]u8 {
+    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ adminFence ++
+        \\LET $deleted = (DELETE workspace_invites WHERE id = $invite_id AND workspace_id = $workspace_id AND accepted_at = NONE RETURN BEFORE);
+        \\RETURN $deleted;
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(actor_id), .invite_id = rec(invite_id), .workspace_id = rec(workspace_id) });
 }
 
 // ============== TASK OPERATIONS ==============
@@ -743,7 +795,17 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
     if (task.parent_id != null) try w.writeAll(", parent_id = $parent_id");
     if (task.assignee_id != null) try w.writeAll(", assignee_id = $assignee_id");
 
-    const sql = try std.fmt.allocPrint(allocator, "CREATE tasks SET {s};", .{sets.items});
+    const sql = try std.fmt.allocPrint(allocator, "BEGIN TRANSACTION;\n{s}{s}{s}" ++
+        \\IF !($role INSIDE ["owner", "admin", "member"]) {{ THROW "APP_FORBIDDEN"; }};
+        \\IF $has_parent {{
+        \\    LET $parent = (SELECT * FROM ONLY $parent_id);
+        \\    IF $parent == NONE OR $parent.workspace_id != $workspace_id OR $parent.parent_id != NONE {{ THROW "APP_INVALID"; }};
+        \\}};
+        \\IF $has_assignee AND array::len(SELECT id FROM workspace_members WHERE user_id = $assignee_id AND workspace_id = $workspace_id) != 1 {{ THROW "APP_INVALID"; }};
+        \\LET $created = (CREATE tasks SET {s});
+        \\RETURN $created;
+        \\COMMIT TRANSACTION;
+    , .{ actorFence, workspaceFence, workspaceRole, sets.items });
     defer allocator.free(sql);
 
     var due_owned: ?[]u8 = null;
@@ -756,6 +818,7 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
 
     return queryWithVars(allocator, sql, .{
         .user_id = rec(task.user_id),
+        .actor_id = rec(task.user_id),
         .workspace_id = rec(task.workspace_id),
         .title = task.title,
         .priority = task.priority,
@@ -769,6 +832,8 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
         // referenced by the statement when the caller supplied one.
         .parent_id = rec(task.parent_id orelse "tasks:unset"),
         .assignee_id = rec(task.assignee_id orelse "users:unset"),
+        .has_parent = task.parent_id != null,
+        .has_assignee = task.assignee_id != null,
     });
 }
 
@@ -786,15 +851,14 @@ pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
 
 /// Delete a task together with anything hanging off it, so completing the
 /// parent's removal cannot leave orphaned subtasks that no view will show.
-pub fn deleteTaskWithChildren(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
-    return queryWithVars(allocator,
-        \\BEGIN TRANSACTION;
-        \\LET $parent = (SELECT * FROM ONLY $record_id);
-        \\DELETE tasks WHERE parent_id = $record_id AND workspace_id = $parent.workspace_id;
+pub fn deleteTaskWithChildren(allocator: std.mem.Allocator, task_id: []const u8, actor_id: []const u8) ![]u8 {
+    if (!http_client.validRecordIdFor(task_id, "tasks")) return error.InvalidRecordId;
+    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ taskFence ++
+        \\DELETE tasks WHERE parent_id = $record_id AND workspace_id = $before.workspace_id;
         \\LET $deleted = (DELETE $record_id RETURN BEFORE);
         \\RETURN $deleted;
         \\COMMIT TRANSACTION;
-    , .{ .record_id = rec(task_id) });
+    , .{ .record_id = rec(task_id), .actor_id = rec(actor_id) });
 }
 
 /// Partial update of a task. Only the fields the caller actually supplied are
@@ -822,7 +886,7 @@ pub const TaskPatch = struct {
     toggle: bool = false,
 };
 
-pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: TaskPatch) ![]u8 {
+pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, actor_id: []const u8, patch: TaskPatch) ![]u8 {
     // Read a snapshot to calculate calendar-aware recurrence in Zig. The
     // transaction below rechecks its version and writes the same row, so
     // concurrent mutations conflict at commit under snapshot isolation.
@@ -877,10 +941,9 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
         }
     }
 
-    const sql = try std.fmt.allocPrint(allocator,
-        \\BEGIN TRANSACTION;
-        \\LET $before = (SELECT * FROM ONLY $record_id);
+    const sql = try std.fmt.allocPrint(allocator, "BEGIN TRANSACTION;\n{s}" ++
         \\IF $before.updated_at != <option<datetime>>$expected_updated OR $before.completed != $expected_completed {{ THROW "Task changed; retry"; }};
+        \\IF $has_assignee AND array::len(SELECT id FROM workspace_members WHERE user_id = $assignee_id AND workspace_id = $workspace_id) != 1 {{ THROW "APP_INVALID"; }};
         \\LET $changed = (UPDATE $record_id SET {s} RETURN AFTER);
         \\LET $task = $changed[0];
         \\IF $task.completed AND !$before.completed AND !$before.recurrence_spawned AND $next_due != NONE {{
@@ -892,7 +955,7 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
         \\}};
         \\RETURN $changed;
         \\COMMIT TRANSACTION;
-    , .{sets.items});
+    , .{ taskFence, sets.items });
     defer allocator.free(sql);
 
     // due_date is normalised to a form SurrealDB accepts before binding.
@@ -910,6 +973,7 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
 
     return queryWithVars(allocator, sql, .{
         .record_id = rec(task_id),
+        .actor_id = rec(actor_id),
         .title = patch.title orelse "",
         .priority = patch.priority orelse "normal",
         .notes = patch.notes orelse "",
@@ -919,6 +983,7 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, patch: Task
         .status = patch.status orelse "todo",
         .recurrence = patch.recurrence orelse "none",
         .assignee_id = rec(if (patch.assignee_id) |a| (if (a.len == 0) "users:unset" else a) else "users:unset"),
+        .has_assignee = if (patch.assignee_id) |a| a.len > 0 else false,
         .expected_updated = before.updated_at,
         .expected_completed = before.completed,
         .next_due = next,
@@ -935,14 +1000,8 @@ fn normalizeDueDate(allocator: std.mem.Allocator, due_date: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}Z", .{due_date});
 }
 
-pub fn toggleTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
-    return updateTask(allocator, task_id, .{ .toggle = true });
-}
-
-pub fn deleteTask(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
-    return queryWithVars(allocator,
-        \\DELETE $record_id;
-    , .{ .record_id = rec(task_id) });
+pub fn toggleTask(allocator: std.mem.Allocator, task_id: []const u8, actor_id: []const u8) ![]u8 {
+    return updateTask(allocator, task_id, actor_id, .{ .toggle = true });
 }
 
 /// Tasks whose deadline is close enough to warrant a reminder.
@@ -1020,9 +1079,19 @@ pub fn exportUserTasks(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 
 /// removed from a workspace by any other route, so deleting the account is the
 /// only way a workspace loses its owner, and an ownerless workspace would be
 /// unmanageable by anyone.
-pub fn deleteUserAccount(allocator: std.mem.Allocator, user_id: []const u8) !void {
+pub fn deleteUserAccount(allocator: std.mem.Allocator, user_id: []const u8, expected_hash: []const u8) !void {
     const result = try queryWithVars(allocator,
+        \\BEGIN TRANSACTION;
+        \\LET $actor = (UPDATE users SET security_revision = (security_revision ?? 0) + 1 WHERE id = $record_id AND password_hash = $expected_hash RETURN AFTER);
+        \\IF array::len($actor) != 1 { THROW "APP_CONFLICT"; };
         \\LET $owned = (SELECT VALUE id FROM workspaces WHERE owner_id = $record_id);
+        \\LET $removed_tasks = (SELECT VALUE id FROM tasks WHERE user_id = $record_id OR workspace_id IN $owned);
+        \\UPDATE workspaces SET security_revision = (security_revision ?? 0) + 1 WHERE id IN $owned
+        \\    OR id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $record_id)
+        \\    OR id IN (SELECT VALUE workspace_id FROM tasks WHERE assignee_id = $record_id OR parent_id IN $removed_tasks OR user_id = $record_id)
+        \\    OR id IN (SELECT VALUE workspace_id FROM workspace_invites WHERE invited_by = $record_id);
+        \\UPDATE tasks SET assignee_id = NONE WHERE assignee_id = $record_id;
+        \\UPDATE tasks SET parent_id = NONE WHERE parent_id IN $removed_tasks;
         \\DELETE tasks WHERE user_id = $record_id OR workspace_id IN $owned;
         \\DELETE workspace_invites WHERE invited_by = $record_id OR workspace_id IN $owned;
         \\DELETE workspace_members WHERE user_id = $record_id OR workspace_id IN $owned;
@@ -1030,7 +1099,9 @@ pub fn deleteUserAccount(allocator: std.mem.Allocator, user_id: []const u8) !voi
         \\DELETE activity_events WHERE user_id = $record_id;
         \\DELETE sessions WHERE user_id = $record_id;
         \\DELETE $record_id;
-    , .{ .record_id = rec(user_id) });
+        \\RETURN [];
+        \\COMMIT TRANSACTION;
+    , .{ .record_id = rec(user_id), .expected_hash = expected_hash });
     allocator.free(result);
 }
 
@@ -1043,9 +1114,11 @@ pub fn logActivity(
     entity_type: []const u8,
     entity_id: []const u8,
 ) !void {
-    const result = try queryWithVars(allocator,
-        \\CREATE activity_events SET user_id = $user_id, action = $action, entity_type = $entity_type, entity_id = <string>$entity_id, created_at = time::now();
-    , .{ .user_id = rec(user_id), .action = action, .entity_type = entity_type, .entity_id = entity_id });
+    const result = try queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ actorFence ++
+        \\CREATE activity_events SET user_id = $actor_id, action = $action, entity_type = $entity_type, entity_id = <string>$entity_id, created_at = time::now();
+        \\RETURN [];
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(user_id), .action = action, .entity_type = entity_type, .entity_id = entity_id });
     allocator.free(result);
 }
 
@@ -1140,7 +1213,7 @@ pub const NewSession = struct {
 };
 
 /// Create a new session for a user. Session expires in 7 days by default.
-pub fn createSession(allocator: std.mem.Allocator, user_id: []const u8) !NewSession {
+pub fn createSession(allocator: std.mem.Allocator, user_id: []const u8, expected_hash: []const u8) !NewSession {
     const token = generateSecureToken();
     const token_hash = hashToken(token[0..]);
 
@@ -1156,8 +1229,13 @@ pub fn createSession(allocator: std.mem.Allocator, user_id: []const u8) !NewSess
     const expires_ms = std.time.milliTimestamp() + (7 * 24 * 60 * 60 * 1000);
 
     const result = try queryWithVars(allocator,
+        \\BEGIN TRANSACTION;
+        \\LET $actor = (UPDATE users SET security_revision = (security_revision ?? 0) + 1 WHERE id = $user_id AND password_hash = $expected_hash RETURN AFTER);
+        \\IF array::len($actor) != 1 { THROW "APP_CONFLICT"; };
         \\CREATE sessions SET token = $session_token, user_id = $user_id, csrf_hash = $csrf_hash, expires_at = time::from_millis($expires_ms);
-    , .{ .session_token = token_hash, .user_id = rec(user_id), .csrf_hash = csrf_hash, .expires_ms = expires_ms });
+        \\RETURN [];
+        \\COMMIT TRANSACTION;
+    , .{ .session_token = token_hash, .user_id = rec(user_id), .csrf_hash = csrf_hash, .expires_ms = expires_ms, .expected_hash = expected_hash });
     defer allocator.free(result);
 
     return .{ .token = token, .csrf = csrf };

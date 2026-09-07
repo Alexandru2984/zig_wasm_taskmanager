@@ -158,17 +158,8 @@ pub fn changePassword(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 
     // Update password
     const new_hash = try auth.hashPassword(req_alloc, request.new_password);
-    const update_result = db.updateUserPassword(req_alloc, user_id, new_hash) catch {
-        try http.jsonError(r, 500, "Failed to update password");
-        return;
-    };
-    req_alloc.free(update_result);
-    db.deleteUserSessions(req_alloc, user_id) catch {
-        try http.jsonError(r, 500, "Failed to invalidate sessions");
-        return;
-    };
-    const new_session = db.createSession(req_alloc, user_id) catch {
-        try http.jsonError(r, 500, "Failed to refresh session");
+    const new_session = db.changePasswordAtomic(req_alloc, user_id, user.password_hash, new_hash) catch |err| {
+        try http.mutationError(r, err, "Failed to change password");
         return;
     };
     http.setAuthCookie(r, new_session);

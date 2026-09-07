@@ -314,6 +314,16 @@ pub fn jsonCreated(r: zap.Request, data: anytype) !void {
     try r.sendBody(list.items);
 }
 
+pub fn mutationError(r: zap.Request, err: anyerror, fallback: []const u8) !void {
+    switch (err) {
+        error.PermissionDenied => try jsonError(r, 403, "Permission changed. Refresh your workspace."),
+        error.InvalidOperation => try jsonError(r, 400, "Operation is no longer valid. Refresh and try again."),
+        error.NotFound => try jsonError(r, 404, "Resource not found."),
+        error.Conflict => try jsonError(r, 409, "State changed. Refresh and retry."),
+        else => try jsonError(r, 500, fallback),
+    }
+}
+
 pub fn jsonError(r: zap.Request, status: u32, message: []const u8) !void {
     r.setStatus(@enumFromInt(@as(u16, @intCast(status))));
     r.setHeader("Content-Type", "application/json") catch {};

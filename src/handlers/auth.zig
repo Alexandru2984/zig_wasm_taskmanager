@@ -121,12 +121,13 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     email.enqueueConfirmation(user.email, user.name, verification_code);
 
     // Create session
-    const session = db.createSession(req_alloc, user.id) catch {
-        try http.jsonError(r, 500, "Failed to create session");
+    const session = db.createSession(req_alloc, user.id, user.password_hash) catch |err| {
+        try http.mutationError(r, err, "Failed to create session");
         return;
     };
-    const workspace_id = db.ensurePersonalWorkspace(req_alloc, user.id, user.name) catch {
-        try http.jsonError(r, 500, "Failed to create default workspace");
+    const workspace_id = db.ensurePersonalWorkspace(req_alloc, user.id, user.name) catch |err| {
+        db.deleteSession(req_alloc, &session.token) catch {};
+        try http.mutationError(r, err, "Failed to create default workspace");
         return;
     };
     defer req_alloc.free(workspace_id);
@@ -216,12 +217,13 @@ pub fn handleLogin(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     }
 
     // Create session
-    const session = db.createSession(req_alloc, user.id) catch {
-        try http.jsonError(r, 500, "Failed to create session");
+    const session = db.createSession(req_alloc, user.id, user.password_hash) catch |err| {
+        try http.mutationError(r, err, "Failed to create session");
         return;
     };
-    const workspace_id = db.ensurePersonalWorkspace(req_alloc, user.id, user.name) catch {
-        try http.jsonError(r, 500, "Failed to initialize workspace");
+    const workspace_id = db.ensurePersonalWorkspace(req_alloc, user.id, user.name) catch |err| {
+        db.deleteSession(req_alloc, &session.token) catch {};
+        try http.mutationError(r, err, "Failed to initialize workspace");
         return;
     };
     defer req_alloc.free(workspace_id);
