@@ -15,6 +15,11 @@ Production runs with the dedicated Unix/DB identities. Stage 3's backup drill
 was local only; alert routing and off-host recovery remain stage 8 work.
 See the audit for the canary-discovered startup fixes and residual risks.
 
+Update: product batch P1 is now promoted as `84d1936` with 181 passing checks;
+see [the P1 verification record](PRODUCT-P1-VERIFICATION.md). The urgent next
+batch is P1b (DB administrative credential exposure in process arguments), then
+the remaining product batches. External backup remains explicitly deferred.
+
 | Stage | Deliverables | Acceptance |
 | --- | --- | --- |
 | 1. Safe verification | Owned test PIDs/ports/temp files; isolated DB; audit and regression suite | Occupied ports untouched; regressions reproduce old behavior |

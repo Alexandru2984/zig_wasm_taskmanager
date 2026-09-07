@@ -88,7 +88,44 @@ ReleaseSafe verification passed: **47 unit + 37 smoke + 38 security + 59 browser
 checks (181 total)**. Formatting, JavaScript syntax and diff whitespace checks
 also passed. Browser coverage includes the existing mobile/responsive flows;
 P1 itself changes backend behavior, not visual design. Production promotion
-evidence will be recorded separately after canary verification.
+evidence follows below.
+
+## Production promotion evidence
+
+Verified 2026-09-07 at 22:17 EEST. Application source `84d1936` is live at
+`/opt/taskmanager/releases/20260907-84d1936`, through `/opt/taskmanager/current`.
+The previous known-good release `973767a` is retained. Only the application
+release pointer and taskmanager service were switched/restarted; the DB
+container, runtime credentials, nginx and Cloudflare settings were not changed.
+
+- Pre-migration export: 31,246 bytes; post-promotion export: 31,557 bytes, both
+  root-owned mode 0600 under root-only
+  `/var/backups/taskmanager/20260907-product-p1`. The previous service unit is
+  retained there too. No off-host transfer was made.
+- The pre-migration export was restored to a disposable local DB using a random
+  temporary administrator credential. Users/tasks/sessions counts matched the
+  source, and migration 012 then applied successfully to that restored snapshot
+  before application to production. This is count/migration evidence, not a
+  byte-for-byte or complete business-workflow recovery certification.
+- The immutable ReleaseSafe executable and its matched facil.io library were
+  staged together. Canary startup used the production service restrictions,
+  database EDITOR credentials, port 9300 and disabled reminder delivery.
+- Canary UID/GID/groups were 993/973/973, NoNewPrivs=1, Seccomp=2, memory limit
+  1 GiB and task limit 128. Docker/DBus sockets and the administrative `.env`
+  were unreadable inside its mount namespace; its executable was not writable.
+  Runtime DB authentication worked and `INFO FOR ROOT` was denied.
+- Production local/public readiness reported ready/connected. Anonymous task
+  requests returned 401 with no-store; public HTML returned 200 with CSP, HSTS,
+  nosniff and Cloudflare DYNAMIC. nginx configuration validated unchanged.
+- Public app.js/style.css/app.wasm hashes matched the release. A read-only
+  public mobile visit at 390px had no horizontal overflow or uncaught JS errors.
+  No production signup, task modification, invitation or test email was used.
+- Production remained active with zero automatic restarts after promotion.
+  Canary and disposable test/restore databases were stopped/removed; loopback
+  ports 9200/9300/8020/8040 were no longer listening at final verification.
+
+P1b's administrative process-argument exposure remains open and urgent. This
+release mitigates application races, not that separate host configuration risk.
 
 ## CISO review
 
