@@ -151,6 +151,41 @@ commercial arrangement; no compliance certification or fixed legal deadline is
 asserted. CISO quantification companion scripts are unavailable, so no financial
 output is fabricated. Verdict: mitigate, test and canary before promotion.
 
-Production evidence is recorded separately after promotion. Batches C–F remain
-in [the execution plan](CLIENT-READY-EXECUTION.md); this is not the finished
-commercial-product claim.
+## Production evidence — 2026-09-08, 15:26 EEST
+
+Source `708f6a6` is live through `/opt/taskmanager/current` at immutable release
+`/opt/taskmanager/releases/20260908-708f6a6`. The preceding known-good
+`20260907-84d1936` executable/static/library release remains available.
+
+- Protected local exports: pre-deploy 31,557 bytes; post-deploy 33,890 bytes,
+  mode 0600 under root-only `/var/backups/taskmanager/20260908-durable-email`.
+  That directory also retains the preceding service unit and mode-0600 runtime
+  recovery config including the new key. Runtime remains root:taskmanager 0640;
+  its contents matched the private recovery copy without displaying secrets.
+- Migration 013 was first applied to the restored disposable snapshot, then
+  applied to production with the separate administrator identity. No production
+  import, business-record mutation test or synthetic SMTP message occurred.
+- Canary used port 9300, the same service restrictions, matched library, and
+  disabled mail/reminder workers. UID/GID/groups 993/973/973, NoNewPrivs=1,
+  Seccomp=2, memory limit 1 GiB, task limit 128. Administrative config,
+  Docker and DBus sockets were inaccessible; release executable was not
+  writable. Runtime DB authentication worked and root access was denied.
+- The key was registered/verified and all queue counts were zero. Only the
+  app release pointer was switched and the taskmanager service restarted;
+  DB container, nginx and Cloudflare configurations were not changed.
+- The persistent worker started. Readiness and protected health/queue probes
+  passed locally and through `https://task.micutu.com`; service stayed active
+  with zero automatic restarts. The new delivery endpoint returned 401 and
+  `Cache-Control: no-store` anonymously. HTML returned 200 with CSP, HSTS,
+  nosniff and Cloudflare DYNAMIC; unchanged nginx configuration validated.
+- Public app.js/style.css/app.wasm hashes matched the release. Read-only public
+  browser check at 390px had no horizontal overflow or uncaught page errors.
+  The delivery panel was present in the served document; authenticated panel
+  interactions were tested only in the isolated suite.
+- Canary stopped and disposable databases were removed. Ports 9200, 9300,
+  8020 and 8040 had no remaining listeners. No push or off-host backup occurred.
+
+External alert delivery is still unconfigured, not implied by successful probes.
+Batches C–F remain in [the execution plan](CLIENT-READY-EXECUTION.md); this is
+not a claim that the complete commercial product has shipped. Next is scoped
+task trash/restore with original IDs and a real undo action.

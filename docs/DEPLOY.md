@@ -9,9 +9,11 @@ Requirements: Zig 0.15.2, SurrealDB 3.2.4, Node for admin/test tooling, Docker
 for the database, and an existing nginx/TLS/Cloudflare configuration. This
 guide is specific to the versioned `task.micutu.com` vhost.
 
-Verified installation, 2026-09-07: `/opt/taskmanager/current` points to release
-`20260907-973767a`. Protected recovery artifacts are under
-`/var/backups/taskmanager/20260907-hardening`. The first rejected canary was
+Verified installation, 2026-09-08: `/opt/taskmanager/current` points to release
+`20260908-708f6a6`; the previous `20260907-84d1936` release is retained.
+Current protected recovery artifacts are under
+`/var/backups/taskmanager/20260908-durable-email`; the initial hardening material
+remains under `/var/backups/taskmanager/20260907-hardening`. The first rejected canary was
 moved to `/opt/taskmanager/failed-canaries` and must not be used for rollback.
 
 ## Verify in a separate checkout

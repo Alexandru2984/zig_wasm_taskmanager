@@ -4,6 +4,10 @@ Date: 2026-09-07. Scope: the first implementation batch in
 [the product plan](PRODUCT-IMPLEMENTATION.md), not a complete pentest or a
 claim that all planned product features have shipped.
 
+Historical P1 evidence below is retained. Its DB-startup credential finding was
+closed by [P1b](DATABASE-HARDENING.md), and its volatile-email limitation was
+replaced by [P2 durable email](DURABLE-EMAIL.md). Current live source is `708f6a6`.
+
 ## Implemented controls
 
 - Password change conditionally replaces the verified password hash, clears
