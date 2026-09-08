@@ -7,6 +7,21 @@ const auth = @import("../services/auth.zig");
 const http = @import("../util/http.zig");
 const rate_limiter = @import("../util/rate_limiter.zig");
 
+pub fn listMailDeliveries(r: zap.Request, a: std.mem.Allocator) !void {
+    const user = http.getCurrentUserId(a, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    const result = db.impl.listMail(a, user) catch {
+        try http.jsonError(r, 500, "Could not load email delivery status");
+        return;
+    };
+    defer a.free(result);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.MailDelivery), a, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try http.jsonSuccess(r, if (parsed.value.len > 0) parsed.value[0].result else &.{});
+}
+
 /// GET /api/sessions — every session for the signed-in user.
 ///
 /// Session tokens are stored hashed and never leave the database, so the
@@ -175,6 +190,11 @@ pub fn exportData(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     const parsed_activity = try std.json.parseFromSlice([]models.SurrealResponse(models.ActivityResponse), req_alloc, activity_result, .{ .ignore_unknown_fields = true });
     defer parsed_activity.deinit();
 
+    const mail_result = try db.impl.queryWithVars(req_alloc, "SELECT id, kind, reference_id, status, attempts, created_at, last_error FROM mail_outbox WHERE owner_id = $owner;", .{ .owner = db.impl.rec(user_id) });
+    defer req_alloc.free(mail_result);
+    const parsed_mail = try std.json.parseFromSlice([]models.SurrealResponse(models.MailDelivery), req_alloc, mail_result, .{ .ignore_unknown_fields = true });
+    defer parsed_mail.deinit();
+
     const export_doc = models.ExportDocument{
         .exported_at = std.time.timestamp(),
         .account = .{
@@ -186,6 +206,7 @@ pub fn exportData(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         .tasks = if (parsed_tasks.value.len > 0) parsed_tasks.value[0].result else &.{},
         .workspaces = if (parsed_ws.value.len > 0) parsed_ws.value[0].result else &.{},
         .activity = if (parsed_activity.value.len > 0) parsed_activity.value[0].result else &.{},
+        .email_deliveries = if (parsed_mail.value.len > 0) parsed_mail.value[0].result else &.{},
     };
 
     // Content-Disposition makes the browser save it rather than render it, so

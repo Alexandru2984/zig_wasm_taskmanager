@@ -3,7 +3,6 @@ const log = @import("../util/log.zig");
 const zap = @import("zap");
 const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
-const email = @import("../services/email.zig");
 const http = @import("../util/http.zig");
 const rate_limiter = @import("../util/rate_limiter.zig");
 const validation = @import("../util/validation.zig");
@@ -176,7 +175,7 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
 
     const token = db.generateSecureToken();
     const expires_at = now + (7 * 24 * 60 * 60);
-    const invite_result = db.createWorkspaceInvite(req_alloc, workspace_id, invite_email, request.role, user_id, token[0..], expires_at) catch |err| {
+    const invite_result = db.createWorkspaceInvite(req_alloc, workspace_id, workspace.name, invite_email, request.role, user_id, token[0..], expires_at) catch |err| {
         try http.mutationError(r, err, "Failed to create invite");
         return;
     };
@@ -198,7 +197,7 @@ pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem
     // The invite row now survives a delivery failure instead of being deleted.
     // It is listed as pending, so an admin can see that it exists and revoke or
     // reissue it, which is more useful than silently having nothing.
-    email.enqueueWorkspaceInvite(invite_email, workspace.name, token[0..]);
+    // Delivery is now committed atomically with the invitation itself.
     db.logActivity(req_alloc, user_id, "invite_workspace_member", "workspace", workspace_id) catch |err| {
         log.warn("Failed to log invite activity: {}", .{err});
     };

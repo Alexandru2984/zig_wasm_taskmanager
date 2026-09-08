@@ -149,7 +149,8 @@ const ENV_KEYS = [_][]const u8{
     "SMTP_FROM_NAME",             "FROM_EMAIL",         "FROM_NAME",       "APP_BASE_URL",    "TASK_REMINDERS_ENABLED",
     "PORT",                       "INTERFACE",          "CORS_ORIGIN",     "HSTS_MAX_AGE",    "TRUST_PROXY",
     "COOKIE_INSECURE",            "METRICS_TOKEN",      "LEGACY_SECRET",   "LOG_LEVEL",       "SERVER_THREADS",
-    "TASK_REMINDER_LEAD_MINUTES", "SURREAL_AUTH_LEVEL", "DB_AUTO_MIGRATE", "DB_MIGRATE_ONLY",
+    "TASK_REMINDER_LEAD_MINUTES", "SURREAL_AUTH_LEVEL", "DB_AUTO_MIGRATE", "DB_MIGRATE_ONLY", "MAIL_OUTBOX_KEY",
+    "MAIL_WORKER_ENABLED",        "MAIL_PROCESS_ONCE",  "SMTP_CA_FILE",
 };
 
 // Overlay recognized process environment variables onto the map. Runs once at

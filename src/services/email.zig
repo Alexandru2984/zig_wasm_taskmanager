@@ -5,9 +5,6 @@ const std = @import("std");
 const config = @import("../config/config.zig");
 const app = @import("../app.zig");
 
-const MAX_RETRIES: u8 = 3;
-const RETRY_DELAYS_MS = [_]u64{ 1000, 2000, 5000 };
-
 const EmailConfig = struct {
     smtp_host: []const u8,
     smtp_port: []const u8,
@@ -209,6 +206,9 @@ fn buildCurlConfig(
 
     try appendCurlConfigLine(&out, allocator, "url", smtp_url);
     try out.appendSlice(allocator, "ssl-reqd\n");
+    if (config.get("SMTP_CA_FILE")) |ca| {
+        if (ca.len > 0) try appendCurlConfigLine(&out, allocator, "cacert", ca);
+    }
     try appendCurlConfigLine(&out, allocator, "user", smtp_auth);
     try appendCurlConfigLine(&out, allocator, "mail-from", email_cfg.from_email);
     try appendCurlConfigLine(&out, allocator, "mail-rcpt", to_email);
@@ -222,7 +222,7 @@ fn buildCurlConfig(
 fn runCurlSend(allocator: std.mem.Allocator, curl_config_path: []const u8) !void {
     const result = try std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &.{ "/usr/bin/curl", "--config", curl_config_path },
+        .argv = &.{ "/usr/bin/curl", "-q", "--config", curl_config_path },
         .max_output_bytes = 4096,
     });
     defer allocator.free(result.stdout);
@@ -231,8 +231,7 @@ fn runCurlSend(allocator: std.mem.Allocator, curl_config_path: []const u8) !void
     switch (result.term) {
         .Exited => |code| {
             if (code == 0) return;
-            const preview_len = @min(result.stderr.len, 300);
-            std.debug.print("SMTP curl failed with exit {d}: {s}\n", .{ code, result.stderr[0..preview_len] });
+            std.debug.print("SMTP curl failed with exit {d}\n", .{code});
             return error.EmailSendFailed;
         },
         else => {
@@ -261,21 +260,8 @@ fn sendEmailRequest(
     defer allocator.free(curl_cfg);
     try writePrivateFile(config_path, curl_cfg);
 
-    var last_error: ?anyerror = null;
-    var attempt: u8 = 0;
-    while (attempt < MAX_RETRIES) : (attempt += 1) {
-        runCurlSend(allocator, config_path) catch |err| {
-            last_error = err;
-            std.debug.print("Email attempt {d}/{d} failed: {}\n", .{ attempt + 1, MAX_RETRIES, err });
-            if (attempt < MAX_RETRIES - 1) {
-                std.Thread.sleep(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms);
-            }
-            continue;
-        };
-        return;
-    }
-
-    return last_error orelse error.EmailSendFailed;
+    // Retry scheduling belongs to the durable outbox, not nested SMTP loops.
+    try runCurlSend(allocator, config_path);
 }
 
 /// Escape a value for interpolation into an HTML email body.
@@ -468,140 +454,96 @@ fn sendHtmlEmail(allocator: std.mem.Allocator, to_email: []const u8, to_name: []
     std.debug.print("HTML email sent successfully to: {s}\n", .{maskEmail(&mask_buf, to_email)});
 }
 
-// ============== ASYNC MAILER QUEUE ==============
-// SECURITY: account emails (signup confirmation, password reset, resend) are
-// dispatched off the request path. Sending SMTP inline made an authenticated
-// account's request measurably slower than an unknown one, leaking which
-// emails exist despite the deliberately uniform response bodies. Handlers now
-// enqueue and return immediately; a worker thread does the slow SMTP work.
-
-const MailKind = enum { confirmation, password_reset, workspace_invite };
-
-const MailJob = struct {
-    kind: MailKind,
-    to_email: []u8,
-    /// Recipient name for a confirmation; the workspace name for an invite.
-    /// Empty for a password reset.
-    name: []u8,
-    /// Verification code, reset token, or invite token.
-    secret: []u8,
-};
-
-var mail_mutex: std.Thread.Mutex = .{};
-var mail_cond: std.Thread.Condition = .{};
-var mail_queue: std.ArrayListUnmanaged(MailJob) = .{};
+// ============== PERSISTENT MAIL WORKER ==============
+const db = @import("../db/surreal.zig");
+const models = @import("../domain/models.zig");
+const payload_crypto = @import("mail_payload.zig");
 var mail_thread: ?std.Thread = null;
 var mail_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-fn freeJob(job: MailJob) void {
-    const a = app.allocator();
-    a.free(job.to_email);
-    a.free(job.name);
-    a.free(job.secret);
-}
-
-/// Dupe all job fields with the global allocator so they outlive the request
-/// arena. Frees any partial allocation if a later dupe fails.
-fn buildJob(kind: MailKind, to_email: []const u8, name: []const u8, secret: []const u8) ?MailJob {
-    const a = app.allocator();
-    const e = a.dupe(u8, to_email) catch return null;
-    const n = a.dupe(u8, name) catch {
-        a.free(e);
-        return null;
-    };
-    const s = a.dupe(u8, secret) catch {
-        a.free(e);
-        a.free(n);
-        return null;
-    };
-    return MailJob{ .kind = kind, .to_email = e, .name = n, .secret = s };
-}
-
-fn enqueue(job: MailJob) void {
-    mail_mutex.lock();
-    defer mail_mutex.unlock();
-    mail_queue.append(app.allocator(), job) catch {
-        // Out of memory: drop the job rather than leak it.
-        freeJob(job);
-        return;
-    };
-    mail_cond.signal();
-}
-
-pub fn enqueueConfirmation(to_email: []const u8, name: []const u8, code: []const u8) void {
-    if (buildJob(.confirmation, to_email, name, code)) |job| enqueue(job);
-}
-
-pub fn enqueuePasswordReset(to_email: []const u8, token: []const u8) void {
-    if (buildJob(.password_reset, to_email, "", token)) |job| enqueue(job);
-}
-
-/// Workspace invitations go through the same queue as every other account
-/// email. They used to be sent inline, on the request path, with three retries
-/// behind a 30-second curl timeout: a failing address held the connection for
-/// eight seconds in practice and up to ninety in the worst case, long enough
-/// for the reverse proxy to give up and for Cloudflare to replace the response
-/// with its own error page — so the message the handler carefully wrote never
-/// reached the browser at all.
-pub fn enqueueWorkspaceInvite(to_email: []const u8, workspace_name: []const u8, token: []const u8) void {
-    if (buildJob(.workspace_invite, to_email, workspace_name, token)) |job| enqueue(job);
-}
-
-fn dispatch(base: std.mem.Allocator, job: MailJob) void {
-    var arena = std.heap.ArenaAllocator.init(base);
-    defer arena.deinit();
-    const a = arena.allocator();
-    switch (job.kind) {
-        .confirmation => sendConfirmationEmail(a, job.to_email, job.name, job.secret) catch |err|
-            std.debug.print("Async confirmation email failed: {}\n", .{err}),
-        .password_reset => sendPasswordResetEmail(a, job.to_email, job.secret) catch |err|
-            std.debug.print("Async reset email failed: {}\n", .{err}),
-        .workspace_invite => sendWorkspaceInviteEmail(a, job.to_email, job.name, job.secret) catch |err|
-            std.debug.print("Async workspace invite email failed: {}\n", .{err}),
+/// One bounded claim/send attempt, also available to an isolated worker CLI.
+/// SMTP cannot join the DB transaction: after-send crashes can cause duplicates.
+pub fn processOne(allocator: std.mem.Allocator) !bool {
+    const lease = db.generateSecureToken();
+    const claimed = try db.claimMail(allocator, &lease);
+    defer allocator.free(claimed);
+    const jobs = try std.json.parseFromSlice([]models.SurrealResponse(db.MailJob), allocator, claimed, .{ .ignore_unknown_fields = true });
+    defer jobs.deinit();
+    if (jobs.value.len == 0 or jobs.value[0].result.len == 0) return false;
+    const job = jobs.value[0].result[0];
+    if (!try db.mailStillValid(allocator, job)) {
+        try db.finishMail(allocator, job, "cancelled", "no_longer_valid");
+        return true;
     }
+    const plaintext = payload_crypto.open(allocator, job.encrypted_payload) catch {
+        try db.finishMail(allocator, job, "failed", "invalid_payload");
+        return true;
+    };
+    defer {
+        std.crypto.secureZero(u8, plaintext);
+        allocator.free(plaintext);
+    }
+    const parsed = std.json.parseFromSlice(payload_crypto.Payload, allocator, plaintext, .{}) catch {
+        try db.finishMail(allocator, job, "failed", "invalid_payload");
+        return true;
+    };
+    defer parsed.deinit();
+    const payload = parsed.value;
+    const fingerprint = db.hashTokenHex(payload.secret);
+    if (!std.mem.eql(u8, payload.kind, job.kind) or !std.mem.eql(u8, &fingerprint, job.secret_hash)) {
+        try db.finishMail(allocator, job, "failed", "invalid_payload");
+        return true;
+    }
+    dispatch(allocator, payload) catch |err| {
+        try db.finishMail(allocator, job, "pending", @errorName(err));
+        std.debug.print("Mail delivery deferred: {}\n", .{err});
+        return true;
+    };
+    try db.finishMail(allocator, job, "delivered", "");
+    return true;
+}
+
+fn dispatch(a: std.mem.Allocator, payload: payload_crypto.Payload) !void {
+    if (std.mem.eql(u8, payload.kind, "confirmation"))
+        return sendConfirmationEmail(a, payload.email, payload.name, payload.secret);
+    if (std.mem.eql(u8, payload.kind, "password_reset"))
+        return sendPasswordResetEmail(a, payload.email, payload.secret);
+    if (std.mem.eql(u8, payload.kind, "workspace_invite"))
+        return sendWorkspaceInviteEmail(a, payload.email, payload.name, payload.secret);
+    return error.InvalidMailKind;
 }
 
 fn mailerLoop() void {
-    const base = app.allocator();
+    var cycle: u32 = 0;
     while (mail_running.load(.acquire)) {
-        mail_mutex.lock();
-        while (mail_running.load(.acquire) and mail_queue.items.len == 0) {
-            mail_cond.wait(&mail_mutex);
+        var arena = std.heap.ArenaAllocator.init(app.allocator());
+        const a = arena.allocator();
+        if (cycle % 30 == 0) db.maintainMail(a) catch |err| {
+            std.debug.print("Mail maintenance failed: {}\n", .{err});
+        };
+        _ = processOne(a) catch |err| {
+            std.debug.print("Mail worker failed: {}\n", .{err});
+        };
+        arena.deinit();
+        cycle +%= 1;
+        for (0..10) |_| {
+            if (!mail_running.load(.acquire)) break;
+            std.Thread.sleep(200 * std.time.ns_per_ms);
         }
-        if (!mail_running.load(.acquire)) {
-            mail_mutex.unlock();
-            break;
-        }
-        const job = mail_queue.orderedRemove(0);
-        mail_mutex.unlock();
-
-        // SMTP send happens outside the lock so enqueue never blocks on it.
-        dispatch(base, job);
-        freeJob(job);
     }
-
-    // Shutdown: free any jobs still queued without blocking on SMTP.
-    mail_mutex.lock();
-    for (mail_queue.items) |job| freeJob(job);
-    mail_queue.deinit(base);
-    mail_mutex.unlock();
 }
 
 pub fn startMailerThread() !void {
-    if (mail_thread != null) return;
+    if (mail_thread != null or std.mem.eql(u8, config.getOrDefault("MAIL_WORKER_ENABLED", "1"), "0")) return;
     mail_running.store(true, .release);
     mail_thread = try std.Thread.spawn(.{}, mailerLoop, .{});
-    std.debug.print("✅ Mailer thread started\n", .{});
+    std.debug.print("Persistent mail worker started\n", .{});
 }
 
 pub fn stopMailerThread() void {
     if (mail_thread) |thread| {
-        mail_mutex.lock();
         mail_running.store(false, .release);
-        mail_cond.signal();
-        mail_mutex.unlock();
         thread.join();
         mail_thread = null;
-        std.debug.print("🛑 Mailer thread stopped\n", .{});
     }
 }

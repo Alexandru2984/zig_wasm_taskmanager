@@ -58,6 +58,10 @@ Runtime settings: `SURREAL_AUTH_LEVEL=database`, `DB_AUTO_MIGRATE=0`,
 `SERVER_THREADS=4`. A system database EDITOR still trusts the application for
 tenant authorization; it is not database-enforced row-level isolation.
 
+From migration 013 onward, provision and retain `MAIL_OUTBOX_KEY` in the runtime
+config before canary/promotion. See [durable email](DURABLE-EMAIL.md) for private
+key recovery, disabled-worker canaries and rollback implications.
+
 ## Stage, migrate, promote
 
 1. Stage the ReleaseSafe executable as `bin/taskmanager`, its matching

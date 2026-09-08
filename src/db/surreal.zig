@@ -1,4 +1,5 @@
 const std = @import("std");
+const mail_payload = @import("../services/mail_payload.zig");
 const config = @import("../config/config.zig");
 const validation = @import("../util/validation.zig");
 const http_client = @import("http_client.zig");
@@ -84,6 +85,16 @@ const actorFence =
     \\LET $actor = (UPDATE users SET security_revision = (security_revision ?? 0) + 1 WHERE id = $actor_id RETURN AFTER);
     \\IF array::len($actor) != 1 { THROW "APP_FORBIDDEN"; };
 ++ "\n";
+
+// The guard is shared by enqueue transactions so the queue capacity check
+// cannot be bypassed by concurrent signups/invites under snapshot isolation.
+const insertMail =
+    \\UPSERT mail_guard:queue SET revision = (revision ?? 0) + 1;
+    \\DELETE mail_outbox WHERE owner_id = $mail_owner AND reference_id = $mail_ref AND kind = $mail_kind AND status INSIDE ["pending", "processing"];
+    \\LET $size = (SELECT count() FROM mail_outbox WHERE status INSIDE ["pending", "processing"] GROUP ALL)[0].count ?? 0;
+    \\IF $size >= 5000 { THROW "APP_BUSY"; };
+    \\CREATE mail_outbox SET owner_id = $mail_owner, reference_id = $mail_ref, kind = $mail_kind, encrypted_payload = $mail_payload, secret_hash = $mail_hash, expires_at = $mail_expires;
+++ "\n";
 const workspaceFence =
     \\LET $scope = (UPDATE workspaces SET security_revision = (security_revision ?? 0) + 1 WHERE id = $workspace_id RETURN AFTER);
     \\IF array::len($scope) != 1 { THROW "APP_NOT_FOUND"; };
@@ -138,7 +149,7 @@ fn runMigration(allocator: std.mem.Allocator, version: []const u8, sql: []const 
 
 // Initialize database schema
 pub fn checkSchema(allocator: std.mem.Allocator) !void {
-    if (!try migrationApplied(allocator, "012_authorization_fences")) return error.SchemaMigrationRequired;
+    if (!try migrationApplied(allocator, "013_mail_outbox")) return error.SchemaMigrationRequired;
 }
 
 pub fn initSchema(allocator: std.mem.Allocator) !void {
@@ -330,10 +341,118 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD IF NOT EXISTS security_revision ON workspaces TYPE int DEFAULT 0;
     );
 
+    try runMigration(allocator, "013_mail_outbox",
+        \\DEFINE TABLE IF NOT EXISTS mail_guard SCHEMAFULL;
+        \\DEFINE FIELD IF NOT EXISTS revision ON mail_guard TYPE int DEFAULT 0;
+        \\DEFINE FIELD IF NOT EXISTS key_fingerprint ON mail_guard TYPE option<string>;
+        \\DEFINE TABLE IF NOT EXISTS mail_outbox SCHEMAFULL;
+        \\DEFINE FIELD IF NOT EXISTS owner_id ON mail_outbox TYPE record<users>;
+        \\DEFINE FIELD IF NOT EXISTS reference_id ON mail_outbox TYPE record;
+        \\DEFINE FIELD IF NOT EXISTS kind ON mail_outbox TYPE string ASSERT $value INSIDE ["confirmation", "password_reset", "workspace_invite"];
+        \\DEFINE FIELD IF NOT EXISTS encrypted_payload ON mail_outbox TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS secret_hash ON mail_outbox TYPE string;
+        \\DEFINE FIELD IF NOT EXISTS status ON mail_outbox TYPE string DEFAULT "pending" ASSERT $value INSIDE ["pending", "processing", "delivered", "failed", "cancelled"];
+        \\DEFINE FIELD IF NOT EXISTS attempts ON mail_outbox TYPE int DEFAULT 0;
+        \\DEFINE FIELD IF NOT EXISTS available_at ON mail_outbox TYPE int DEFAULT 0;
+        \\DEFINE FIELD IF NOT EXISTS expires_at ON mail_outbox TYPE int;
+        \\DEFINE FIELD IF NOT EXISTS lease_until ON mail_outbox TYPE int DEFAULT 0;
+        \\DEFINE FIELD IF NOT EXISTS lease_token ON mail_outbox TYPE option<string>;
+        \\DEFINE FIELD IF NOT EXISTS last_error ON mail_outbox TYPE string DEFAULT "";
+        \\DEFINE FIELD IF NOT EXISTS created_at ON mail_outbox TYPE int DEFAULT time::unix();
+        \\DEFINE INDEX IF NOT EXISTS mail_ready ON mail_outbox FIELDS status, available_at;
+        \\DEFINE INDEX IF NOT EXISTS mail_owner ON mail_outbox FIELDS owner_id;
+    );
+
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
 }
 
 // ============== USER OPERATIONS ==============
+
+pub const MailJob = struct {
+    id: []const u8,
+    owner_id: []const u8,
+    reference_id: []const u8,
+    kind: []const u8,
+    encrypted_payload: []const u8,
+    secret_hash: []const u8,
+    attempts: u32,
+    lease_token: []const u8,
+    expires_at: i64,
+};
+
+pub fn checkMailKey(allocator: std.mem.Allocator) !void {
+    const fingerprint = try mail_payload.keyFingerprint();
+    const result = try queryWithVars(allocator,
+        \\BEGIN TRANSACTION;
+        \\LET $stored = (SELECT VALUE key_fingerprint FROM mail_guard:queue)[0];
+        \\IF $stored = NONE {
+        \\    UPSERT mail_guard:queue SET revision = (revision ?? 0) + 1, key_fingerprint = $fingerprint;
+        \\} ELSE IF $stored != $fingerprint { THROW "MAIL_KEY_MISMATCH: restore the original private runtime key"; };
+        \\COMMIT TRANSACTION;
+    , .{ .fingerprint = @as([]const u8, &fingerprint) });
+    allocator.free(result);
+}
+
+pub fn claimMail(allocator: std.mem.Allocator, lease: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\BEGIN TRANSACTION;
+        \\LET $candidate = (SELECT VALUE id FROM mail_outbox WHERE (status = "pending" AND available_at <= time::unix() OR status = "processing" AND lease_until <= time::unix()) AND expires_at > time::unix() + 35 AND attempts < 5 LIMIT 1)[0];
+        \\LET $claimed = (UPDATE mail_outbox SET status = "processing", attempts += 1, lease_token = $lease, lease_until = time::unix() + 120 WHERE id = $candidate RETURN AFTER);
+        \\RETURN $claimed;
+        \\COMMIT TRANSACTION;
+    , .{ .lease = lease });
+}
+
+pub fn maintainMail(allocator: std.mem.Allocator) !void {
+    const result = try query(allocator,
+        \\UPDATE mail_outbox SET status = "cancelled", encrypted_payload = "", secret_hash = "", lease_token = NONE, last_error = "expired" WHERE status INSIDE ["pending", "processing"] AND expires_at <= time::unix() + 35;
+        \\UPDATE mail_outbox SET status = "failed", encrypted_payload = "", secret_hash = "", lease_token = NONE, last_error = "attempt_limit" WHERE status = "processing" AND lease_until <= time::unix() AND attempts >= 5;
+        \\DELETE mail_outbox WHERE status INSIDE ["delivered", "cancelled", "failed"] AND created_at < time::unix() - 604800;
+    );
+    allocator.free(result);
+}
+
+pub fn mailStillValid(allocator: std.mem.Allocator, job: MailJob) !bool {
+    const result = try queryWithVars(allocator,
+        \\LET $job = (SELECT * FROM mail_outbox WHERE id = $job_id AND status = "processing" AND lease_token = $lease AND lease_until > time::unix() AND expires_at > time::unix() + 35)[0];
+        \\LET $user = (SELECT * FROM ONLY $owner);
+        \\LET $invite = IF $kind = "workspace_invite" { (SELECT * FROM workspace_invites WHERE id = $reference AND token = $hash AND accepted_at = NONE AND expires_at > time::unix() + 35)[0]; } ELSE { NONE; };
+        \\LET $issuer = IF $invite != NONE { (SELECT VALUE role FROM workspace_members WHERE user_id = $owner AND workspace_id = $invite.workspace_id)[0]; } ELSE { NONE; };
+        \\RETURN [{ valid: $job != NONE AND $user != NONE AND (
+        \\    $kind = "confirmation" AND !$user.email_verified AND $user.verification_token = $hash AND $user.verification_expires > time::unix() + 35
+        \\    OR $kind = "password_reset" AND $user.reset_token = $hash AND $user.reset_expires > time::unix() + 35
+        \\    OR $kind = "workspace_invite" AND $invite != NONE AND $invite.invited_by = $owner AND $issuer INSIDE ["owner", "admin"]
+        \\) }];
+    , .{ .job_id = rec(job.id), .owner = rec(job.owner_id), .reference = rec(job.reference_id), .hash = job.secret_hash, .kind = job.kind, .lease = job.lease_token });
+    defer allocator.free(result);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(struct { valid: bool }), allocator, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    return parsed.value.len == 1 and parsed.value[0].result.len == 1 and parsed.value[0].result[0].valid;
+}
+
+pub fn finishMail(allocator: std.mem.Allocator, job: MailJob, status: []const u8, failure: []const u8) !void {
+    const delay: u32 = switch (job.attempts) {
+        0, 1 => 30,
+        2 => 120,
+        3 => 480,
+        else => 1800,
+    };
+    const terminal = !std.mem.eql(u8, status, "pending") or job.attempts >= 5;
+    const result = try queryWithVars(allocator,
+        \\UPDATE mail_outbox SET status = $status, encrypted_payload = IF $terminal { ""; } ELSE { encrypted_payload; }, secret_hash = IF $terminal { ""; } ELSE { secret_hash; }, last_error = $failure, lease_token = NONE, lease_until = 0, available_at = time::unix() + $delay WHERE id = $job_id AND lease_token = $lease AND status = "processing";
+    , .{ .job_id = rec(job.id), .lease = job.lease_token, .status = if (job.attempts >= 5 and std.mem.eql(u8, status, "pending")) "failed" else status, .terminal = terminal, .failure = failure, .delay = delay });
+    allocator.free(result);
+}
+
+pub fn listMail(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\SELECT id, kind, reference_id, status, attempts, created_at, last_error FROM mail_outbox WHERE owner_id = $owner ORDER BY created_at DESC LIMIT 100;
+    , .{ .owner = rec(user_id) });
+}
+
+pub fn mailStats(allocator: std.mem.Allocator) ![]u8 {
+    return query(allocator, "SELECT status, count() AS total, math::min(created_at) AS oldest FROM mail_outbox GROUP BY status;");
+}
 
 fn nextDueDate(allocator: std.mem.Allocator, due: []const u8, recurrence: []const u8) !?[]u8 {
     const ts = validation.dueDateToTimestamp(due) orelse return null;
@@ -362,14 +481,26 @@ fn nextDueDate(allocator: std.mem.Allocator, due: []const u8, recurrence: []cons
 
 pub fn createUser(allocator: std.mem.Allocator, email: []const u8, password_hash: []const u8, name: []const u8, verification_token: []const u8, verification_expires: i64) ![]u8 {
     const verification_hash = hashToken(verification_token);
+    const encrypted = try mail_payload.seal(allocator, .{ .kind = "confirmation", .email = email, .name = name, .secret = verification_token });
+    defer allocator.free(encrypted);
     return queryWithVars(allocator,
-        \\CREATE users SET email = $email, password_hash = $password_hash, name = $name, email_verified = false, verification_token = $verification_tkn, verification_expires = $expires, verification_attempts = 0;
+        \\BEGIN TRANSACTION;
+        \\LET $created = (CREATE users SET email = $email, password_hash = $password_hash, name = $name, email_verified = false, verification_token = $verification_tkn, verification_expires = $expires, verification_attempts = 0);
+        \\LET $mail_owner = $created[0].id;
+        \\LET $mail_ref = $mail_owner;
+    ++ "\n" ++ insertMail ++
+        \\RETURN $created;
+        \\COMMIT TRANSACTION;
     , .{
         .email = email,
         .password_hash = password_hash,
         .name = name,
         .verification_tkn = verification_hash,
         .expires = verification_expires,
+        .mail_kind = @as([]const u8, "confirmation"),
+        .mail_payload = encrypted,
+        .mail_hash = verification_hash,
+        .mail_expires = verification_expires,
     });
 }
 
@@ -428,11 +559,8 @@ pub fn resetUserPasswordAndClearToken(
     return parsed.value.len > 0 and parsed.value[0].result.len == 1;
 }
 
-pub fn setResetToken(allocator: std.mem.Allocator, user_id: []const u8, token: []const u8, expires: i64) ![]u8 {
-    const token_hash = hashToken(token);
-    return queryWithVars(allocator,
-        \\UPDATE $record_id SET reset_token = $reset_tkn, reset_expires = $expires;
-    , .{ .record_id = rec(user_id), .reset_tkn = token_hash, .expires = expires });
+pub fn setResetToken(allocator: std.mem.Allocator, user: models.User, token: []const u8, expires: i64) ![]u8 {
+    return setCredentialMail(allocator, user, token, expires, false);
 }
 
 pub fn clearResetToken(allocator: std.mem.Allocator, user_id: []const u8) !void {
@@ -442,12 +570,24 @@ pub fn clearResetToken(allocator: std.mem.Allocator, user_id: []const u8) !void 
     allocator.free(result);
 }
 
-pub fn setVerificationToken(allocator: std.mem.Allocator, user_id: []const u8, token: []const u8, expires: i64) ![]u8 {
-    // SECURITY: reset the attempt counter so a fresh code gets a fresh budget.
-    const token_hash = hashToken(token);
-    return queryWithVars(allocator,
-        \\UPDATE $record_id SET verification_token = $verification_tkn, verification_expires = $expires, verification_attempts = 0;
-    , .{ .record_id = rec(user_id), .verification_tkn = token_hash, .expires = expires });
+pub fn setVerificationToken(allocator: std.mem.Allocator, user: models.User, token: []const u8, expires: i64) ![]u8 {
+    return setCredentialMail(allocator, user, token, expires, true);
+}
+
+fn setCredentialMail(allocator: std.mem.Allocator, user: models.User, token: []const u8, expires: i64, verification: bool) ![]u8 {
+    const kind: []const u8 = if (verification) "confirmation" else "password_reset";
+    const encrypted = try mail_payload.seal(allocator, .{ .kind = kind, .email = user.email, .name = user.name, .secret = token });
+    defer allocator.free(encrypted);
+    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ actorFence ++
+        \\IF $verification {
+        \\    UPDATE $actor_id SET verification_token = $mail_hash, verification_expires = $mail_expires, verification_attempts = 0;
+        \\} ELSE { UPDATE $actor_id SET reset_token = $mail_hash, reset_expires = $mail_expires; };
+        \\LET $mail_owner = $actor_id;
+        \\LET $mail_ref = $actor_id;
+    ++ "\n" ++ insertMail ++
+        \\RETURN [];
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(user.id), .verification = verification, .mail_kind = kind, .mail_payload = encrypted, .mail_hash = hashToken(token), .mail_expires = expires });
 }
 
 pub fn getUserByResetToken(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
@@ -655,6 +795,7 @@ pub fn listWorkspaceMembers(allocator: std.mem.Allocator, workspace_id: []const 
 pub fn createWorkspaceInvite(
     allocator: std.mem.Allocator,
     workspace_id: []const u8,
+    workspace_name: []const u8,
     email: []const u8,
     role: []const u8,
     invited_by: []const u8,
@@ -662,10 +803,15 @@ pub fn createWorkspaceInvite(
     expires_at: i64,
 ) ![]u8 {
     const token_hash = hashToken(token);
+    const encrypted = try mail_payload.seal(allocator, .{ .kind = "workspace_invite", .email = email, .name = workspace_name, .secret = token });
+    defer allocator.free(encrypted);
     return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ adminFence ++
         \\IF !$actor[0].email_verified { THROW "APP_FORBIDDEN"; };
         \\IF array::len(SELECT id FROM workspace_invites WHERE workspace_id = $workspace_id AND email = $email AND accepted_at = NONE AND expires_at >= time::unix()) > 0 { THROW "APP_INVALID"; };
         \\LET $created = (CREATE workspace_invites SET workspace_id = $workspace_id, email = $email, role = $invite_role, token = $invite_token, invited_by = $actor_id, expires_at = $expires_at, accepted_at = NONE, created_at = time::now());
+        \\LET $mail_owner = $actor_id;
+        \\LET $mail_ref = $created[0].id;
+    ++ "\n" ++ insertMail ++
         \\RETURN $created;
         \\COMMIT TRANSACTION;
     , .{
@@ -675,6 +821,10 @@ pub fn createWorkspaceInvite(
         .invite_token = token_hash,
         .actor_id = rec(invited_by),
         .expires_at = expires_at,
+        .mail_kind = @as([]const u8, "workspace_invite"),
+        .mail_payload = encrypted,
+        .mail_hash = token_hash,
+        .mail_expires = expires_at,
     });
 }
 
@@ -1085,6 +1235,7 @@ pub fn deleteUserAccount(allocator: std.mem.Allocator, user_id: []const u8, expe
         \\LET $actor = (UPDATE users SET security_revision = (security_revision ?? 0) + 1 WHERE id = $record_id AND password_hash = $expected_hash RETURN AFTER);
         \\IF array::len($actor) != 1 { THROW "APP_CONFLICT"; };
         \\LET $owned = (SELECT VALUE id FROM workspaces WHERE owner_id = $record_id);
+        \\LET $removed_invites = (SELECT VALUE id FROM workspace_invites WHERE invited_by = $record_id OR workspace_id IN $owned);
         \\LET $removed_tasks = (SELECT VALUE id FROM tasks WHERE user_id = $record_id OR workspace_id IN $owned);
         \\UPDATE workspaces SET security_revision = (security_revision ?? 0) + 1 WHERE id IN $owned
         \\    OR id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $record_id)
@@ -1097,6 +1248,7 @@ pub fn deleteUserAccount(allocator: std.mem.Allocator, user_id: []const u8, expe
         \\DELETE workspace_members WHERE user_id = $record_id OR workspace_id IN $owned;
         \\DELETE workspaces WHERE owner_id = $record_id;
         \\DELETE activity_events WHERE user_id = $record_id;
+        \\DELETE mail_outbox WHERE owner_id = $record_id OR reference_id IN $removed_invites;
         \\DELETE sessions WHERE user_id = $record_id;
         \\DELETE $record_id;
         \\RETURN [];

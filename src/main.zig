@@ -26,6 +26,7 @@ test {
     _ = @import("util/rate_limiter.zig");
     _ = @import("db/http_client.zig");
     _ = @import("services/auth.zig");
+    _ = @import("services/mail_payload.zig");
     _ = @import("util/http.zig");
 }
 
@@ -64,6 +65,13 @@ pub fn main() !void {
     }
 
     if (migrate_only) return;
+    try @import("services/mail_payload.zig").validateKey();
+    try db.impl.checkMailKey(allocator);
+    if (std.mem.eql(u8, config.getOrDefault("MAIL_PROCESS_ONCE", "0"), "1")) {
+        try db.impl.maintainMail(allocator);
+        _ = try email.processOne(allocator);
+        return;
+    }
 
     // Initialize rate limiters
     rate_limiter.initAll(allocator);
@@ -388,6 +396,15 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         return;
     }
 
+    if (std.mem.eql(u8, path, "/api/email-deliveries")) {
+        if (!std.mem.eql(u8, req_method, "GET")) {
+            r.setHeader("Allow", "GET") catch {};
+            try http.jsonError(r, 405, "Method not allowed");
+            return;
+        }
+        try account_handler.listMailDeliveries(r, req_alloc);
+        return;
+    }
     if (std.mem.eql(u8, path, "/api/sessions")) {
         if (std.mem.eql(u8, req_method, "GET")) {
             try account_handler.listSessions(r, req_alloc);

@@ -4,7 +4,6 @@ const zap = @import("zap");
 const db = @import("../db/db.zig");
 const models = @import("../domain/models.zig");
 const auth = @import("../services/auth.zig");
-const email = @import("../services/email.zig");
 const validation = @import("../util/validation.zig");
 const rate_limiter = @import("../util/rate_limiter.zig");
 const http = @import("../util/http.zig");
@@ -87,7 +86,11 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     // parallel signups for the same email can both pass and then race at the
     // UNIQUE index. When that happens, surface it as 400 "Email already exists"
     // instead of a generic 500.
-    const db_result = db.createUser(req_alloc, email_norm, password_hash, name, verification_code, verification_expires) catch {
+    const db_result = db.createUser(req_alloc, email_norm, password_hash, name, verification_code, verification_expires) catch |err| {
+        if (err == error.CapacityExceeded) {
+            try http.mutationError(r, err, "Could not create account");
+            return;
+        }
         const dup_check = db.getUserByEmail(req_alloc, email_norm) catch {
             try http.jsonError(r, 500, "Failed to create user");
             return;
@@ -117,8 +120,7 @@ pub fn handleSignup(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     }
     const user = parsed_created.value[0].result[0];
 
-    // Send confirmation email off the request path (see email.enqueue* docs).
-    email.enqueueConfirmation(user.email, user.name, verification_code);
+    // The encrypted confirmation job committed atomically with the user.
 
     // Create session
     const session = db.createSession(req_alloc, user.id, user.password_hash) catch |err| {
@@ -383,12 +385,11 @@ pub fn handleForgotPassword(r: zap.Request, req_alloc: std.mem.Allocator) !void 
         const token = try auth.generateResetToken(req_alloc);
         const expires = std.time.timestamp() + 3600; // 1 hour
 
-        _ = db.setResetToken(req_alloc, user.id, token, expires) catch {};
-
-        // SECURITY: enqueue rather than send inline so the response time does
-        // not reveal whether the email exists. Never log the token or the full
-        // email (journal readers / GDPR / enumeration via systemd logs).
-        email.enqueuePasswordReset(user.email, token);
+        // Uniform response is preserved even if persistence fails. Neither a
+        // new reset token nor its delivery job can commit without the other.
+        _ = db.setResetToken(req_alloc, user, token, expires) catch |err| {
+            log.warn("Could not persist password recovery: {}", .{err});
+        };
     }
 
     // Always return success to prevent email enumeration
@@ -561,13 +562,12 @@ pub fn handleResendVerification(r: zap.Request, req_alloc: std.mem.Allocator) !v
     const verification_expires = std.time.timestamp() + 600; // 10 minutes
 
     // Update user with new code
-    _ = db.setVerificationToken(req_alloc, user_id, verification_code, verification_expires) catch {
+    _ = db.setVerificationToken(req_alloc, user, verification_code, verification_expires) catch {
         try http.jsonError(r, 500, "Failed to update verification code");
         return;
     };
 
-    // Send email off the request path (see email.enqueue* docs).
-    email.enqueueConfirmation(user.email, user.name, verification_code);
+    // The replacement code and encrypted delivery job committed together.
 
     db.logActivity(req_alloc, user_id, "resend_verification", "user", user_id) catch |err| {
         log.warn("Failed to log resend verification activity: {}", .{err});

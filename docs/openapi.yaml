@@ -392,6 +392,34 @@ paths:
           description: Task deleted
         "403":
           description: Task does not belong to current user
+  /api/email-deliveries:
+    get:
+      summary: Latest 100 delivery records owned by the signed-in account
+      description: Only metadata is returned. Tokens, payloads and recipient addresses are excluded. Terminal records expire seven days after creation. Delivery means SMTP acceptance, not inbox placement.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Delivery metadata, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 100
+                items:
+                  type: object
+                  required: [id, kind, reference_id, status, attempts, created_at, last_error]
+                  properties:
+                    id: { type: string }
+                    reference_id: { type: string }
+                    kind: { type: string, enum: [confirmation, password_reset, workspace_invite] }
+                    status: { type: string, enum: [pending, processing, delivered, failed, cancelled] }
+                    attempts: { type: integer }
+                    created_at: { type: integer, format: int64, description: Unix seconds }
+                    last_error: { type: string, description: Bounded internal reason without SMTP response contents }
+        "401":
+          description: Not authenticated
   /api/sessions:
     get:
       summary: List active sessions for the current user
@@ -484,6 +512,11 @@ paths:
           description: Not authenticated
 components:
   securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: __Host-session_token
+      description: Secure production session cookie; local HTTP uses session_token with COOKIE_INSECURE=1.
     bearerAuth:
       type: http
       scheme: bearer

@@ -266,12 +266,23 @@ pub const ExportTask = struct {
     workspace_id: ?[]const u8 = null,
 };
 
+pub const MailDelivery = struct {
+    id: []const u8,
+    kind: []const u8,
+    reference_id: []const u8,
+    status: []const u8,
+    attempts: u32,
+    created_at: i64,
+    last_error: []const u8,
+};
+
 pub const ExportDocument = struct {
     exported_at: i64,
     account: UserProfile,
     tasks: []const ExportTask,
     workspaces: []const WorkspaceResponse,
     activity: []const ActivityResponse,
+    email_deliveries: []const MailDelivery = &.{},
 };
 
 // --- Common ---

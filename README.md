@@ -29,7 +29,8 @@ systemd-sandboxed VPS deployment.
 - Keyboard shortcuts, and a CSV export that runs in the browser.
 - Multi-workspace task tenancy with owner/admin/member/viewer roles, member
   listing, and email invite acceptance.
-- Email verification and password reset through SMTP with background dispatch.
+- Email verification, password reset and invitations through an encrypted,
+  transactional email outbox, with bounded retries and per-account delivery status.
   Signup still reveals existing addresses; timing equivalence is not established.
 - Optional email reminders before task deadlines.
 - Activity log for account and task actions, with a UI to read it.
@@ -67,6 +68,10 @@ then start it and run the app from source as described below:
 
 ```bash
 cp .env.example .env
+chmod 600 .env
+# Private recovery directory outside the repository; keep the generated key.
+install -d -m 700 ../taskmanager-private-recovery
+node scripts/provision_mail_key.mjs .env ../taskmanager-private-recovery/mail-runtime.env
 # Set a strong SURREAL_PASS and SURREAL_URL=http://127.0.0.1:8010 in .env.
 # New empty database only (omit the bootstrap override for an existing store):
 docker compose -f docker-compose.yml -f docker-compose.bootstrap.yml up -d surrealdb
@@ -85,16 +90,21 @@ Requirements:
 - Zig 0.15.x
 - SurrealDB reachable over HTTP
 - SMTP credentials for verification/reset email (optional for local use)
+- Node 22+ for private configuration and test helpers; curl and OpenSSL for SMTP/tests
 
 ```bash
 git clone <repo-url>
 cd taskmanager
-cp .env.example .env   # optional: config can also come from the environment
+cp .env.example .env   # or provide configuration through the environment
+# Configure DB settings and provision MAIL_OUTBOX_KEY using the steps above.
 zig build run
 ```
 
 The app defaults to `http://127.0.0.1:9000`. Every `.env` key can be overridden
 by a process environment variable of the same name.
+`MAIL_OUTBOX_KEY` is required even when local SMTP is not configured. Keep it
+outside the DB and retain it across upgrades; a different key refuses startup.
+See [durable email operations](docs/DURABLE-EMAIL.md) before upgrading an existing install.
 
 ## Verification
 
@@ -102,7 +112,8 @@ by a process environment variable of the same name.
 ./scripts/check.sh            # formatting, build, unit tests
 ./scripts/integration_test.sh # API against a throwaway SurrealDB
 npm ci
-RUN_SECURITY=1 RUN_UI=1 ./scripts/integration_test.sh # isolated full suite
+node scripts/mail_ops_test.mjs
+RUN_SECURITY=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
 ```
 
 All three run in CI on every push.
@@ -159,6 +170,7 @@ Main endpoint groups:
   recurrence, assignee and parent; `PUT` applies a partial update, or toggles
   completion when the body is empty
 - `/api/sessions*`: list and revoke sessions
+- `/api/email-deliveries`: latest 100 own delivery records, with no payloads or tokens
 - `/api/export`: everything the account holds, as one JSON document
 - `/api/account`: delete the account, re-authenticating first
 - `/api/activity`: authenticated activity log

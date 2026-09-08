@@ -149,6 +149,26 @@ try {
         (await m.locator('#userName').textContent() || '').includes("O'Brien"));
     await m.click('#verifyModal .modal-close');
 
+    await m.click('#userBtn');
+    await m.click('[data-target="profileModal"][role="menuitem"]');
+    await m.click('[data-scope="profile"][data-tab="mail"]');
+    await m.waitForSelector('#mailDeliveryList li');
+    record('profile shows queued confirmation delivery without a secret',
+        (await m.locator('#mailDeliveryList').textContent()).includes('confirmation · pending') &&
+        !/token|secret|encrypted_payload/.test(await m.locator('#mailDeliveryList').textContent()));
+    await m.setViewportSize({ width: 320, height: 900 });
+    record('email delivery panel fits a 320px phone',
+        await m.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    await m.route('**/api/email-deliveries', route => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"Fixture"}' }));
+    await m.click('[data-action="refresh-mail"]');
+    await m.waitForFunction(() => document.getElementById('mailDeliveryStatus').textContent.includes('Please retry'));
+    record('delivery failure provides an explicit retry state', await m.locator('#mailDeliveryList li').count() === 0);
+    await m.unroute('**/api/email-deliveries');
+    await m.click('[data-action="refresh-mail"]');
+    await m.waitForSelector('#mailDeliveryList li');
+    await m.keyboard.press('Escape');
+    await m.setViewportSize({ width: 390, height: 844 });
+
     async function addTask(title, priority, tags) {
         if (await m.locator('#composerDetails').isHidden()) await m.click('#composerToggle');
         await m.fill('#taskInput', title);
@@ -374,6 +394,8 @@ try {
                 document.querySelectorAll('.task-item').length === 0;
         } finally { window.fetch = originalFetch; }
     }));
+
+    record('logout clears private delivery metadata', await m.locator('#mailDeliveryList li').count() === 0);
 
     record('no uncaught page errors', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 

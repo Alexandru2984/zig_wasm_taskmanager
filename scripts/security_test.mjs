@@ -377,6 +377,8 @@ await check('default workspace initialization and legacy task attachment roll ba
 });
 await check('account deletion failure leaves account and dependent data intact', async () => {
     const person = await newAccount('deleterollback');
+    const mail = `mail_outbox:delete_${run}`;
+    await sql(`CREATE ${mail} SET owner_id = ${person.id}, reference_id = ${person.id}, kind = 'confirmation', encrypted_payload = 'fixture', secret_hash = 'fixture', expires_at = time::unix() + 3600;`);
     const workspace = (await api(person, '/api/workspaces')).data[0].id;
     const task = (await api(person, '/api/tasks', 'POST', { title: 'Keep until commit', workspace_id: workspace })).data;
     const event = `fail_delete_${run}`;
@@ -387,12 +389,14 @@ await check('account deletion failure leaves account and dependent data intact',
         assert.equal((await sql(`SELECT id FROM ${task.id};`)).length, 1);
         assert.equal((await sql(`SELECT id FROM ${workspace};`)).length, 1);
         assert.equal((await sql(`SELECT id FROM workspace_members WHERE user_id = ${person.id};`)).length, 1);
+        assert.equal((await sql(`SELECT id FROM ${mail};`)).length, 1);
     } finally { await sql(`REMOVE EVENT ${event} ON TABLE users;`); }
     assert.equal((await api(person, '/api/account', 'DELETE', { password: person.password })).status, 200);
     assert.equal((await sql(`SELECT id FROM ${person.id};`)).length, 0);
     assert.equal((await sql(`SELECT id FROM ${task.id};`)).length, 0);
     assert.equal((await sql(`SELECT id FROM ${workspace};`)).length, 0);
     assert.equal((await sql(`SELECT id FROM sessions WHERE user_id = ${person.id};`)).length, 0);
+    assert.equal((await sql(`SELECT id FROM mail_outbox WHERE owner_id = ${person.id};`)).length, 0);
 });
 await check('overlapping account deletion and task creation leave no orphan data', async () => {
     const person = await newAccount('latecreate');

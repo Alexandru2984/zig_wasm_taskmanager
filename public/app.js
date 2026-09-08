@@ -244,6 +244,8 @@ async function checkAuth() {
 
 function showLoggedIn(user) {
     if (state.user?.id !== user.id) {
+        $('mailDeliveryList').replaceChildren();
+        $('mailDeliveryStatus').textContent = '';
         state.tasks = [];
         state.currentWorkspaceId = null;
         state.savedViewContext = null;
@@ -293,6 +295,8 @@ function renderVerifiedBadge(user) {
 
 function showLoggedOut() {
     state.user = null;
+    $('mailDeliveryList').replaceChildren();
+    $('mailDeliveryStatus').textContent = '';
     state.tasks = getAnonTasks();
     state.savedViewContext = null;
     state.selection.clear();
@@ -2468,6 +2472,7 @@ function closeDropdown() {
 /** Tabs are scoped so the profile dialog and the workspace dialog can both use
  *  the pattern without one clearing the other's active state. */
 function switchTab(scope, tabName, clickedBtn) {
+    if (scope === 'profile' && tabName === 'mail') loadEmailDeliveries();
     document.querySelectorAll(`.tab-btn[data-scope="${scope}"]`).forEach(btn => {
         const active = btn === clickedBtn;
         btn.classList.toggle('active', active);
@@ -2482,6 +2487,27 @@ function switchTab(scope, tabName, clickedBtn) {
 }
 
 // ============ EVENT WIRING ============
+
+async function loadEmailDeliveries() {
+    const user = state.user;
+    if (!user) return;
+    $('mailDeliveryStatus').textContent = 'Loading…';
+    $('mailDeliveryList').replaceChildren();
+    const { ok, data } = await api('/api/email-deliveries');
+    if (state.user !== user) return;
+    $('mailDeliveryList').replaceChildren();
+    $('mailDeliveryStatus').textContent = !ok ? 'Could not load delivery status. Please retry.' : data.length ? 'Latest 100 deliveries; older records expire after seven days.' : 'No recent email deliveries.';
+    if (!ok) return;
+    for (const job of data) {
+        const row = document.createElement('li'); row.className = 'panel-item';
+        const details = document.createElement('div'); details.className = 'panel-item-main';
+        const title = document.createElement('div'); title.className = 'panel-item-title';
+        title.textContent = `${job.kind.replaceAll('_', ' ')} · ${job.status}`;
+        const subtitle = document.createElement('div'); subtitle.className = 'panel-item-sub';
+        subtitle.textContent = `${new Date(job.created_at * 1000).toLocaleString()} · ${job.attempts} attempt(s)`;
+        details.append(title, subtitle); row.append(details); $('mailDeliveryList').append(row);
+    }
+}
 
 /** One delegated listener for both task lists. Each interactive element
  *  carries data-act, so adding a row action needs no new listener. */
@@ -2715,6 +2741,7 @@ function bindActions() {
             case 'switch-tab': switchTab(el.dataset.scope, el.dataset.tab, el); break;
             case 'logout': logout(); break;
             case 'verify-now': e.preventDefault(); hideModal('profileModal'); showModal('verifyModal'); break;
+            case 'refresh-mail': loadEmailDeliveries(); break;
             case 'resend-code': handleResendCode(e); break;
             case 'open-workspace': openWorkspacePanel(); break;
             case 'open-activity': openActivityPanel(); break;

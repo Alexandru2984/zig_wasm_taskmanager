@@ -24,6 +24,7 @@ CONTAINER="taskmanager-it-$$"
 WORKDIR="$(mktemp -d)"
 APP_PID=""
 CONTAINER_STARTED=0
+MAIL_TEST_KEY="$(openssl rand -hex 32)"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 
@@ -108,6 +109,8 @@ fi
     LD_LIBRARY_PATH="$FACIL_DIR" SURREAL_URL="http://127.0.0.1:$DB_PORT" \
     SURREAL_NS=taskmanager_it SURREAL_DB=main SURREAL_USER=itapp SURREAL_PASS=integration-only-app \
     SURREAL_AUTH_LEVEL=database DB_AUTO_MIGRATE=0 \
+    MAIL_OUTBOX_KEY="$MAIL_TEST_KEY" MAIL_WORKER_ENABLED="${MAIL_WORKER_ENABLED:-0}" \
+    METRICS_TOKEN=integration-only-metrics \
     PORT="$APP_PORT" CORS_ORIGIN="http://127.0.0.1:$APP_PORT" \
     APP_BASE_URL="http://127.0.0.1:$APP_PORT" COOKIE_INSECURE=1 LOG_LEVEL=info \
     SERVER_THREADS=4 "$WORKDIR/build/bin/taskmanager" > "$WORKDIR/app.log" 2>&1 ) &
@@ -144,4 +147,10 @@ fi
 if [ "${RUN_UI:-0}" = 1 ]; then
     say "Browser suite"
     BASE_URL="http://127.0.0.1:$APP_PORT" node scripts/ui_test.mjs
+fi
+if [ "${RUN_OUTBOX:-0}" = 1 ]; then
+    say "Durable email regressions (local TLS SMTP fixture only)"
+    BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" \
+        TEST_WORKDIR="$WORKDIR" TEST_APP_BINARY="$WORKDIR/build/bin/taskmanager" \
+        TEST_LIBRARY_DIR="$FACIL_DIR" TEST_MAIL_KEY="$MAIL_TEST_KEY" node scripts/outbox_test.mjs
 fi

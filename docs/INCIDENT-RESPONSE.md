@@ -93,8 +93,6 @@ promotion take a new protected local export and preserve release `973767a`.
 Migration 012 is additive: binary rollback must not erase newer customer writes,
 and it temporarily removes P1's race protections. No off-host recovery exists.
 
-## Draft incident communication (do not send automatically)
-
 P1b follow-up, 2026-09-08: persistent rotation/restart/rollback was exercised
 against a disposable DB before production. The active DB now starts without
 bootstrap credentials and its exposed administrator password was rotated.
@@ -102,6 +100,18 @@ Recovery configuration and a stopped prior container are retained as described
 in [DATABASE-HARDENING.md](DATABASE-HARDENING.md). During recovery never start
 both containers against their shared datastore, and never revert to the exposed
 password just because an HTTP response was ambiguous.
+
+### Durable mail affected-scenario walkthrough — 2026-09-08
+
+The [durable email runbook](DURABLE-EMAIL.md) records the SMTP outage, wrong-key,
+revocation, account-deletion and binary-rollback scenarios. Technical fixtures
+exercise retries, leases and transactional deletion; no real email or human
+alert-delivery drill is implied. Restore the retained private key on mismatch,
+not a newly generated key. A send already accepted by SMTP cannot be recalled;
+check endpoint credential validity and communicate duplicate/expired emails
+without copying their tokens into logs or tickets.
+
+## Draft incident communication (do not send automatically)
 
 “On [UTC date/time] we detected [confirmed event]. We have [containment].
 The data confirmed affected is [data types/time range]. [Actions required of

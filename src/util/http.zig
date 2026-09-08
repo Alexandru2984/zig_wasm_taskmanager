@@ -320,6 +320,7 @@ pub fn mutationError(r: zap.Request, err: anyerror, fallback: []const u8) !void 
         error.InvalidOperation => try jsonError(r, 400, "Operation is no longer valid. Refresh and try again."),
         error.NotFound => try jsonError(r, 404, "Resource not found."),
         error.Conflict => try jsonError(r, 409, "State changed. Refresh and retry."),
+        error.CapacityExceeded => try jsonError(r, 503, "Service capacity reached. Please try again later."),
         else => try jsonError(r, 500, fallback),
     }
 }

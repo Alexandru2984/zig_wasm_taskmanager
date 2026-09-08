@@ -57,7 +57,6 @@ fn constantTimeEql(a: []const u8, b: []const u8) bool {
 }
 
 pub fn handleMetrics(r: zap.Request, req_alloc: std.mem.Allocator) !void {
-    _ = req_alloc;
 
     // SECURITY: /api/metrics leaks app internals (uptime, version). Gate it
     // behind METRICS_TOKEN: if set, require Authorization: Bearer <token>.
@@ -95,7 +94,29 @@ pub fn handleMetrics(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     };
 
+    const result = db.impl.mailStats(req_alloc) catch {
+        try http.jsonError(r, 503, "Metrics temporarily unavailable");
+        return;
+    };
+    defer req_alloc.free(result);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(struct { status: []const u8, total: u64, oldest: i64 }), req_alloc, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    var output = std.ArrayListUnmanaged(u8){};
+    defer output.deinit(req_alloc);
+    try output.appendSlice(req_alloc, metrics);
+    const writer = output.writer(req_alloc);
+    for ([_][]const u8{ "pending", "processing", "delivered", "failed", "cancelled" }) |status| {
+        var count: u64 = 0;
+        var age: i64 = 0;
+        if (parsed.value.len > 0) for (parsed.value[0].result) |row| {
+            if (std.mem.eql(u8, row.status, status)) {
+                count = row.total;
+                age = @max(0, std.time.timestamp() - row.oldest);
+            }
+        };
+        try writer.print("mail_outbox_jobs{{status=\"{s}\"}} {d}\nmail_outbox_oldest_seconds{{status=\"{s}\"}} {d}\n", .{ status, count, status, age });
+    }
     r.setHeader("Content-Type", "text/plain; version=0.0.4") catch {};
     r.setStatus(.ok);
-    try r.sendBody(metrics);
+    try r.sendBody(output.items);
 }
