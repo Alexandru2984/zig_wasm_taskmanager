@@ -105,7 +105,7 @@ const workspaceRole =
 const adminFence = actorFence ++ workspaceFence ++ workspaceRole ++
     \\IF !($role INSIDE ["owner", "admin"]) { THROW "APP_FORBIDDEN"; };
 ++ "\n";
-const taskFence = actorFence ++
+const taskScopeFence = actorFence ++
     \\LET $before = (SELECT * FROM ONLY $record_id);
     \\IF $before == NONE { THROW "APP_NOT_FOUND"; };
     \\LET $workspace_id = $before.workspace_id;
@@ -115,6 +115,9 @@ const taskFence = actorFence ++
 ++ "\n" ++ workspaceFence ++ workspaceRole ++
     \\    IF !($role INSIDE ["owner", "admin", "member"]) { THROW "APP_FORBIDDEN"; };
     \\};
+++ "\n";
+const taskFence = taskScopeFence ++
+    \\IF $before.deleted_at != NONE { THROW "APP_NOT_FOUND"; };
 ++ "\n";
 
 const MigrationRow = struct {
@@ -150,6 +153,7 @@ fn runMigration(allocator: std.mem.Allocator, version: []const u8, sql: []const 
 // Initialize database schema
 pub fn checkSchema(allocator: std.mem.Allocator) !void {
     if (!try migrationApplied(allocator, "013_mail_outbox")) return error.SchemaMigrationRequired;
+    if (!try migrationApplied(allocator, "014_task_trash")) return error.SchemaMigrationRequired;
 }
 
 pub fn initSchema(allocator: std.mem.Allocator) !void {
@@ -361,6 +365,12 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD IF NOT EXISTS created_at ON mail_outbox TYPE int DEFAULT time::unix();
         \\DEFINE INDEX IF NOT EXISTS mail_ready ON mail_outbox FIELDS status, available_at;
         \\DEFINE INDEX IF NOT EXISTS mail_owner ON mail_outbox FIELDS owner_id;
+    );
+
+    try runMigration(allocator, "014_task_trash",
+        \\DEFINE FIELD IF NOT EXISTS deleted_at ON tasks TYPE option<int>;
+        \\DEFINE FIELD IF NOT EXISTS delete_batch ON tasks TYPE option<string>;
+        \\DEFINE INDEX IF NOT EXISTS task_trash_scope ON tasks FIELDS workspace_id, deleted_at;
     );
 
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
@@ -949,7 +959,7 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
         \\IF !($role INSIDE ["owner", "admin", "member"]) {{ THROW "APP_FORBIDDEN"; }};
         \\IF $has_parent {{
         \\    LET $parent = (SELECT * FROM ONLY $parent_id);
-        \\    IF $parent == NONE OR $parent.workspace_id != $workspace_id OR $parent.parent_id != NONE {{ THROW "APP_INVALID"; }};
+        \\    IF $parent == NONE OR $parent.deleted_at != NONE OR $parent.workspace_id != $workspace_id OR $parent.parent_id != NONE {{ THROW "APP_INVALID"; }};
         \\}};
         \\IF $has_assignee AND array::len(SELECT id FROM workspace_members WHERE user_id = $assignee_id AND workspace_id = $workspace_id) != 1 {{ THROW "APP_INVALID"; }};
         \\LET $created = (CREATE tasks SET {s});
@@ -995,7 +1005,7 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
 /// per parent.
 pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
-        \\SELECT * FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE) ORDER BY created_at DESC LIMIT 2000;
+        \\SELECT * FROM tasks WHERE deleted_at = NONE AND (workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE)) ORDER BY created_at DESC LIMIT 2000;
     , .{ .user_id = rec(user_id) });
 }
 
@@ -1003,12 +1013,36 @@ pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
 /// parent's removal cannot leave orphaned subtasks that no view will show.
 pub fn deleteTaskWithChildren(allocator: std.mem.Allocator, task_id: []const u8, actor_id: []const u8) ![]u8 {
     if (!http_client.validRecordIdFor(task_id, "tasks")) return error.InvalidRecordId;
+    const batch = generateSecureToken();
     return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ taskFence ++
-        \\DELETE tasks WHERE parent_id = $record_id AND workspace_id = $before.workspace_id;
-        \\LET $deleted = (DELETE $record_id RETURN BEFORE);
+        \\LET $deleted = (UPDATE tasks SET deleted_at = time::unix(), delete_batch = $batch WHERE deleted_at = NONE AND (id = $record_id OR parent_id = $record_id) AND workspace_id = $before.workspace_id AND ($before.workspace_id != NONE OR user_id = $actor_id) RETURN AFTER);
         \\RETURN $deleted;
         \\COMMIT TRANSACTION;
-    , .{ .record_id = rec(task_id), .actor_id = rec(actor_id) });
+    , .{ .record_id = rec(task_id), .actor_id = rec(actor_id), .batch = @as([]const u8, &batch) });
+}
+
+pub fn listTaskTrash(allocator: std.mem.Allocator, actor_id: []const u8, workspace_id: []const u8, cursor: ?[]const u8) ![]u8 {
+    return queryWithVars(allocator,
+        \\LET $role = (SELECT VALUE role FROM workspace_members WHERE user_id = $actor_id AND workspace_id = $workspace_id)[0];
+        \\IF $role = NONE { THROW "APP_FORBIDDEN"; };
+        \\SELECT * FROM tasks WHERE workspace_id = $workspace_id AND deleted_at != NONE AND (!$has_cursor OR id < $cursor) ORDER BY id DESC LIMIT 101;
+    , .{ .actor_id = rec(actor_id), .workspace_id = rec(workspace_id), .has_cursor = cursor != null, .cursor = rec(cursor orelse "tasks:unset") });
+}
+
+pub fn restoreTask(allocator: std.mem.Allocator, task_id: []const u8, actor_id: []const u8, expected_batch: ?[]const u8) ![]u8 {
+    if (!http_client.validRecordIdFor(task_id, "tasks")) return error.InvalidRecordId;
+    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ taskScopeFence ++
+        \\IF $before.deleted_at = NONE OR $before.delete_batch = NONE { THROW "APP_INVALID"; };
+        \\IF $expected_batch != NONE AND $before.delete_batch != $expected_batch { THROW "APP_CONFLICT"; };
+        \\IF $before.parent_id != NONE {
+        \\    LET $parent = (SELECT * FROM ONLY $before.parent_id);
+        \\    IF $parent = NONE OR $parent.deleted_at != NONE { THROW "APP_PARENT_DELETED"; };
+        \\    IF $parent.workspace_id != $workspace_id OR $parent.parent_id != NONE OR ($workspace_id = NONE AND $parent.user_id != $actor_id) { THROW "APP_INVALID"; };
+        \\};
+        \\LET $restored = (UPDATE tasks SET deleted_at = NONE, delete_batch = NONE WHERE deleted_at != NONE AND delete_batch = $before.delete_batch AND (id = $record_id OR parent_id = $record_id) AND workspace_id = $before.workspace_id AND ($before.workspace_id != NONE OR user_id = $actor_id) RETURN AFTER);
+        \\RETURN $restored;
+        \\COMMIT TRANSACTION;
+    , .{ .record_id = rec(task_id), .actor_id = rec(actor_id), .expected_batch = expected_batch });
 }
 
 /// Partial update of a task. Only the fields the caller actually supplied are
@@ -1166,7 +1200,7 @@ pub fn getDueTasksForReminders(allocator: std.mem.Allocator, lead_seconds: i64, 
     defer allocator.free(lead);
 
     return queryWithVars(allocator,
-        \\SELECT * FROM tasks WHERE completed = false AND due_date != NONE AND due_date <= time::now() + type::duration($lead) AND (reminder_sent = false OR reminder_sent = NONE) AND (reminder_attempts OR 0) < $max_attempts LIMIT 25;
+        \\SELECT * FROM tasks WHERE deleted_at = NONE AND completed = false AND due_date != NONE AND due_date <= time::now() + type::duration($lead) AND (reminder_sent = false OR reminder_sent = NONE) AND (reminder_attempts OR 0) < $max_attempts LIMIT 25;
     , .{ .lead = lead, .max_attempts = max_attempts });
 }
 
@@ -1175,14 +1209,14 @@ pub fn getDueTasksForReminders(allocator: std.mem.Allocator, lead_seconds: i64, 
 /// costing an SMTP connection every minute.
 pub fn bumpReminderAttempts(allocator: std.mem.Allocator, task_id: []const u8) !void {
     const result = try queryWithVars(allocator,
-        \\UPDATE $record_id SET reminder_attempts = (reminder_attempts OR 0) + 1;
+        \\UPDATE $record_id SET reminder_attempts = (reminder_attempts OR 0) + 1 WHERE deleted_at = NONE;
     , .{ .record_id = rec(task_id) });
     allocator.free(result);
 }
 
 pub fn markTaskReminderSent(allocator: std.mem.Allocator, task_id: []const u8) !void {
     const result = try queryWithVars(allocator,
-        \\UPDATE $record_id SET reminder_sent = true, reminder_sent_at = time::now();
+        \\UPDATE $record_id SET reminder_sent = true, reminder_sent_at = time::now() WHERE deleted_at = NONE;
     , .{ .record_id = rec(task_id) });
     allocator.free(result);
 }
@@ -1217,7 +1251,7 @@ pub fn deleteOtherUserSessions(allocator: std.mem.Allocator, user_id: []const u8
 /// join result it would only have to take apart again.
 pub fn exportUserTasks(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
-        \\SELECT id, title, notes, tags, completed, priority, due_date, created_at, updated_at, workspace_id, status, recurrence, parent_id, assignee_id FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE) ORDER BY created_at DESC;
+        \\SELECT id, title, notes, tags, completed, priority, due_date, created_at, updated_at, workspace_id, status, recurrence, parent_id, assignee_id, deleted_at, delete_batch FROM tasks WHERE workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE) ORDER BY created_at DESC;
     , .{ .user_id = rec(user_id) });
 }
 
@@ -1306,7 +1340,7 @@ pub fn getTaskOwner(allocator: std.mem.Allocator, task_id: []const u8) !?[]const
 pub fn canWriteTask(allocator: std.mem.Allocator, task_id: []const u8, user_id: []const u8) !bool {
     if (!http_client.validRecordIdFor(task_id, "tasks")) return false;
     const result = try queryWithVars(allocator,
-        \\SELECT user_id, workspace_id FROM $record_id;
+        \\SELECT user_id, workspace_id FROM $record_id WHERE deleted_at = NONE;
     , .{ .record_id = rec(task_id) });
     defer allocator.free(result);
 
@@ -1330,7 +1364,7 @@ pub fn canWriteTask(allocator: std.mem.Allocator, task_id: []const u8, user_id: 
 
 pub fn getTaskById(allocator: std.mem.Allocator, task_id: []const u8) ![]u8 {
     if (!http_client.validRecordIdFor(task_id, "tasks")) return error.InvalidRecordId;
-    return queryWithVars(allocator, "SELECT * FROM $record_id;", .{ .record_id = rec(task_id) });
+    return queryWithVars(allocator, "SELECT * FROM $record_id WHERE deleted_at = NONE;", .{ .record_id = rec(task_id) });
 }
 
 pub fn verifyTaskOwnership(allocator: std.mem.Allocator, task_id: []const u8, user_id: []const u8) !bool {

@@ -90,6 +90,9 @@
                         <button class="dropdown-item" role="menuitem" data-action="open-activity">
                             <span aria-hidden="true">📜</span> Activity
                         </button>
+                        <button class="dropdown-item" role="menuitem" data-action="open-trash">
+                            <span aria-hidden="true">↶</span> Task trash
+                        </button>
                         <button class="dropdown-item" role="menuitem" data-action="open-account">
                             <span aria-hidden="true">🔐</span> Security &amp; data
                         </button>
@@ -498,6 +501,21 @@
         </div>
     </div>
 
+    <!-- Task trash -->
+    <div class="modal" id="trashModal" role="dialog" aria-modal="true" aria-labelledby="trashTitle" hidden>
+        <div class="modal-overlay" data-action="hide-modal" data-target="trashModal"></div>
+        <div class="modal-content modal-lg">
+            <button class="modal-close" data-action="hide-modal" data-target="trashModal" aria-label="Close">×</button>
+            <h2 id="trashTitle">Task trash</h2>
+            <p class="modal-desc" id="trashWorkspace"></p>
+            <p class="modal-desc">Restore the original task and subtasks deleted with it. Separately deleted subtasks stay in trash. No automatic deletion; account deletion remains permanent.</p>
+            <button class="btn btn-ghost btn-sm" type="button" data-action="refresh-trash">Refresh</button>
+            <p id="trashStatus" role="status" aria-live="polite" tabindex="-1"></p>
+            <ul class="panel-list" id="trashList"></ul>
+            <button class="btn btn-ghost hidden" type="button" id="trashMore" data-action="more-trash">Load more</button>
+        </div>
+    </div>
+
     <!-- Activity -->
     <div class="modal" id="activityModal" role="dialog" aria-modal="true" aria-labelledby="activityTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="activityModal"></div>
@@ -568,6 +586,6 @@
         </div>
     </div>
 
-    <script src="/app.js?v=0a45a41c"></script>
+    <script src="/app.js?v=85d4d8eb"></script>
 </body>
 </html>

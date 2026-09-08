@@ -54,6 +54,59 @@ pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     try http.jsonSuccess(r, tasks.items);
 }
 
+pub fn getTrash(r: zap.Request, a: std.mem.Allocator) !void {
+    const user = http.getCurrentUserId(a, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    r.parseQuery();
+    const workspace = (try r.getParamStr(a, "workspace_id")) orelse "";
+    const cursor = try r.getParamStr(a, "cursor");
+    const ids = @import("../db/http_client.zig");
+    if (!ids.validRecordIdFor(workspace, "workspaces") or (cursor != null and !ids.validRecordIdFor(cursor.?, "tasks"))) {
+        try http.jsonError(r, 400, "Invalid workspace or cursor");
+        return;
+    }
+    const result = db.impl.listTaskTrash(a, user, workspace, cursor) catch |err| {
+        try http.mutationError(r, err, "Could not load trash");
+        return;
+    };
+    defer a.free(result);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Task), a, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const rows = if (parsed.value.len > 0) parsed.value[0].result else &.{};
+    var items = std.ArrayListUnmanaged(models.TaskResponse){};
+    defer items.deinit(a);
+    for (rows[0..@min(rows.len, 100)]) |task| try items.append(a, toResponse(task));
+    try http.jsonSuccess(r, .{ .items = items.items, .next_cursor = if (rows.len > 100) @as(?[]const u8, rows[99].id) else null });
+}
+
+pub fn restoreTask(r: zap.Request, task_id: []const u8, a: std.mem.Allocator) !void {
+    const user = http.getCurrentUserId(a, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    if (!try rateLimitWrite(r, user)) return;
+    const Request = struct { delete_batch: ?[]const u8 = null };
+    const request = if (std.mem.trim(u8, r.body orelse "", " \t\r\n").len == 0) Request{} else http.parseBody(a, r, Request) catch {
+        try http.jsonError(r, 400, "Invalid JSON body");
+        return;
+    };
+    if (request.delete_batch) |batch| {
+        if (batch.len != 64 or std.mem.indexOfNone(u8, batch, "0123456789abcdef") != null) {
+            try http.jsonError(r, 400, "Invalid deletion batch");
+            return;
+        }
+    }
+    const result = db.impl.restoreTask(a, task_id, user, request.delete_batch) catch |err| {
+        try http.mutationError(r, err, "Could not restore task");
+        return;
+    };
+    defer a.free(result);
+    db.logActivity(a, user, "restore_task", "task", task_id) catch {};
+    try http.jsonSuccess(r, models.SuccessResponse{ .status = "restored" });
+}
+
 pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     const user_id = http.getCurrentUserId(req_alloc, r) orelse {
         try http.jsonError(r, 401, "Login required");
@@ -186,6 +239,8 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 fn toResponse(task: models.Task) models.TaskResponse {
     return .{
         .id = task.id,
+        .deleted_at = task.deleted_at,
+        .delete_batch = task.delete_batch,
         .workspace_id = task.workspace_id,
         .title = task.title,
         .completed = task.completed,
@@ -444,13 +499,16 @@ pub fn deleteTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
 
     // Subtasks go with the parent. Leaving them behind would strand rows that
     // no view lists, since a subtask is only ever shown under its parent.
-    _ = db.deleteTaskWithChildren(req_alloc, task_id, user_id) catch |err| {
+    const result = db.deleteTaskWithChildren(req_alloc, task_id, user_id) catch |err| {
         try http.mutationError(r, err, "Failed to delete task");
         return;
     };
+    defer req_alloc.free(result);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Task), req_alloc, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
     db.logActivity(req_alloc, user_id, "delete_task", "task", task_id) catch |err| {
         log.warn("Failed to log delete task activity: {}", .{err});
     };
 
-    try http.jsonSuccess(r, models.SuccessResponse{ .status = "success" });
+    try http.jsonSuccess(r, .{ .status = "success", .delete_batch = parsed.value[0].result[0].delete_batch });
 }

@@ -384,7 +384,7 @@ paths:
         "403":
           description: Not your task, or the workspace is read-only
     delete:
-      summary: Delete a task
+      summary: Move a task and its active same-workspace children to trash
       parameters:
         - $ref: "#/components/parameters/TaskId"
       responses:
@@ -392,6 +392,59 @@ paths:
           description: Task deleted
         "403":
           description: Task does not belong to current user
+  /api/trash:
+    get:
+      summary: List deleted tasks in a workspace
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: workspace_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: At most 100 tasks, with next_cursor for the next page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    maxItems: 100
+                    items: { $ref: "#/components/schemas/Task" }
+                  next_cursor: { type: string, nullable: true }
+        "403":
+          description: Not a member of this workspace
+  /api/trash/{id}:
+    post:
+      summary: Restore the original task and children from the same deletion batch
+      description: Requires owner/admin/member access, a valid session and CSRF for cookie authentication. Restore a deleted parent before a subtask. No request body required.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                delete_batch:
+                  type: string
+                  pattern: '^[a-f0-9]{64}$'
+                  description: Require this deletion batch; stale Undo returns 409.
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200": { description: Original rows restored }
+        "400": { description: Already active or invalid operation }
+        "401": { description: Not authenticated }
+        "403": { description: Access or CSRF denied }
+        "404": { description: Task not found }
+        "409": { description: Concurrent change or parent still deleted }
   /api/email-deliveries:
     get:
       summary: Latest 100 delivery records owned by the signed-in account
@@ -727,6 +780,14 @@ components:
     Task:
       type: object
       properties:
+        deleted_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Unix deletion time; null means active.
+        delete_batch:
+          type: string
+          nullable: true
         id:
           type: string
         workspace_id:

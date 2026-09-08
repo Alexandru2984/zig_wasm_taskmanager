@@ -29,6 +29,11 @@ this document does not claim alert delivery or an external responder exists.
 
 ## Operational rollback
 
+For releases supporting migration 014, read [the task-trash rollback caveat](TASK-TRASH.md)
+first: pre-P3 binaries would expose retained trash as active tasks. After a trash
+write, use a trash-aware build or stop serving and fix forward, not the old
+binary unchanged. Do not restore the database over newer customer writes.
+
 Deployment keeps a protected backup of the prior unit/nginx configuration and
 a database export. New schema fields are additive; do not restore a database
 backup for a binary-only rollback because that would lose newer user writes.

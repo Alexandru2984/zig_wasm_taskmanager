@@ -9,12 +9,14 @@ Requirements: Zig 0.15.2, SurrealDB 3.2.4, Node for admin/test tooling, Docker
 for the database, and an existing nginx/TLS/Cloudflare configuration. This
 guide is specific to the versioned `task.micutu.com` vhost.
 
-Verified installation, 2026-09-08: `/opt/taskmanager/current` points to release
+Historical P2 verification, 2026-09-08: `/opt/taskmanager/current` pointed to release
 `20260908-708f6a6`; the previous `20260907-84d1936` release is retained.
 Current protected recovery artifacts are under
 `/var/backups/taskmanager/20260908-durable-email`; the initial hardening material
 remains under `/var/backups/taskmanager/20260907-hardening`. The first rejected canary was
 moved to `/opt/taskmanager/failed-canaries` and must not be used for rollback.
+Read `/opt/taskmanager/current` for the actual active release; later batch
+guides record their verification and compatibility requirements.
 
 ## Verify in a separate checkout
 
@@ -65,6 +67,10 @@ config before canary/promotion. See [durable email](DURABLE-EMAIL.md) for privat
 key recovery, disabled-worker canaries and rollback implications.
 
 ## Stage, migrate, promote
+
+Migration 014 changes task DELETE to recoverable trash. Read
+[TASK-TRASH.md](TASK-TRASH.md) before promotion/rollback: an older binary cannot
+safely serve after tasks have entered trash, even though the schema is additive.
 
 1. Stage the ReleaseSafe executable as `bin/taskmanager`, its matching
    `libfacil.io.so` as `lib/libfacil.io.so`, and the complete `public/`

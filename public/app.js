@@ -244,6 +244,7 @@ async function checkAuth() {
 
 function showLoggedIn(user) {
     if (state.user?.id !== user.id) {
+        resetTrash();
         $('mailDeliveryList').replaceChildren();
         $('mailDeliveryStatus').textContent = '';
         state.tasks = [];
@@ -294,6 +295,8 @@ function renderVerifiedBadge(user) {
 }
 
 function showLoggedOut() {
+    resetTrash();
+    $('toastRegion').replaceChildren();
     state.user = null;
     $('mailDeliveryList').replaceChildren();
     $('mailDeliveryStatus').textContent = '';
@@ -803,6 +806,7 @@ function renderWorkspaceBar() {
 }
 
 function switchWorkspace(id) {
+    resetTrash();
     state.currentWorkspaceId = id;
     try {
         localStorage.setItem('workspaceId', id);
@@ -1727,31 +1731,82 @@ async function deleteTask(id) {
         return;
     }
 
-    const index = state.tasks.findIndex(t => t.id === id);
-    if (index === -1) return;
-    const [removed] = state.tasks.splice(index, 1);
-    renderTasks();
-
+    const removed = state.tasks.find(t => t.id === id), user = state.user;
+    if (!removed || trashMutations.has(id)) return;
+    trashMutations.add(id);
     const { ok, data } = await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    trashMutations.delete(id);
+    if (state.user !== user) return;
     if (!ok) {
-        state.tasks.splice(index, 0, removed);
-        renderTasks();
         toast(data?.error || 'Could not delete the task', 'error');
         return;
     }
-
-    // Deletion is the one destructive action here and there is no server-side
-    // undo, so the offer is to recreate an identical task rather than to
-    // restore the original row.
-    toast(`Deleted "${removed.title}"`, '', {
+    state.tasks = state.tasks.filter(t => t.id !== id && !(t.parent_id === id && t.workspace_id === removed.workspace_id));
+    state.selection.clear();
+    renderTasks();
+    toast(`Moved "${removed.title}" to trash`, '', {
         label: 'Undo',
-        onClick: () => addTask(
-            removed.title,
-            removed.due_date ? removed.due_date.slice(0, 16) : null,
-            removed.priority || 'normal',
-            removed.tags || [],
-        ),
+        onClick: () => { if (state.user === user) restoreTrashedTask(id, null, data.delete_batch); },
     });
+}
+
+const trashMutations = new Set();
+let trashCursor = null, trashRequest = 0;
+function resetTrash() {
+    trashRequest++; trashCursor = null;
+    $('trashList').replaceChildren(); $('trashStatus').textContent = ''; $('trashWorkspace').textContent = '';
+    $('trashMore').classList.add('hidden');
+}
+async function openTrash() {
+    closeDropdown(); showModal('trashModal'); await loadTrash();
+}
+async function loadTrash(more = false) {
+    const user = state.user, ws = currentWorkspace();
+    if (!user || !ws) { resetTrash(); return; }
+    if (more && !trashCursor) return;
+    const cursor = more ? trashCursor : null, request = ++trashRequest;
+    if (!more) $('trashList').replaceChildren();
+    $('trashMore').classList.add('hidden');
+    $('trashWorkspace').textContent = ws.name;
+    $('trashStatus').textContent = 'Loading…';
+    const query = new URLSearchParams({ workspace_id: ws.id });
+    if (cursor) query.set('cursor', cursor);
+    const { ok, data } = await api(`/api/trash?${query}`);
+    if (state.user !== user || state.currentWorkspaceId !== ws.id || request !== trashRequest) return;
+    if (!ok) {
+        $('trashStatus').textContent = data?.error || 'Could not load trash. Please refresh to retry.';
+        $('trashMore').classList.toggle('hidden', !cursor); return;
+    }
+    for (const task of data.items) {
+        if ([...$('trashList').children].some(row => row.dataset.id === task.id)) continue;
+        const row = document.createElement('li'); row.className = 'panel-item'; row.dataset.id = task.id;
+        const main = document.createElement('div'); main.className = 'panel-item-main';
+        const title = document.createElement('div'); title.className = 'panel-item-title'; title.textContent = task.title;
+        const detail = document.createElement('div'); detail.className = 'panel-item-sub';
+        detail.textContent = `${task.parent_id ? 'Subtask · ' : ''}Deleted ${new Date(task.deleted_at * 1000).toLocaleString()}`;
+        main.append(title, detail); row.append(main);
+        if (ws.role !== 'viewer') {
+            const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-ghost btn-sm';
+            button.textContent = 'Restore'; button.setAttribute('aria-label', `Restore ${task.title}`);
+            button.dataset.action = 'restore-task'; button.dataset.id = task.id; button.dataset.batch = task.delete_batch; row.append(button);
+        }
+        $('trashList').append(row);
+    }
+    trashCursor = data.next_cursor;
+    $('trashMore').classList.toggle('hidden', !trashCursor);
+    $('trashStatus').textContent = $('trashList').children.length ? 'Restore a parent before any subtasks deleted with it.' : 'No deleted tasks in this workspace.';
+}
+async function restoreTrashedTask(id, button, batch = null) {
+    const user = state.user;
+    if (!user || trashMutations.has(id)) return;
+    trashMutations.add(id); if (button) button.disabled = true;
+    const { ok, data } = await api(`/api/trash/${encodeURIComponent(id)}`, { method: 'POST', ...(batch ? { body: { delete_batch: batch } } : {}) });
+    trashMutations.delete(id); if (button) button.disabled = false;
+    if (state.user !== user) return;
+    if (!ok) { toast(data?.error || 'Could not restore task', 'error'); return; }
+    await loadTasks();
+    if (!$('trashModal').hidden) { await loadTrash(); $('trashStatus').focus(); }
+    toast('Original task restored', 'success');
 }
 
 async function saveTaskEdit(form) {
@@ -1851,7 +1906,7 @@ function selectAllVisible() {
  * failure much harder to describe.
  */
 async function bulkApply(action) {
-    const ids = [...state.selection];
+    const ids = [...state.selection].filter(id => action !== 'delete' || !state.tasks.some(t => String(t.id) === id && t.parent_id && state.selection.has(String(t.parent_id))));
     if (!ids.length) return;
 
     if (action === 'delete' && !window.confirm(`Delete ${ids.length} task${ids.length === 1 ? '' : 's'}?`)) {
@@ -2248,7 +2303,8 @@ const ACTION_LABEL = {
     create_task: 'Task created',
     update_task: 'Task edited',
     toggle_task: 'Task toggled',
-    delete_task: 'Task deleted',
+    delete_task: 'Task moved to trash',
+    restore_task: 'Task restored',
     create_workspace: 'Workspace created',
     invite_workspace_member: 'Invitation sent',
     accept_workspace_invite: 'Invitation accepted',
@@ -2745,6 +2801,10 @@ function bindActions() {
             case 'resend-code': handleResendCode(e); break;
             case 'open-workspace': openWorkspacePanel(); break;
             case 'open-activity': openActivityPanel(); break;
+            case 'open-trash': openTrash(); break;
+            case 'refresh-trash': loadTrash(); break;
+            case 'more-trash': loadTrash(true); break;
+            case 'restore-task': restoreTrashedTask(el.dataset.id, el, el.dataset.batch); break;
             case 'open-account': openAccountPanel(); break;
             case 'new-workspace': closeDropdown(); showModal('newWorkspaceModal'); break;
             default: break;

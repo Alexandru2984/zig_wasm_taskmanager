@@ -196,7 +196,8 @@ await check('legacy cross-workspace children survive a foreign parent deletion',
         workspace_id = ${wb}, parent_id = ${parent.id};`);
     assert.equal((await api(alice, `/api/tasks/${parent.id}`, 'DELETE')).status, 200);
     assert.equal((await sql(`SELECT id FROM ${foreign};`)).length, 1);
-    assert.equal((await sql(`SELECT id FROM ${child.id};`)).length, 0);
+    assert.ok((await sql(`SELECT deleted_at FROM ${child.id};`))[0].deleted_at);
+    assert.ok((await sql(`SELECT deleted_at FROM ${foreign};`))[0].deleted_at == null);
 });
 await check('concurrent reset has one winner and revokes existing sessions', async () => {
     const token = hex();
@@ -381,6 +382,7 @@ await check('account deletion failure leaves account and dependent data intact',
     await sql(`CREATE ${mail} SET owner_id = ${person.id}, reference_id = ${person.id}, kind = 'confirmation', encrypted_payload = 'fixture', secret_hash = 'fixture', expires_at = time::unix() + 3600;`);
     const workspace = (await api(person, '/api/workspaces')).data[0].id;
     const task = (await api(person, '/api/tasks', 'POST', { title: 'Keep until commit', workspace_id: workspace })).data;
+    assert.equal((await api(person, `/api/tasks/${task.id}`, 'DELETE')).status, 200);
     const event = `fail_delete_${run}`;
     await sql(`DEFINE EVENT ${event} ON TABLE users WHEN $event = 'DELETE' AND $before.id = ${person.id} THEN { THROW 'Injected deletion failure'; };`);
     try {

@@ -37,7 +37,7 @@ cleanup() {
         echo "--- application log ---"
         tail -40 "$WORKDIR/app.log"
     fi
-    if [ "$CONTAINER_STARTED" = 1 ]; then docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; fi
+    if [ "$CONTAINER_STARTED" = 1 ]; then docker rm -fv "$CONTAINER" >/dev/null 2>&1 || true; fi
     rm -rf "$WORKDIR"
     exit "$status"
 }
@@ -143,6 +143,11 @@ if [ "${RUN_SECURITY:-0}" = 1 ]; then
     say "Security regressions"
     BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" \
         node scripts/security_test.mjs
+fi
+if [ "${RUN_TRASH:-0}" = 1 ]; then
+    say "Task trash regressions"
+    BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" \
+        node scripts/trash_test.mjs
 fi
 if [ "${RUN_UI:-0}" = 1 ]; then
     say "Browser suite"

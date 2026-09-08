@@ -379,6 +379,43 @@ try {
         await m.screenshot({ path: `${process.env.UI_ARTIFACT_DIR}/board.png`, fullPage: true });
     }
 
+    // Restore must use the original records, including the child, not POST
+    // a lossy replacement task. Exercise both toast Undo and the durable panel.
+    await m.click('[data-view="list"]');
+    await m.click('[data-filter="all"]');
+    const family = await m.evaluate(() => {
+        const child = state.tasks.find(task => task.parent_id);
+        return { parent: state.tasks.find(task => task.id === child.parent_id), child };
+    });
+    await m.locator(`[data-act="delete"][data-id="${family.parent.id}"]`).first().click();
+    await m.waitForFunction(id => !state.tasks.some(task => task.id === id), family.parent.id);
+    record('parent deletion removes its children from the active UI', await m.evaluate(id => !state.tasks.some(task => task.id === id), family.child.id));
+    await m.locator('.toast-action').filter({ hasText: 'Undo' }).last().click();
+    await m.waitForFunction(id => state.tasks.some(task => task.id === id), family.parent.id);
+    record('Undo restores original parent and child IDs and metadata', await m.evaluate(family => {
+        const p = state.tasks.find(task => task.id === family.parent.id), c = state.tasks.find(task => task.id === family.child.id);
+        return p.notes === family.parent.notes && p.created_at === family.parent.created_at && c.parent_id === p.id && c.notes === family.child.notes;
+    }, family));
+    await m.locator(`[data-act="delete"][data-id="${family.parent.id}"]`).first().click();
+    await m.waitForFunction(id => !state.tasks.some(task => task.id === id), family.parent.id);
+    await m.reload({ waitUntil: 'networkidle' });
+    await m.click('#userBtn'); await m.click('[data-action="open-trash"]');
+    await m.waitForSelector('#trashList li');
+    record('trash survives a page reload', await m.locator(`#trashList li[data-id="${family.parent.id}"]`).count() === 1);
+    await m.setViewportSize({ width: 320, height: 900 });
+    record('trash panel fits a 320px phone', await m.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    await m.route('**/api/trash/*', route => route.fulfill({ status: 409, contentType: 'application/json', body: '{"error":"Fixture conflict"}' }));
+    await m.locator(`[data-action="restore-task"][data-id="${family.parent.id}"]`).click();
+    await m.waitForFunction(() => document.getElementById('toastRegion').textContent.includes('Fixture conflict'));
+    record('failed restore keeps the trash row available for an explicit retry', await m.locator(`#trashList li[data-id="${family.parent.id}"]`).count() === 1);
+    await m.unroute('**/api/trash/*');
+    await m.locator(`[data-action="restore-task"][data-id="${family.parent.id}"]`).click();
+    await m.waitForFunction(id => state.tasks.some(task => task.id === id), family.parent.id);
+    await m.waitForFunction(() => document.activeElement.id === 'trashStatus');
+    record('panel restoration returns keyboard focus to the status', true);
+    await m.keyboard.press('Escape');
+    record('trash closes with Escape', await m.locator('#trashModal').isHidden());
+
     record('logout discards a late private task response', await m.evaluate(async () => {
         const privateTasks = [...state.tasks];
         const originalFetch = window.fetch;
@@ -396,6 +433,7 @@ try {
     }));
 
     record('logout clears private delivery metadata', await m.locator('#mailDeliveryList li').count() === 0);
+    record('logout clears private trash metadata', await m.locator('#trashList li').count() === 0);
 
     record('no uncaught page errors', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 

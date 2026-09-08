@@ -543,7 +543,26 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
     }
 
     // Task routes
-    if (std.mem.eql(u8, path, "/api/tasks")) {
+    if (std.mem.eql(u8, path, "/api/trash")) {
+        if (!std.mem.eql(u8, req_method, "GET")) {
+            r.setHeader("Allow", "GET") catch {};
+            try http.jsonError(r, 405, "Method not allowed");
+            return;
+        }
+        try tasks_handler.getTrash(r, req_alloc);
+    } else if (std.mem.startsWith(u8, path, "/api/trash/")) {
+        const task_id = http.decodePathSegment(req_alloc, path["/api/trash/".len..]) orelse "";
+        if (!@import("db/http_client.zig").validRecordIdFor(task_id, "tasks")) {
+            try http.jsonError(r, 400, "Invalid task ID");
+            return;
+        }
+        if (!std.mem.eql(u8, req_method, "POST")) {
+            r.setHeader("Allow", "POST") catch {};
+            try http.jsonError(r, 405, "Method not allowed");
+            return;
+        }
+        try tasks_handler.restoreTask(r, task_id, req_alloc);
+    } else if (std.mem.eql(u8, path, "/api/tasks")) {
         if (r.method) |method| {
             if (std.mem.eql(u8, method, "GET")) {
                 try tasks_handler.getTasks(r, req_alloc);

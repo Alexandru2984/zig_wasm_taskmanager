@@ -26,6 +26,8 @@ systemd-sandboxed VPS deployment.
   tags, due dates and the workspace permission model.
 - Recurring tasks (daily, weekly, monthly); completing one creates the next.
 - Selection mode with bulk complete, reopen and delete.
+- Workspace task trash and real Undo preserving original task/subtask IDs and
+  metadata. Signed-in deletion is recoverable; account deletion is not.
 - Keyboard shortcuts, and a CSV export that runs in the browser.
 - Multi-workspace task tenancy with owner/admin/member/viewer roles, member
   listing, and email invite acceptance.
@@ -113,7 +115,7 @@ See [durable email operations](docs/DURABLE-EMAIL.md) before upgrading an existi
 ./scripts/integration_test.sh # API against a throwaway SurrealDB
 npm ci
 node scripts/mail_ops_test.mjs
-RUN_SECURITY=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
+RUN_SECURITY=1 RUN_TRASH=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
 ```
 
 All three run in CI on every push.
@@ -171,6 +173,7 @@ Main endpoint groups:
   completion when the body is empty
 - `/api/sessions*`: list and revoke sessions
 - `/api/email-deliveries`: latest 100 own delivery records, with no payloads or tokens
+- `/api/trash*`: scoped deleted-task pages and original-record restoration
 - `/api/export`: everything the account holds, as one JSON document
 - `/api/account`: delete the account, re-authenticating first
 - `/api/activity`: authenticated activity log

@@ -83,6 +83,7 @@ jobs:
         env:
           RUN_SECURITY: '1'
           RUN_OUTBOX: '1'
+          RUN_TRASH: '1'
         run: ./scripts/integration_test.sh
 
   ui:
