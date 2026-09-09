@@ -46,6 +46,8 @@ const state = {
 const TASKS_PER_PAGE = 50;
 let taskLoadGeneration = 0;
 let taskLoadAbort = null;
+const taskDrafts = new Map();
+const pendingTaskWrites = new Set();
 
 const STATUSES = ['todo', 'doing', 'done'];
 const STATUS_LABEL = { todo: 'To do', doing: 'In progress', done: 'Done' };
@@ -130,12 +132,21 @@ function csrfHeaders(headers = {}) {
  * session lapsed — the app drops to the signed-out view rather than leaving a
  * stale username in the corner while every request fails.
  */
-async function api(path, { method = 'GET', body = null, quiet = false, signal } = {}) {
+async function api(path, { method = 'GET', body = null, quiet = false, signal, version } = {}) {
     const requestUser = state.user;
+    const conditional = ['PUT', 'DELETE'].includes(method) && path.startsWith('/api/tasks/');
+    const taskId = conditional ? decodeURIComponent(path.slice('/api/tasks/'.length)) : null;
+    const pendingKey = `${requestUser?.id}:${taskId}`;
+    if (conditional && pendingTaskWrites.has(pendingKey)) return { ok: false, status: 409, data: { busy: true, error: 'This task already has an update in progress.' } };
     // Do not publish an older multi-page read over an in-flight local write.
     const taskWrite = method !== 'GET' && /^\/api\/(tasks|trash)(\/|$)/.test(path);
     if (taskWrite && taskLoadAbort) cancelTaskLoad(true);
     const options = { method, credentials: 'include', headers: {}, signal };
+    if (conditional) {
+        const expected = version ?? state.tasks.find(task => task.id === taskId)?.version;
+        if (Number.isSafeInteger(expected) && expected >= 0) options.headers['If-Match'] = `"v${expected}"`;
+        pendingTaskWrites.add(pendingKey);
+    }
 
     if (body !== null) {
         options.headers['Content-Type'] = 'application/json';
@@ -149,6 +160,7 @@ async function api(path, { method = 'GET', body = null, quiet = false, signal } 
     try {
         response = await fetch(path, options);
     } catch (_) {
+        if (conditional) pendingTaskWrites.delete(pendingKey);
         if (!quiet) toast('Connection error. Check your network.', 'error');
         return { ok: false, status: 0, data: null };
     }
@@ -163,6 +175,7 @@ async function api(path, { method = 'GET', body = null, quiet = false, signal } 
     } catch (_) {
         // 204s and error pages from nginx have no JSON body; that is fine.
     }
+    if (conditional) pendingTaskWrites.delete(pendingKey);
 
     if (response.status === 401 && requestUser !== null && state.user === requestUser) {
         showLoggedOut();
@@ -259,6 +272,7 @@ async function checkAuth() {
 function showLoggedIn(user) {
     if (state.user?.id !== user.id) {
         cancelTaskLoad();
+        taskDrafts.clear();
         resetTrash();
         $('mailDeliveryList').replaceChildren();
         $('mailDeliveryStatus').textContent = '';
@@ -311,6 +325,7 @@ function renderVerifiedBadge(user) {
 
 function showLoggedOut() {
     cancelTaskLoad();
+    taskDrafts.clear();
     state.childPages.clear();
     resetTrash();
     $('toastRegion').replaceChildren();
@@ -823,6 +838,8 @@ function renderWorkspaceBar() {
 }
 
 function switchWorkspace(id) {
+    if ([...taskDrafts.values()].some(draft => draft.dirty) && !window.confirm('Discard unsaved task edits and switch workspace?')) { renderWorkspaceBar(); return; }
+    taskDrafts.clear();
     cancelTaskLoad();
     resetTrash();
     state.currentWorkspaceId = id;
@@ -1372,6 +1389,12 @@ function renderSubtaskComposer(parentId) {
  *  common edit is a one-word typo fix, and a modal for that is heavier than the
  *  change it makes. */
 function renderTaskEditor(task) {
+    let draft = taskDrafts.get(String(task.id));
+    if (!draft) {
+        draft = { base: { ...task }, values: null, initial: null, dirty: false, conflict: false, latest: null, reviewing: false };
+        taskDrafts.set(String(task.id), draft);
+    }
+    task = draft.base;
     const li = document.createElement('li');
     li.className = 'task-item';
 
@@ -1486,11 +1509,66 @@ function renderTaskEditor(task) {
     save.type = 'submit';
     save.className = 'btn btn-primary btn-sm';
     save.textContent = 'Save';
+    save.disabled = draft.conflict;
     actions.append(cancel, save);
 
     form.append(title, notes, row, row2, tags, actions);
+    const fields = [...form.querySelectorAll('[data-field]')];
+    if (!draft.initial) draft.initial = Object.fromEntries(fields.map(el => [el.dataset.field, el.value]));
+    if (draft.values) for (const el of fields) if (Object.hasOwn(draft.values, el.dataset.field)) el.value = draft.values[el.dataset.field];
+    if (draft.conflict) {
+        const panel = document.createElement('section'); panel.className = 'task-conflict'; panel.setAttribute('aria-label', 'Task conflict');
+        const message = document.createElement('p'); message.setAttribute('role', 'status'); message.tabIndex = -1; message.dataset.conflictStatus = task.id;
+        message.textContent = draft.error || 'This task changed. Your unsaved edits are kept. Review the current version before saving.';
+        panel.append(message);
+        if (draft.latest) {
+            const latest = document.createElement('pre'); latest.className = 'conflict-latest';
+            latest.textContent = `Current version ${draft.latest.version}\nTitle: ${draft.latest.title}\nNotes: ${draft.latest.notes || '—'}\nPriority: ${draft.latest.priority}\nStatus: ${taskStatus(draft.latest)}\nDue: ${draft.latest.due_date || '—'}\nTags: ${(draft.latest.tags || []).join(', ')}\nRepeat: ${draft.latest.recurrence}\nAssignee: ${memberName(draft.latest.assignee_id) || draft.latest.assignee_id || '—'}`;
+            panel.append(latest);
+            for (const [act, label] of [['use-latest', 'Use current version'], ['keep-draft', 'Keep my edited fields']]) panel.append(iconButton(label, label, 'btn btn-secondary btn-sm', { act, id: task.id }));
+            const hint = document.createElement('p'); hint.textContent = 'This prepares the editor only. Review it and press Save; nothing is saved automatically.'; panel.append(hint);
+        } else {
+            const review = iconButton('Review current version', 'Review current version', 'btn btn-secondary btn-sm', { act: 'review-conflict', id: task.id });
+            review.disabled = draft.reviewing; panel.append(review);
+        }
+        form.append(panel);
+    }
     li.appendChild(form);
     return li;
+}
+
+function captureTaskDraft(form) {
+    const draft = taskDrafts.get(form.dataset.id);
+    if (!draft) return;
+    draft.values = Object.fromEntries([...form.querySelectorAll('[data-field]')].map(el => [el.dataset.field, el.value]));
+    draft.dirty = Object.keys(draft.values).some(key => draft.values[key] !== draft.initial[key]);
+}
+
+async function reviewTaskConflict(id) {
+    const draft = taskDrafts.get(id), user = state.user, workspace = state.currentWorkspaceId;
+    if (!draft || draft.reviewing) return;
+    draft.reviewing = true; renderTasks();
+    const { ok, data } = await api(`/api/tasks/${encodeURIComponent(id)}`, { quiet: true });
+    if (state.user !== user || state.currentWorkspaceId !== workspace || taskDrafts.get(id) !== draft) return;
+    draft.reviewing = false;
+    if (ok) { draft.latest = data; draft.error = ''; }
+    else draft.error = data?.error || 'Could not load the current version. Your draft is still here; retry when connected.';
+    renderTasks();
+    document.querySelector(`[data-conflict-status="${CSS.escape(id)}"]`)?.focus();
+}
+
+function resolveTaskDraft(id, keepEdits) {
+    const draft = taskDrafts.get(id);
+    if (!draft?.latest) return;
+    const edited = Object.fromEntries(Object.entries(draft.values || {}).filter(([key, value]) => value !== draft.initial[key]));
+    const latest = draft.latest;
+    const task = state.tasks.find(task => task.id === id); if (task) Object.assign(task, latest);
+    taskDrafts.delete(id);
+    // Rebuild against the new base, then overlay only fields the user edited.
+    const form = renderTaskEditor(latest).querySelector('form');
+    if (keepEdits) for (const el of form.querySelectorAll('[data-field]')) if (Object.hasOwn(edited, el.dataset.field)) el.value = edited[el.dataset.field];
+    captureTaskDraft(form); renderTasks();
+    document.querySelector('.task-edit [data-field="title"]')?.focus();
 }
 
 function renderTasks() {
@@ -1663,11 +1741,6 @@ async function moveTask(id, status) {
     const task = state.tasks.find(t => String(t.id) === String(id));
     if (!task) return;
 
-    const previous = { status: taskStatus(task), completed: task.completed };
-    task.status = status;
-    task.completed = status === 'done';
-    renderTasks();
-
     if (!isLoggedIn()) {
         // The offline store knows about completion but not columns, so a move
         // is recorded as the completion it implies.
@@ -1676,17 +1749,7 @@ async function moveTask(id, status) {
         return;
     }
 
-    const { ok, data } = await api(`/api/tasks/${encodeURIComponent(id)}`, {
-        method: 'PUT', body: { status },
-    });
-    if (!ok) {
-        Object.assign(task, previous);
-        renderTasks();
-        toast(data?.error || 'Could not move the task', 'error');
-        return;
-    }
-    Object.assign(task, data);
-    renderTasks();
+    await changeTask(id, { status });
 }
 
 function renderEmptyState(hasTasksButFiltered) {
@@ -1822,24 +1885,35 @@ async function toggleTask(id) {
         return;
     }
 
-    // Optimistic: the checkbox has already visually flipped, so reflect it in
-    // the model immediately and roll back only if the server disagrees.
     const task = state.tasks.find(t => t.id === id);
     if (!task) return;
-    const previous = task.completed;
-    task.completed = !previous;
-    renderTasks();
+    await changeTask(id, { completed: !task.completed });
+}
 
-    const { ok, data } = await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'PUT' });
-    if (!ok) {
-        task.completed = previous;
-        renderTasks();
-        toast(data?.error || 'Could not update the task', 'error');
-        return;
-    }
-    Object.assign(task, data);
+function taskWriteError(id, result) {
+    if (result.data?.busy) return;
+    const conflict = [409, 412, 428].includes(result.status);
+    const user = state.user, workspace = state.currentWorkspaceId;
+    toast(result.data?.error || 'Update not confirmed. Refresh before retrying.', 'error', conflict || result.status === 0 ? {
+        label: 'Refresh task', onClick: async () => {
+            if (state.user !== user || state.currentWorkspaceId !== workspace) return;
+            const { ok, data } = await api(`/api/tasks/${encodeURIComponent(id)}`);
+            if (state.user !== user || state.currentWorkspaceId !== workspace) return;
+            if (!ok) { toast(data?.error || 'Could not refresh task', 'error'); return; }
+            const task = state.tasks.find(task => task.id === id); if (task) Object.assign(task, data);
+            renderTasks();
+        },
+    } : null);
+}
+
+async function changeTask(id, body) {
+    const user = state.user, workspace = state.currentWorkspaceId;
+    const result = await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'PUT', body });
+    if (state.user !== user || state.currentWorkspaceId !== workspace) return;
+    if (!result.ok) { renderTasks(); taskWriteError(id, result); return; }
+    const task = state.tasks.find(task => task.id === id); if (task) Object.assign(task, result.data);
     renderTasks();
-    if (task.completed && task.recurrence !== 'none') await loadTasks();
+    if (result.data.completed && result.data.recurrence !== 'none') await loadTasks();
 }
 
 async function deleteTask(id) {
@@ -1852,11 +1926,12 @@ async function deleteTask(id) {
     const removed = state.tasks.find(t => t.id === id), user = state.user;
     if (!removed || trashMutations.has(id)) return;
     trashMutations.add(id);
-    const { ok, data } = await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const result = await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const { ok, data } = result;
     trashMutations.delete(id);
     if (state.user !== user) return;
     if (!ok) {
-        toast(data?.error || 'Could not delete the task', 'error');
+        taskWriteError(id, result);
         return;
     }
     state.tasks = state.tasks.filter(t => t.id !== id && !(t.parent_id === id && t.workspace_id === removed.workspace_id));
@@ -1929,6 +2004,9 @@ async function restoreTrashedTask(id, button, batch = null) {
 
 async function saveTaskEdit(form) {
     const id = form.dataset.id;
+    captureTaskDraft(form);
+    const draft = taskDrafts.get(id), user = state.user, workspace = state.currentWorkspaceId;
+    if (draft?.conflict) return;
     const field = (name) => form.querySelector(`[data-field="${name}"]`);
 
     const title = field('title').value.trim();
@@ -1950,7 +2028,7 @@ async function saveTaskEdit(form) {
             notes: field('notes').value,
             tags: parseTags(field('tags').value),
         });
-        state.editingId = null;
+        taskDrafts.delete(id); state.editingId = null;
         await loadTasks();
         toast('Task updated', 'success');
         return;
@@ -1971,14 +2049,24 @@ async function saveTaskEdit(form) {
     const assigneeField = field('assignee_id');
     if (assigneeField) body.assignee_id = assigneeField.value;
 
-    const { ok, data } = await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'PUT', body });
+    const result = await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'PUT', body, version: draft?.base.version });
+    if (state.user !== user || state.currentWorkspaceId !== workspace || taskDrafts.get(id) !== draft) return;
+    const { ok, data, status } = result;
     if (!ok) {
+        if (data?.busy) return;
+        if ([409, 412, 428].includes(status)) {
+            draft.conflict = true; draft.latest = null; draft.error = '';
+            renderTasks();
+            document.querySelector(`[data-conflict-status="${CSS.escape(id)}"]`)?.focus();
+            return;
+        }
         toast(data?.error || 'Could not save the task', 'error');
         return;
     }
 
     const task = state.tasks.find(t => t.id === id);
     if (task) Object.assign(task, data);
+    taskDrafts.delete(id);
     state.editingId = null;
     renderTasks();
     toast('Task updated', 'success');
@@ -2033,11 +2121,14 @@ async function bulkApply(action) {
 
     let done = 0;
     let failed = 0;
+    const user = state.user, workspace = state.currentWorkspaceId;
     for (const id of ids) {
+        if (state.user !== user || state.currentWorkspaceId !== workspace) return;
         const ok = await applyOne(action, id);
         if (ok) done += 1;
         else failed += 1;
     }
+    if (state.user !== user || state.currentWorkspaceId !== workspace) return;
 
     state.selection.clear();
     await loadTasks();
@@ -2686,6 +2777,8 @@ async function loadEmailDeliveries() {
 /** One delegated listener for both task lists. Each interactive element
  *  carries data-act, so adding a row action needs no new listener. */
 function bindTaskList(listEl) {
+    listEl.addEventListener('input', e => { const form = e.target.closest('.task-edit'); if (form) captureTaskDraft(form); });
+    listEl.addEventListener('change', e => { const form = e.target.closest('.task-edit'); if (form) captureTaskDraft(form); });
     listEl.addEventListener('click', (e) => {
         const el = e.target.closest('[data-act]');
         if (!el) return;
@@ -2694,7 +2787,10 @@ function bindTaskList(listEl) {
         if (act === 'toggle') toggleTask(id);
         else if (act === 'delete') deleteTask(id);
         else if (act === 'edit') { state.editingId = id; renderTasks(); }
-        else if (act === 'cancel-edit') { state.editingId = null; renderTasks(); }
+        else if (act === 'cancel-edit') { taskDrafts.delete(String(state.editingId)); state.editingId = null; renderTasks(); }
+        else if (act === 'review-conflict') reviewTaskConflict(id);
+        else if (act === 'use-latest') resolveTaskDraft(id, false);
+        else if (act === 'keep-draft') resolveTaskDraft(id, true);
         else if (act === 'filter-tag') { state.tagFilter = tag; renderTasks(); }
         else if (act === 'select') toggleSelected(id);
         else if (act === 'add-subtask') { state.addingSubtaskFor = String(id); renderTasks(); }
@@ -2726,6 +2822,7 @@ function bindTaskList(listEl) {
     listEl.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape' || !state.editingId) return;
         e.stopPropagation();
+        taskDrafts.delete(String(state.editingId));
         state.editingId = null;
         renderTasks();
     });
@@ -2907,6 +3004,9 @@ function bindComposer() {
 }
 
 function bindActions() {
+    window.addEventListener('beforeunload', e => {
+        if ([...taskDrafts.values()].some(draft => draft.dirty)) { e.preventDefault(); e.returnValue = ''; }
+    });
     document.body.addEventListener('click', (e) => {
         const el = e.target.closest('[data-action]');
         if (!el) return;

@@ -68,6 +68,11 @@ test_endpoint() {
         if [ -n "$csrf" ]; then
             csrf_args=( -H "X-CSRF-Token: $csrf" )
         fi
+        if [[ "$endpoint" == /api/tasks/* && ( "$method" == PUT || "$method" == DELETE ) ]]; then
+            local etag
+            etag=$(curl "${curl_opts[@]}" -D - -o /dev/null "$BASE_URL$endpoint" | awk 'tolower($0) ~ /^etag:/ {sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print}')
+            csrf_args+=( -H "If-Match: $etag" )
+        fi
 
         if [ -n "$data" ]; then
             response=$(curl "${curl_opts[@]}" -X "$method" "$BASE_URL$endpoint" \

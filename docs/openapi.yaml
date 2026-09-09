@@ -419,14 +419,35 @@ paths:
         "401":
           description: Not authenticated
   /api/tasks/{id}:
+    get:
+      summary: Read one active task and its current ETag
+      description: Workspace viewers may read; inaccessible, deleted and missing tasks return the same 404. Private response is no-store.
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200":
+          description: Current task, including version
+          headers:
+            ETag:
+              schema: { type: string, example: '"v3"' }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Task" }
+        "401":
+          description: Not authenticated
+        "404":
+          description: Task unavailable
     put:
       summary: Update a task, or toggle it when the body is empty
       description: >-
         With a body, each field present is written and each field omitted keeps
         its stored value. `due_date: ""` clears the date; omitting it leaves it
-        alone. With no body, completion is toggled.
+        alone. With no body, completion is toggled. If-Match is required for
+        both forms; use the tag from the task read, not a newly fetched tag
+        silently attached to an old draft. A failed condition does not mutate.
       parameters:
         - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/TaskVersion"
       requestBody:
         required: false
         content:
@@ -435,20 +456,31 @@ paths:
               $ref: "#/components/schemas/UpdateTaskRequest"
       responses:
         "200":
-          description: Updated task
+          description: Updated task with a new version and ETag
         "400":
           description: Invalid field, or a due date in the past
         "403":
           description: Not your task, or the workspace is read-only
+        "409":
+          description: Transaction conflict; review current state before retrying
+        "412":
+          description: Task changed since the supplied version
+        "428":
+          description: If-Match required; reload old browser tabs
     delete:
       summary: Move a task and its active same-workspace children to trash
       parameters:
         - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/TaskVersion"
       responses:
         "200":
           description: Task deleted
         "403":
           description: Task does not belong to current user
+        "412":
+          description: Parent or task version changed; nothing is deleted
+        "428":
+          description: If-Match required
   /api/trash:
     get:
       summary: List deleted tasks in a workspace
@@ -631,6 +663,15 @@ components:
       type: http
       scheme: bearer
   parameters:
+    TaskVersion:
+      name: If-Match
+      in: header
+      required: true
+      description: One exact strong task ETag. Wildcards, weak tags and lists are deliberately rejected.
+      schema:
+        type: string
+        pattern: '^"v(0|[1-9][0-9]*)"$'
+        example: '"v3"'
     TaskId:
       name: id
       in: path
@@ -837,6 +878,12 @@ components:
     Task:
       type: object
       properties:
+        version:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+          description: Server-controlled concurrency counter; send If-Match as a quoted v-prefixed tag.
         deleted_at:
           type: integer
           format: int64

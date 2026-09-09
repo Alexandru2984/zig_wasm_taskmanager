@@ -45,6 +45,10 @@ await sql(`CREATE ${wa} SET name = 'Security A', owner_id = ${people.alice.id};
 
 async function api(person, path, method = 'GET', body, extra = {}, csrf = true) {
     const headers = { 'Content-Type': 'application/json', ...extra };
+    if (['PUT','DELETE'].includes(method) && path.startsWith('/api/tasks/') && !Object.hasOwn(headers, 'If-Match')) {
+        const current = await api(person, path);
+        headers['If-Match'] = current.headers.get('etag') || '"v0"';
+    }
     if (person) {
         headers.Cookie = `session_token=${person.token}`;
         if (csrf) headers['X-CSRF-Token'] = person.csrf;
@@ -171,7 +175,7 @@ await check('concurrent completion creates exactly one successor', async () => {
     })).data;
     const responses = await Promise.all([1, 2].map(() => api(alice, `/api/tasks/${task.id}`, 'PUT', { completed: true })));
     assert.ok(responses.some(r => r.status === 200));
-    assert.ok(responses.every(r => [200, 409].includes(r.status)), JSON.stringify(responses.map(r => ({ status: r.status, error: r.data?.error }))));
+    assert.ok(responses.every(r => [200, 409, 412].includes(r.status)), JSON.stringify(responses.map(r => ({ status: r.status, error: r.data?.error }))));
     assert.equal((await api(alice, '/api/tasks')).data.filter(t => t.title === task.title).length, 2);
 });
 await check('old monthly recurrence skips missed dates without a duplicate backlog', async () => {

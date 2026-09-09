@@ -31,6 +31,9 @@ systemd-sandboxed VPS deployment.
 - Selection mode with bulk complete, reopen and delete.
 - Workspace task trash and real Undo preserving original task/subtask IDs and
   metadata. Signed-in deletion is recoverable; account deletion is not.
+- Conditional task edits/deletion and two-tab conflict recovery: retain an
+  unsaved draft, review the current record, then choose which fields to keep.
+  [Task versions](docs/TASK-VERSIONS.md) document the required `If-Match` contract.
 - Keyboard shortcuts, and a CSV export that runs in the browser.
 - Multi-workspace task tenancy with owner/admin/member/viewer roles, member
   listing, and email invite acceptance.
@@ -118,7 +121,7 @@ See [durable email operations](docs/DURABLE-EMAIL.md) before upgrading an existi
 ./scripts/integration_test.sh # API against a throwaway SurrealDB
 npm ci
 node scripts/mail_ops_test.mjs
-RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
+RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_VERSIONS=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
 ```
 
 All three run in CI on every push.
@@ -175,6 +178,8 @@ Main endpoint groups:
   recurrence, assignee and parent; `PUT` applies a partial update, or toggles
   completion when the body is empty; use `GET /api/tasks?page=1` and follow
   `next_cursor` with `as_of` for complete reads
+- `GET /api/tasks/{id}`: read an authorized active task and ETag; `PUT` and
+  `DELETE` require that exact tag in `If-Match` (missing: 428; stale: 412)
 - `/api/sessions*`: list and revoke sessions
 - `/api/email-deliveries`: latest 100 own delivery records, with no payloads or tokens
 - `/api/trash*`: scoped deleted-task pages and original-record restoration

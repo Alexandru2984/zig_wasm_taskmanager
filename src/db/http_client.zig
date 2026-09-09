@@ -21,6 +21,7 @@ pub const HttpError = error{
     NotFound,
     CapacityExceeded,
     ParentDeleted,
+    StaleTask,
 };
 
 /// Database config
@@ -139,6 +140,7 @@ fn validateSurrealResponse(allocator: std.mem.Allocator, raw_response: []const u
                 if (status != .string or !std.mem.eql(u8, status.string, "ERR")) continue;
                 const result = item.object.get("result") orelse continue;
                 if (result != .string) continue;
+                if (std.mem.indexOf(u8, result.string, "APP_STALE_TASK") != null) return HttpError.StaleTask;
                 if (std.mem.indexOf(u8, result.string, "APP_PARENT_DELETED") != null) return HttpError.ParentDeleted;
                 if (std.mem.indexOf(u8, result.string, "APP_BUSY") != null) return HttpError.CapacityExceeded;
                 if (std.mem.indexOf(u8, result.string, "APP_FORBIDDEN") != null) return HttpError.PermissionDenied;

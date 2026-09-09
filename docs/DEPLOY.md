@@ -20,6 +20,12 @@ guides record their verification and compatibility requirements.
 
 ## Verify in a separate checkout
 
+Migration 015 adds required conditional task writes. Read the
+[version compatibility and rollback warning](TASK-VERSIONS.md#rollback)
+before promotion: older binaries ignore If-Match and do not advance counters.
+Publish matched assets and tell API clients/old browser tabs to reload or adopt
+the documented header. Do not silently fall back to unconditional writes.
+
 Do not edit a checkout directly served by nginx. Use a branch/worktree and
 keep production credentials out of it.
 

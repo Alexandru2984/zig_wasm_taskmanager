@@ -24,11 +24,13 @@ for (const name of ['owner', 'member', 'viewer', 'outside']) {
 const { owner, member, viewer, outside } = people, workspace = id('workspaces', 'owned');
 await sql(`CREATE ${workspace} SET name = 'Trash fixture', owner_id = ${owner.id};`);
 for (const role of ['owner', 'member', 'viewer']) await sql(`CREATE workspace_members SET workspace_id = ${workspace}, user_id = ${people[role].id}, role = '${role}';`);
-function api(person, path, method = 'GET', body, csrf = true) {
+async function api(person, path, method = 'GET', body, csrf = true) {
+    const conditional = ['PUT','DELETE'].includes(method) && path.startsWith('/api/tasks/')
+        ? { 'If-Match': (await api(person, path)).headers.etag || '"v0"' } : {};
     const payload = body === undefined ? undefined : JSON.stringify(body);
     return new Promise((resolve, reject) => {
         const req = request(new URL(path, base), { method, localAddress: '127.0.0.4', timeout: 30000, headers: {
-            'Content-Type': 'application/json', ...(payload === undefined ? {} : { 'Content-Length': Buffer.byteLength(payload) }),
+            'Content-Type': 'application/json', ...conditional, ...(payload === undefined ? {} : { 'Content-Length': Buffer.byteLength(payload) }),
             ...(person ? { Cookie: `session_token=${person.token}`, ...(csrf ? { 'X-CSRF-Token': person.csrf } : {}) } : {}),
         }}, res => {
             const chunks = []; res.on('data', x => chunks.push(x)); res.on('error', reject);
@@ -48,7 +50,7 @@ const parent = await create(`Original <script>fixture</script> ${run}`, { notes:
 const child = await create('Child in parent batch', { parent_id: parent.id, notes: 'Child notes' });
 const separate = await create('Independently deleted child', { parent_id: parent.id });
 const beforeParent = await current(parent.id), beforeChild = await current(child.id);
-const business = row => Object.fromEntries(Object.entries(row).filter(([key]) => !['deleted_at', 'delete_batch'].includes(key)));
+const business = row => Object.fromEntries(Object.entries(row).filter(([key]) => !['deleted_at', 'delete_batch', 'version'].includes(key)));
 let passed = 0;
 async function check(name, fn) { await fn(); passed++; console.log(`PASS ${name}`); }
 await check('soft deletion atomically retains original rows and batches only active children', async () => {

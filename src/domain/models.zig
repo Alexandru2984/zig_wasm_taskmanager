@@ -18,6 +18,7 @@ pub const User = struct {
 };
 
 pub const Task = struct {
+    version: i64 = 0,
     deleted_at: ?i64 = null,
     delete_batch: ?[]const u8 = null,
     id: []const u8,
@@ -99,6 +100,7 @@ pub const CreateTaskRequest = struct {
 };
 
 pub const TaskResponse = struct {
+    version: i64 = 0,
     deleted_at: ?i64 = null,
     delete_batch: ?[]const u8 = null,
     id: []const u8,
@@ -254,6 +256,7 @@ pub const DeleteAccountRequest = struct {
 };
 
 pub const ExportTask = struct {
+    version: i64 = 0,
     deleted_at: ?i64 = null,
     delete_batch: ?[]const u8 = null,
     status: []const u8 = "todo",

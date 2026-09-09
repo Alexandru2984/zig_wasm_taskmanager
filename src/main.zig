@@ -25,6 +25,7 @@ test {
     _ = @import("util/validation.zig");
     _ = @import("util/rate_limiter.zig");
     _ = @import("util/task_page.zig");
+    _ = @import("util/task_version.zig");
     _ = @import("db/http_client.zig");
     _ = @import("services/auth.zig");
     _ = @import("services/mail_payload.zig");
@@ -276,7 +277,7 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         }
     }
     r.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS") catch {};
-    r.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token") catch {};
+    r.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token, If-Match") catch {};
 
     // SECURITY: Additional security headers
     r.setHeader("X-Content-Type-Options", "nosniff") catch {};
@@ -596,17 +597,19 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         }
 
         if (r.method) |method| {
-            if (std.mem.eql(u8, method, "PUT")) {
+            if (std.mem.eql(u8, method, "GET")) {
+                try tasks_handler.getTask(r, task_id, req_alloc);
+            } else if (std.mem.eql(u8, method, "PUT")) {
                 try tasks_handler.updateTask(r, task_id, req_alloc);
             } else if (std.mem.eql(u8, method, "DELETE")) {
                 try tasks_handler.deleteTask(r, task_id, req_alloc);
             } else {
-                r.setHeader("Allow", "PUT, DELETE") catch {};
+                r.setHeader("Allow", "GET, PUT, DELETE") catch {};
                 r.setStatus(.method_not_allowed);
                 try r.sendBody("{\"error\": \"Method not allowed\"}");
             }
         } else {
-            r.setHeader("Allow", "PUT, DELETE") catch {};
+            r.setHeader("Allow", "GET, PUT, DELETE") catch {};
             r.setStatus(.method_not_allowed);
             try r.sendBody("{\"error\": \"Method not allowed\"}");
         }

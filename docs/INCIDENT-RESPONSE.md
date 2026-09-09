@@ -29,6 +29,11 @@ this document does not claim alert delivery or an external responder exists.
 
 ## Operational rollback
 
+For migration 015, also read [the task-version rollback warning](TASK-VERSIONS.md#rollback).
+An older binary will not enforce conditional writes or advance versions.
+Returning to a version-aware build after old writes requires controlled
+version invalidation under maintenance, not resetting counters to zero.
+
 For releases supporting migration 014, read [the task-trash rollback caveat](TASK-TRASH.md)
 first: pre-P3 binaries would expose retained trash as active tasks. After a trash
 write, use a trash-aware build or stop serving and fix forward, not the old

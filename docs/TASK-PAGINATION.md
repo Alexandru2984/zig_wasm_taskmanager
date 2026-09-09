@@ -4,6 +4,11 @@ Verified 2026-09-09. This is the bounded first part of P4, not completion of the
 It replaces the silent 2,000-row read limit without pretending that a partial
 browser list is a complete workspace.
 
+D2a follow-up: [conditional task writes and conflict recovery](TASK-VERSIONS.md)
+are now implemented. The remaining server-side filtering/sorting, storage
+quotas and concurrent-capacity work below is still open; the older binary
+rollback guidance must also account for task-version invalidation.
+
 ## API and compatibility
 
 `GET /api/tasks?page=1&workspace_id=workspaces:...` returns at most 100 items,

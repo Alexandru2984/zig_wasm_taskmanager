@@ -7,6 +7,49 @@ const http = @import("../util/http.zig");
 const validation = @import("../util/validation.zig");
 const rate_limiter = @import("../util/rate_limiter.zig");
 
+fn expectedVersion(r: zap.Request) !?i64 {
+    const header = r.getHeader("if-match") orelse {
+        try http.jsonError(r, 428, "Read the current task and send its ETag in If-Match. Reload older app tabs.");
+        return null;
+    };
+    return @import("../util/task_version.zig").parse(header) catch {
+        try http.jsonError(r, 400, "If-Match must contain one exact task version, for example \"v0\".");
+        return null;
+    };
+}
+
+fn taskEtag(r: zap.Request, a: std.mem.Allocator, task: models.Task) !void {
+    try r.setHeader("ETag", try std.fmt.allocPrint(a, "\"v{d}\"", .{task.version}));
+}
+
+pub fn getTask(r: zap.Request, id: []const u8, a: std.mem.Allocator) !void {
+    const user = http.getCurrentUserId(a, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    if (rate_limiter.task_read_limiter) |*limiter| {
+        if (!limiter.isAllowed(user)) {
+            r.setHeader("Retry-After", "60") catch {};
+            try http.jsonError(r, 429, "Too many task reads. Please wait 1 minute.");
+            return;
+        }
+    }
+    const result = db.impl.getTaskForUser(a, id, user) catch {
+        try http.jsonError(r, 503, "Task temporarily unavailable");
+        return;
+    };
+    defer a.free(result);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Task), a, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (parsed.value.len == 0 or parsed.value[0].result.len == 0) {
+        try http.jsonError(r, 404, "Task unavailable");
+        return;
+    }
+    const task = parsed.value[0].result[0];
+    try taskEtag(r, a, task);
+    try http.jsonSuccess(r, toResponse(task));
+}
+
 /// 60 writes/min/user. Applied before DB access so a rogue client can't chew
 /// through SurrealDB with runaway POST/PUT/DELETE.
 fn rateLimitWrite(r: zap.Request, user_id: []const u8) !bool {
@@ -254,11 +297,13 @@ pub fn createTask(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         log.warn("Failed to log create task activity: {}", .{err});
     };
 
+    try taskEtag(r, req_alloc, task);
     try http.jsonCreated(r, toResponse(task));
 }
 
 fn toResponse(task: models.Task) models.TaskResponse {
     return .{
+        .version = task.version,
         .id = task.id,
         .deleted_at = task.deleted_at,
         .delete_batch = task.delete_batch,
@@ -422,7 +467,9 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         }
     }
 
+    const version = (try expectedVersion(r)) orelse return;
     const db_result = db.updateTask(req_alloc, task_id, user_id, .{
+        .expected_version = version,
         .title = request.title,
         .priority = request.priority,
         .notes = request.notes,
@@ -454,6 +501,7 @@ pub fn updateTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         log.warn("Failed to log update task activity: {}", .{err});
     };
 
+    try taskEtag(r, req_alloc, task);
     try http.jsonSuccess(r, toResponse(task));
 }
 
@@ -474,7 +522,8 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         return;
     }
 
-    const db_result = db.toggleTask(req_alloc, task_id, user_id) catch |err| {
+    const version = (try expectedVersion(r)) orelse return;
+    const db_result = db.toggleTask(req_alloc, task_id, user_id, version) catch |err| {
         if (err == error.Conflict) {
             try http.jsonError(r, 409, "Task changed. Refresh and retry.");
             return;
@@ -498,6 +547,7 @@ pub fn toggleTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
         log.warn("Failed to log toggle task activity: {}", .{err});
     };
 
+    try taskEtag(r, req_alloc, task);
     try http.jsonSuccess(r, toResponse(task));
 }
 
@@ -520,7 +570,8 @@ pub fn deleteTask(r: zap.Request, task_id: []const u8, req_alloc: std.mem.Alloca
 
     // Subtasks go with the parent. Leaving them behind would strand rows that
     // no view lists, since a subtask is only ever shown under its parent.
-    const result = db.deleteTaskWithChildren(req_alloc, task_id, user_id) catch |err| {
+    const version = (try expectedVersion(r)) orelse return;
+    const result = db.deleteTaskWithChildren(req_alloc, task_id, user_id, version) catch |err| {
         try http.mutationError(r, err, "Failed to delete task");
         return;
     };

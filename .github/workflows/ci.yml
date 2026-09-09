@@ -85,6 +85,7 @@ jobs:
           RUN_OUTBOX: '1'
           RUN_TRASH: '1'
           RUN_PAGINATION: '1'
+          RUN_VERSIONS: '1'
         run: ./scripts/integration_test.sh
 
   ui:
@@ -115,6 +116,7 @@ jobs:
       - name: Browser tests
         env:
           RUN_UI: '1'
+          RUN_VERSIONS: '1'
           RUN_PAGINATION: '1'
         run: ./scripts/integration_test.sh
 

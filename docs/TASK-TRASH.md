@@ -4,6 +4,10 @@ Batch C / P3, 2026-09-08. Signed-in tasks now move to workspace trash instead
 of being destroyed by DELETE. Open **Task trash** from the account menu, or
 use the deletion toast's **Undo** action. Anonymous/offline deletion is unchanged.
 
+Follow-up D2a adds a technical `version` counter: deletion and restoration
+advance it, while the original business metadata/timestamps remain preserved.
+Task DELETE now requires `If-Match`; see [task versions](TASK-VERSIONS.md).
+
 ## Behavior
 
 - Migration `014_task_trash` adds optional `deleted_at` and `delete_batch`
