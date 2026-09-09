@@ -27,7 +27,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/favicon.svg">
     <link rel="manifest" href="/site.webmanifest">
-    <link rel="stylesheet" href="/style.css?v=d92531c3">
+    <link rel="stylesheet" href="/style.css?v=d11a5150">
 
     <!-- Structured data. The CSP forbids inline <script>, but this is
          application/ld+json, which is data rather than script: the parser
@@ -71,6 +71,7 @@
             </div>
 
             <div class="nav-user hidden" id="userMenu">
+                <button class="btn btn-ghost btn-sm" id="openTaskSearch" type="button" data-action="open-task-search">Find tasks</button>
                 <div class="user-dropdown">
                     <button class="user-btn" id="userBtn" type="button"
                             aria-haspopup="true" aria-expanded="false" aria-controls="dropdownMenu">
@@ -511,6 +512,41 @@
         </div>
     </div>
 
+    <!-- Global server search: separate from the complete-workspace view. -->
+    <div class="modal" id="taskSearchModal" role="dialog" aria-modal="true" aria-labelledby="taskSearchTitle" hidden>
+        <div class="modal-overlay" data-action="hide-modal" data-target="taskSearchModal"></div>
+        <div class="modal-content modal-lg">
+            <button class="modal-close" data-action="hide-modal" data-target="taskSearchModal" aria-label="Close">×</button>
+            <h2 id="taskSearchTitle">Find tasks</h2>
+            <p class="modal-desc">Search on the server, including subtasks and workspaces not loaded here. Results reflect current access; trash is excluded.</p>
+            <form id="taskSearchForm">
+                <div class="form-group"><label for="remoteSearchText">Title, notes or tags</label><input id="remoteSearchText" type="search" maxlength="500" autocomplete="off" placeholder="What are you looking for?"></div>
+                <div class="task-search-filters">
+                    <div class="form-group"><label for="remoteSearchWorkspace">Workspace</label><select id="remoteSearchWorkspace"><option value="">All accessible workspaces</option></select></div>
+                    <div class="form-group"><label for="remoteSearchStatus">Status</label><select id="remoteSearchStatus"><option value="all">Any status</option><option value="active">Active</option><option value="todo">To do</option><option value="doing">In progress</option><option value="done">Done</option></select></div>
+                    <div class="form-group"><label for="remoteSearchPriority">Priority</label><select id="remoteSearchPriority"><option value="all">Any priority</option><option value="high">High</option><option value="normal">Normal</option><option value="low">Low</option></select></div>
+                    <div class="form-group"><label for="remoteSearchAssignee">Assignment</label><select id="remoteSearchAssignee"><option value="any">Anyone</option><option value="me">Assigned to me</option><option value="unassigned">Unassigned</option></select></div>
+                    <div class="form-group"><label for="remoteSearchTag">Exact tag</label><input id="remoteSearchTag" type="text" maxlength="32" autocomplete="off" placeholder="Optional tag"></div>
+                    <div class="form-group"><label for="remoteSearchSort">Sort</label><select id="remoteSearchSort"><option value="created_desc">Newest first</option><option value="created_asc">Oldest first</option><option value="due_asc">Due soonest</option><option value="priority">Priority: high first</option><option value="title">Title: A–Z</option></select></div>
+                    <div class="form-group"><label for="remoteSearchDue">Due date</label><select id="remoteSearchDue"><option value="any">Any due date</option><option value="overdue">Overdue and active</option><option value="none">No due date</option><option value="range">Date range (your timezone)</option></select></div>
+                </div>
+                <div id="remoteSearchDates" class="task-search-filters hidden">
+                    <div class="form-group"><label for="remoteSearchFrom">From (inclusive)</label><input id="remoteSearchFrom" type="date"></div>
+                    <div class="form-group"><label for="remoteSearchThrough">Through (inclusive)</label><input id="remoteSearchThrough" type="date"></div>
+                </div>
+                <div class="task-search-actions"><button class="btn btn-primary" type="submit" id="taskSearchSubmit">Search</button><button class="btn btn-ghost hidden" type="button" id="taskSearchCancel">Cancel request</button></div>
+            </form>
+            <p id="taskSearchStatus" role="status" aria-live="polite" tabindex="-1">Choose filters and search.</p>
+            <ul class="panel-list task-search-results" id="taskSearchResults"></ul>
+            <nav class="task-search-actions" aria-label="Search result pages"><button class="btn btn-ghost" type="button" id="taskSearchPrevious" disabled>Previous</button><button class="btn btn-ghost" type="button" id="taskSearchNext" disabled>Next</button></nav>
+            <section id="taskSearchPreview" class="hidden" aria-labelledby="taskSearchPreviewTitle">
+                <h3 id="taskSearchPreviewTitle" tabindex="-1">Task details</h3>
+                <pre id="taskSearchPreviewText" class="task-search-preview"></pre>
+                <button class="btn btn-primary" type="button" id="taskSearchReveal">Open in workspace</button>
+            </section>
+        </div>
+    </div>
+
     <!-- Task trash -->
     <div class="modal" id="trashModal" role="dialog" aria-modal="true" aria-labelledby="trashTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="trashModal"></div>
@@ -596,6 +632,6 @@
         </div>
     </div>
 
-    <script src="/app.js?v=10d36b1a"></script>
+    <script src="/app.js?v=d85adaa5"></script>
 </body>
 </html>

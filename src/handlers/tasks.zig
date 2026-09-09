@@ -118,6 +118,54 @@ pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     } else try http.jsonSuccess(r, tasks.items);
 }
 
+var active_searches = std.atomic.Value(u8).init(0);
+
+/// POST is deliberately read-only: search terms/tokens stay out of URL logs.
+/// CSRF still applies, as for other authenticated POST requests.
+pub fn searchTasks(r: zap.Request, a: std.mem.Allocator) !void {
+    const user = http.getCurrentUserId(a, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    if (rate_limiter.task_search_limiter) |*limiter| {
+        if (!limiter.isAllowed(user)) {
+            r.setHeader("Retry-After", "60") catch {};
+            try http.jsonError(r, 429, "Too many searches. Please wait 1 minute.");
+            return;
+        }
+    }
+    const search = @import("../util/task_search.zig");
+    const input = http.parseBody(a, r, search.Input) catch {
+        try http.jsonError(r, 400, "Invalid search body");
+        return;
+    };
+    const query = search.parse(a, user, input, std.time.milliTimestamp()) catch {
+        try http.jsonError(r, 400, "Invalid search filters or cursor. Start a new search after changing filters.");
+        return;
+    };
+    // Leave request capacity for writes/auth; never queue unbounded DB scans.
+    const slot = active_searches.fetchAdd(1, .acq_rel);
+    defer _ = active_searches.fetchSub(1, .acq_rel);
+    if (slot >= 2) {
+        r.setHeader("Retry-After", "1") catch {};
+        try http.jsonError(r, 503, "Search is busy. Please retry.");
+        return;
+    }
+    const result = db.impl.searchTasks(a, user, query) catch |err| {
+        try http.jsonError(r, if (err == error.PermissionDenied) 403 else 503, if (err == error.PermissionDenied) "Workspace unavailable" else "Search is temporarily unavailable. Please retry.");
+        return;
+    };
+    defer a.free(result);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(search.Row), a, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const rows = if (parsed.value.len > 0) parsed.value[0].result else &.{};
+    var items = std.ArrayListUnmanaged(models.TaskResponse){};
+    defer items.deinit(a);
+    for (rows[0..@min(rows.len, input.limit)]) |row| try items.append(a, toResponse(row.task));
+    const cursor = if (rows.len > input.limit) try search.next(a, query, rows[input.limit - 1]) else null;
+    try http.jsonSuccess(r, .{ .items = items.items, .next_cursor = cursor, .as_of = query.as_of });
+}
+
 pub fn getTrash(r: zap.Request, a: std.mem.Allocator) !void {
     const user = http.getCurrentUserId(a, r) orelse {
         try http.jsonError(r, 401, "Not authenticated");

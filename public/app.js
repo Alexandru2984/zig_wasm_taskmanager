@@ -139,7 +139,8 @@ async function api(path, { method = 'GET', body = null, quiet = false, signal, v
     const pendingKey = `${requestUser?.id}:${taskId}`;
     if (conditional && pendingTaskWrites.has(pendingKey)) return { ok: false, status: 409, data: { busy: true, error: 'This task already has an update in progress.' } };
     // Do not publish an older multi-page read over an in-flight local write.
-    const taskWrite = method !== 'GET' && /^\/api\/(tasks|trash)(\/|$)/.test(path);
+    const taskWrite = method !== 'GET' && path !== '/api/tasks/search' && /^\/api\/(tasks|trash)(\/|$)/.test(path);
+    if (taskWrite) resetTaskSearch(true);
     if (taskWrite && taskLoadAbort) cancelTaskLoad(true);
     const options = { method, credentials: 'include', headers: {}, signal };
     if (conditional) {
@@ -168,6 +169,7 @@ async function api(path, { method = 'GET', body = null, quiet = false, signal, v
     // A refresh may also have started while this write was waiting for its
     // response. Fence that scan before the caller applies the write result.
     if (taskWrite && taskLoadAbort && state.user === requestUser) cancelTaskLoad(true);
+    if (taskWrite && state.user === requestUser) resetTaskSearch(true);
 
     let data = null;
     try {
@@ -270,6 +272,7 @@ async function checkAuth() {
 }
 
 function showLoggedIn(user) {
+    if (state.user !== user) resetTaskSearch(true);
     if (state.user?.id !== user.id) {
         cancelTaskLoad();
         taskDrafts.clear();
@@ -324,6 +327,7 @@ function renderVerifiedBadge(user) {
 }
 
 function showLoggedOut() {
+    resetTaskSearch(true);
     cancelTaskLoad();
     taskDrafts.clear();
     state.childPages.clear();
@@ -839,6 +843,7 @@ function renderWorkspaceBar() {
 
 function switchWorkspace(id) {
     if ([...taskDrafts.values()].some(draft => draft.dirty) && !window.confirm('Discard unsaved task edits and switch workspace?')) { renderWorkspaceBar(); return; }
+    resetTaskSearch(true);
     taskDrafts.clear();
     cancelTaskLoad();
     resetTrash();
@@ -878,6 +883,161 @@ async function handleCreateWorkspace(e) {
 }
 
 // ============ TASKS ============
+
+// Global search keeps ONE server page and positional tokens in tab memory.
+// It never replaces the complete workspace list or its counts/child progress.
+const taskSearch = { generation: 0, abort: null, query: null, cursors: [null], page: 0, next: null, asOf: null, preview: null };
+
+function resetTaskSearch(close = false) {
+    taskSearch.generation++;
+    taskSearch.abort?.abort(); taskSearch.abort = null;
+    taskSearch.query = null; taskSearch.cursors = [null]; taskSearch.page = 0;
+    taskSearch.next = null; taskSearch.asOf = null; taskSearch.preview = null;
+    $('taskSearchResults').replaceChildren();
+    $('taskSearchPreviewText').textContent = '';
+    $('taskSearchPreview').classList.add('hidden');
+    $('taskSearchStatus').textContent = '';
+    $('taskSearchPrevious').disabled = true; $('taskSearchNext').disabled = true;
+    $('taskSearchSubmit').disabled = false; $('taskSearchReveal').disabled = false;
+    $('taskSearchCancel').classList.add('hidden');
+    if (close) {
+        $('taskSearchForm').reset();
+        $('remoteSearchWorkspace').replaceChildren(new Option('All accessible workspaces', ''));
+        if (!$('taskSearchModal').hidden) hideModal('taskSearchModal');
+    }
+}
+
+function openTaskSearch() {
+    if (!isLoggedIn()) return;
+    resetTaskSearch(); closeDropdown();
+    $('taskSearchForm').reset();
+    $('remoteSearchDates').classList.add('hidden');
+    const select = $('remoteSearchWorkspace');
+    select.replaceChildren(new Option('All accessible workspaces', ''));
+    for (const workspace of state.workspaces) select.add(new Option(workspace.name, workspace.id));
+    $('taskSearchStatus').textContent = 'Choose filters and search. Up to 50 results per page.';
+    showModal('taskSearchModal'); $('remoteSearchText').focus();
+}
+
+function taskSearchFilters() {
+    const query = { q: $('remoteSearchText').value, workspace_id: $('remoteSearchWorkspace').value || null,
+        status: $('remoteSearchStatus').value, priority: $('remoteSearchPriority').value,
+        tag: $('remoteSearchTag').value, assignee: $('remoteSearchAssignee').value,
+        due: $('remoteSearchDue').value, sort: $('remoteSearchSort').value, limit: 50 };
+    if (query.due === 'range') {
+        const start = new Date(`${$('remoteSearchFrom').value}T00:00:00`);
+        const end = new Date(`${$('remoteSearchThrough').value}T00:00:00`);
+        end.setDate(end.getDate() + 1);
+        if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || start >= end) throw new Error('Choose a valid date range.');
+        query.due_from = start.getTime(); query.due_before = end.getTime();
+    }
+    return query;
+}
+
+async function loadTaskSearch(page = 0, fresh = false) {
+    if (!isLoggedIn() || $('taskSearchModal').hidden) return;
+    if (fresh) {
+        let query;
+        try { query = taskSearchFilters(); } catch (error) { resetTaskSearch(); $('taskSearchStatus').textContent = error.message; return; }
+        resetTaskSearch(); taskSearch.query = query;
+    }
+    if (!taskSearch.query || page < 0 || page >= taskSearch.cursors.length || page >= 200) return;
+    taskSearch.abort?.abort();
+    const controller = taskSearch.abort = new AbortController();
+    const generation = ++taskSearch.generation, user = state.user;
+    const current = () => taskSearch.generation === generation && state.user === user && !$('taskSearchModal').hidden;
+    $('taskSearchResults').replaceChildren(); taskSearch.preview = null;
+    $('taskSearchPreviewText').textContent = ''; $('taskSearchPreview').classList.add('hidden');
+    $('taskSearchStatus').textContent = 'Searching…';
+    $('taskSearchSubmit').disabled = true; $('taskSearchPrevious').disabled = true; $('taskSearchNext').disabled = true;
+    $('taskSearchCancel').classList.remove('hidden');
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let result;
+    try { result = await api('/api/tasks/search', { method: 'POST', body: { ...taskSearch.query, cursor: taskSearch.cursors[page], as_of: taskSearch.asOf }, quiet: true, signal: controller.signal }); }
+    finally { clearTimeout(timeout); }
+    if (!current()) return;
+    taskSearch.abort = null;
+    $('taskSearchSubmit').disabled = false; $('taskSearchCancel').classList.add('hidden');
+    const { ok, data } = result;
+    if (!ok || !Array.isArray(data?.items) || data.items.length > 50 || !Number.isSafeInteger(data.as_of) ||
+        (taskSearch.asOf !== null && taskSearch.asOf !== data.as_of) ||
+        !(data.next_cursor === null || (typeof data.next_cursor === 'string' && data.next_cursor.length <= 8192 && data.items.length > 0)) ||
+        data.items.some(task => !task || typeof task.id !== 'string') || new Set(data.items.map(task => task.id)).size !== data.items.length) {
+        resetTaskSearch();
+        $('taskSearchStatus').textContent = data?.error || 'Search did not complete. Press Search to retry from the beginning.';
+        $('taskSearchStatus').focus(); return;
+    }
+    taskSearch.page = page; taskSearch.next = data.next_cursor; taskSearch.asOf = data.as_of;
+    taskSearch.cursors.length = page + 1;
+    if (data.next_cursor) taskSearch.cursors.push(data.next_cursor);
+    $('taskSearchPrevious').disabled = page === 0;
+    $('taskSearchNext').disabled = !data.next_cursor || page >= 199;
+    $('taskSearchStatus').textContent = data.items.length
+        ? `Page ${page + 1} · ${data.items.length} results on this page. ${page >= 199 && data.next_cursor ? 'Refine your filters to continue.' : data.next_cursor ? 'More results available.' : 'End of results.'} Changes during browsing can move tasks; Search starts fresh.`
+        : 'No matching tasks. Try different filters.';
+    for (const task of data.items) {
+        const item = document.createElement('li');
+        const title = document.createElement('strong'); title.textContent = task.title;
+        const workspace = state.workspaces.find(ws => ws.id === task.workspace_id);
+        const meta = document.createElement('p'); meta.textContent = `${workspace?.name || (task.workspace_id ? 'Workspace' : 'Personal legacy task')} · ${task.parent_id ? 'Subtask · ' : ''}${taskStatus(task)} · ${task.priority}${task.due_date ? ` · ${formatDate(task.due_date)}` : ''}`;
+        const snippet = document.createElement('p'); snippet.textContent = (task.notes || '').slice(0, 180);
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-ghost btn-sm'; button.textContent = 'View current details';
+        button.addEventListener('click', () => previewSearchTask(task.id));
+        item.append(title, meta, snippet, button); $('taskSearchResults').appendChild(item);
+    }
+    $('taskSearchStatus').focus();
+}
+
+async function previewSearchTask(id) {
+    taskSearch.abort?.abort();
+    const controller = taskSearch.abort = new AbortController();
+    const generation = ++taskSearch.generation, user = state.user;
+    taskSearch.preview = null; $('taskSearchPreviewText').textContent = ''; $('taskSearchPreview').classList.add('hidden');
+    $('taskSearchStatus').textContent = 'Reading current task…';
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let result;
+    try { result = await api(`/api/tasks/${encodeURIComponent(id)}`, { quiet: true, signal: controller.signal }); }
+    finally { clearTimeout(timeout); }
+    if (taskSearch.generation !== generation || state.user !== user || $('taskSearchModal').hidden) return;
+    taskSearch.abort = null;
+    if (!result.ok || result.data?.id !== id || typeof result.data.title !== 'string') {
+        // A removed/deauthorized result is no longer safe to retain here.
+        resetTaskSearch(); $('taskSearchStatus').textContent = result.data?.error || 'Could not read this task. Search again to retry.'; return;
+    }
+    const task = taskSearch.preview = result.data;
+    $('taskSearchPreviewText').textContent = `${task.title}\n${taskStatus(task)} · ${task.priority}\nDue: ${formatDate(task.due_date) || 'None'}\nTags: ${(task.tags || []).join(', ')}\n\n${task.notes || ''}`;
+    $('taskSearchPreview').classList.remove('hidden');
+    $('taskSearchStatus').textContent = 'Current details loaded. This preview is read-only.';
+    $('taskSearchPreviewTitle').focus();
+}
+
+async function revealSearchTask() {
+    const task = taskSearch.preview, user = state.user;
+    if (!task || !user) return;
+    if ([...taskDrafts.values()].some(draft => draft.dirty) && !window.confirm('Discard unsaved task edits and open this search result?')) return;
+    const workspace = task.workspace_id || state.currentWorkspaceId;
+    if (!workspace) { $('taskSearchStatus').textContent = 'Select a workspace first to open this legacy task.'; return; }
+    taskDrafts.clear(); state.editingId = null;
+    // Close search before the workspace switch, which also invalidates reads.
+    hideModal('taskSearchModal');
+    if (state.currentWorkspaceId !== workspace) await switchWorkspace(workspace);
+    else await loadTasks();
+    if (state.user !== user || state.currentWorkspaceId !== workspace) return;
+    if (!$('taskLoadError').classList.contains('hidden')) { toast('Could not load the workspace. Retry the workspace refresh.', 'error'); return; }
+    const current = state.tasks.find(row => row.id === task.id), parent = current?.parent_id || task.id;
+    if (!current || !state.tasks.some(row => row.id === parent)) { toast('Task is no longer available in this workspace.', 'error'); return; }
+    state.search = ''; state.filter = 'all'; state.tagFilter = null; state.activeSavedView = ''; state.selection.clear();
+    setView('list');
+    const roots = topLevel(workspaceTasks());
+    const ordered = [...sortTasks(roots.filter(row => !row.completed)), ...sortTasks(roots.filter(row => row.completed))];
+    state.taskPage = Math.floor(ordered.findIndex(row => row.id === parent) / TASKS_PER_PAGE);
+    if (current.parent_id) state.childPages.set(parent, Math.floor(subtasksOf(parent).findIndex(row => row.id === current.id) / TASKS_PER_PAGE));
+    state.completedCollapsed = false; renderTasks();
+    const target = [...document.querySelectorAll('[data-act="toggle"]')].find(el => el.dataset.id === current.id);
+    target?.closest('li')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    // The checkbox is disabled for viewers; focus the containing row instead.
+    const row = target?.closest('li'); if (row) { row.tabIndex = -1; row.focus({ preventScroll: true }); }
+}
 
 async function loadTasks() {
     cancelTaskLoad();
@@ -1099,6 +1259,16 @@ function persistSavedViews() {
     return true;
 }
 function bindSavedViews() {
+    $('taskSearchForm').addEventListener('submit', e => { e.preventDefault(); loadTaskSearch(0, true); });
+    $('taskSearchForm').addEventListener('input', () => {
+        resetTaskSearch();
+        $('remoteSearchDates').classList.toggle('hidden', $('remoteSearchDue').value !== 'range');
+        $('taskSearchStatus').textContent = 'Filters changed. Press Search to load matching tasks.';
+    });
+    $('taskSearchPrevious').addEventListener('click', () => loadTaskSearch(taskSearch.page - 1));
+    $('taskSearchNext').addEventListener('click', () => loadTaskSearch(taskSearch.page + 1));
+    $('taskSearchCancel').addEventListener('click', () => { resetTaskSearch(); $('taskSearchStatus').textContent = 'Search cancelled. Press Search to try again.'; $('taskSearchSubmit').focus(); });
+    $('taskSearchReveal').addEventListener('click', revealSearchTask);
     $('saveViewForm').addEventListener('submit', e => {
         e.preventDefault();
         const name = $('savedViewName').value.trim();
@@ -2687,6 +2857,10 @@ function showModal(id) {
 function hideModal(id) {
     const modal = $(id);
     if (!modal) return;
+    if (id === 'taskSearchModal') {
+        resetTaskSearch();
+        $('remoteSearchWorkspace').replaceChildren(new Option('All accessible workspaces', ''));
+    }
     modal.hidden = true;
     document.body.classList.remove('modal-open');
 
@@ -3019,6 +3193,7 @@ function bindActions() {
             case 'switch-modal': e.preventDefault(); switchModal(el.dataset.from, el.dataset.to); break;
             case 'switch-tab': switchTab(el.dataset.scope, el.dataset.tab, el); break;
             case 'logout': logout(); break;
+            case 'open-task-search': openTaskSearch(); break;
             case 'verify-now': e.preventDefault(); hideModal('profileModal'); showModal('verifyModal'); break;
             case 'refresh-mail': loadEmailDeliveries(); break;
             case 'resend-code': handleResendCode(e); break;

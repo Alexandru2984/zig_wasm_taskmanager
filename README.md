@@ -235,6 +235,12 @@ docker-compose.yml      SurrealDB service (app deployed separately)
 
 ## Roadmap
 
+Signed-in **Find tasks** provides [global server search](docs/TASK-SEARCH.md)
+with status, priority, assignment, tag and due-date filters, five sorts and
+bounded pages. Includes subtasks and other accessible workspaces; previews
+recheck current access. This is separate from the main workspace's local
+filters/counts and does not yet replace its complete-workspace loading.
+
 Current audit and delivery plan: [security audit](docs/AUDIT-2026-09-06.md),
 [product implementation](docs/PRODUCT-IMPLEMENTATION.md),
 [prioritized stages](docs/DELIVERY-PLAN.md), [incident response](docs/INCIDENT-RESPONSE.md).

@@ -1015,6 +1015,55 @@ pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8, page: @
     , .{ .user_id = rec(user_id), .workspace_id = rec(page.workspace orelse "workspaces:unset"), .scoped = page.workspace != null, .cursor = rec(page.cursor orelse "tasks:unset"), .has_cursor = page.cursor != null, .limit = page.limit + 1, .as_of = page.as_of });
 }
 
+pub fn searchTasks(a: std.mem.Allocator, user: []const u8, search_query: @import("../util/task_search.zig").Query) ![]u8 {
+    const q = search_query.input;
+    return queryWithVars(a,
+        \\LET $allowed = (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id TIMEOUT 2s);
+        \\IF $scoped AND $workspace_id NOT IN $allowed { THROW "APP_FORBIDDEN"; };
+        \\SELECT * FROM (
+        \\    SELECT $this AS task,
+        \\        (IF $sort = 'created_desc' { -time::millis(created_at) }
+        \\         ELSE IF $sort = 'created_asc' { time::millis(created_at) }
+        \\         ELSE IF $sort = 'due_asc' { IF due_date = NONE { 9007199254740991 } ELSE { time::millis(due_date) } }
+        \\         ELSE IF $sort = 'priority' { IF priority = 'high' { 0 } ELSE IF priority = 'low' { 2 } ELSE { 1 } }
+        \\         ELSE { 0 }) AS n,
+        \\        (IF $sort = 'title' { string::lowercase(title) } ELSE { '' }) AS s
+        \\    FROM tasks WHERE deleted_at = NONE AND time::millis(created_at) <= $as_of
+        \\        AND (workspace_id IN $allowed OR (workspace_id = NONE AND user_id = $user_id))
+        \\        AND (!$scoped OR workspace_id = $workspace_id OR (workspace_id = NONE AND user_id = $user_id))
+        \\        AND ($q = '' OR string::contains(string::lowercase(string::concat(title, ' ', notes ?? '', ' ', array::join(tags ?? [], ' '))), string::lowercase($q)))
+        \\        AND ($status = 'all' OR ($status = 'active' AND !completed) OR $status = (IF completed { 'done' } ELSE { status ?? 'todo' }))
+        \\        AND ($priority = 'all' OR priority = $priority)
+        \\        AND ($tag = '' OR $tag IN tags)
+        \\        AND ($assignee = 'any' OR ($assignee = 'me' AND assignee_id = $user_id) OR ($assignee = 'unassigned' AND assignee_id = NONE))
+        \\        AND ($due = 'any' OR ($due = 'none' AND due_date = NONE)
+        \\            OR ($due = 'overdue' AND !completed AND due_date != NONE AND time::millis(due_date) < $as_of)
+        \\            OR ($due = 'range' AND due_date != NONE AND time::millis(due_date) >= $due_from AND time::millis(due_date) < $due_before))
+        \\    TIMEOUT 2s
+        \\) WHERE !$has_cursor OR n > $after_n OR (n = $after_n AND (s > $after_s OR (s = $after_s AND task.id > $after_id)))
+        \\ORDER BY n ASC, s ASC, task.id ASC LIMIT $limit TIMEOUT 2s;
+    , .{
+        .user_id = rec(user),
+        .workspace_id = rec(q.workspace_id orelse "workspaces:unset"),
+        .scoped = q.workspace_id != null,
+        .q = q.q,
+        .status = q.status,
+        .priority = q.priority,
+        .tag = q.tag,
+        .assignee = q.assignee,
+        .due = q.due,
+        .due_from = q.due_from orelse 0,
+        .due_before = q.due_before orelse 0,
+        .sort = q.sort,
+        .limit = q.limit + 1,
+        .as_of = search_query.as_of,
+        .has_cursor = search_query.after != null,
+        .after_id = rec(if (search_query.after) |c| c.id else "tasks:unset"),
+        .after_n = if (search_query.after) |c| c.n else 0,
+        .after_s = if (search_query.after) |c| c.s else "",
+    });
+}
+
 /// Delete a task together with anything hanging off it, so completing the
 /// parent's removal cannot leave orphaned subtasks that no view will show.
 pub fn deleteTaskWithChildren(allocator: std.mem.Allocator, task_id: []const u8, actor_id: []const u8, version: i64) ![]u8 {

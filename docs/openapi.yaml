@@ -418,6 +418,55 @@ paths:
           description: Created task
         "401":
           description: Not authenticated
+  /api/tasks/search:
+    post:
+      summary: Read one filtered and sorted page across accessible workspaces
+      description: >-
+        Read-only POST keeps terms and cursors out of URL access logs. Requires
+        an authenticated session and its X-CSRF-Token. Includes subtasks and own
+        legacy records, never trash. Every page rechecks current membership.
+        Follow next_cursor with identical filters, sort and limit; restart after
+        changing them. The token is a position, not an access credential. Stable
+        order uses a task-ID tie-breaker. as_of excludes later creation and fixes
+        the overdue boundary, but does not freeze edits, deletions or permissions.
+        Text search is literal case-insensitive substring, not regex/full-text.
+      parameters:
+        - name: X-CSRF-Token
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TaskSearchRequest" }
+      responses:
+        "200":
+          description: One current page, Cache-Control no-store; no total-count claim
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor, as_of]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 100
+                    items: { $ref: "#/components/schemas/Task" }
+                  next_cursor: { type: string, nullable: true, maxLength: 8192 }
+                  as_of: { type: integer, format: int64 }
+        "400":
+          description: Invalid filters, bounds, body or cursor binding; start a fresh search
+        "401":
+          description: Not authenticated
+        "403":
+          description: Missing/invalid CSRF or requested workspace unavailable
+        "405":
+          description: POST required; Allow POST
+        "429":
+          description: 120 searches per user per minute exceeded; Retry-After 60
+        "503":
+          description: Query unavailable/timed out, or two search slots occupied (Retry-After 1); retry explicitly
   /api/tasks/{id}:
     get:
       summary: Read one active task and its current ETag
@@ -875,6 +924,49 @@ components:
           type: string
         created_at:
           type: string
+    TaskSearchRequest:
+      type: object
+      properties:
+        workspace_id:
+          type: string
+          nullable: true
+          description: Omit/null for all accessible workspaces; own legacy tasks also appear in any authorized scope
+          example: "workspaces:abc123"
+        q:
+          type: string
+          maxLength: 500
+          default: ""
+          description: At most 500 UTF-8 bytes, no control characters; substring across title, notes and tags
+        status: { type: string, enum: [all, active, todo, doing, done], default: all }
+        priority: { type: string, enum: [all, high, normal, low], default: all }
+        tag:
+          type: string
+          maxLength: 128
+          default: ""
+          description: Exact case-sensitive tag, at most 128 UTF-8 bytes
+        assignee: { type: string, enum: [any, me, unassigned], default: any }
+        due: { type: string, enum: [any, overdue, none, range], default: any }
+        due_from:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
+          description: Inclusive Unix milliseconds, required only with due=range
+        due_before:
+          type: integer
+          format: int64
+          nullable: true
+          maximum: 253402300799999
+          description: Exclusive Unix milliseconds, greater than due_from; required only with due=range
+        sort: { type: string, enum: [created_desc, created_asc, due_asc, priority, title], default: created_desc }
+        limit: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        cursor: { type: string, nullable: true, maxLength: 8192 }
+        as_of:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 1
+          description: Retain response cutoff to revisit page 1 with cursor null; must agree with a supplied cursor and not be in the future
     Task:
       type: object
       properties:

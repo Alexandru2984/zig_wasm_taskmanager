@@ -86,6 +86,7 @@ jobs:
           RUN_TRASH: '1'
           RUN_PAGINATION: '1'
           RUN_VERSIONS: '1'
+          RUN_SEARCH: '1'
         run: ./scripts/integration_test.sh
 
   ui:
@@ -118,6 +119,7 @@ jobs:
           RUN_UI: '1'
           RUN_VERSIONS: '1'
           RUN_PAGINATION: '1'
+          RUN_SEARCH: '1'
         run: ./scripts/integration_test.sh
 
   docker:

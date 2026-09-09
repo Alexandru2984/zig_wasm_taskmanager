@@ -485,7 +485,8 @@ select {
     gap: var(--s1);
 }
 
-.nav-auth {
+.nav-auth,
+.nav-user {
     display: flex;
     gap: var(--s2);
 }
@@ -2051,3 +2052,11 @@ kbd {
     .subtask-list { padding-left: var(--s2); }
     .task-actions .icon-btn { min-width: 44px; min-height: 44px; }
 }
+/* Global search keeps one bounded page; long private text wraps on phones. */
+.task-search-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 1rem; }
+.task-search-filters .form-group, .task-search-filters input, .task-search-filters select { min-width: 0; width: 100%; }
+.task-search-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: .75rem; }
+.task-search-results li { display: block; overflow-wrap: anywhere; }
+.task-search-results p { margin-block: .35rem; }
+.task-search-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; font: inherit; }
+@media (max-width: 480px) { .task-search-filters { grid-template-columns: minmax(0, 1fr); } }

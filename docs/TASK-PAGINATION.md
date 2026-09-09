@@ -4,6 +4,10 @@ Verified 2026-09-09. This is the bounded first part of P4, not completion of the
 It replaces the silent 2,000-row read limit without pretending that a partial
 browser list is a complete workspace.
 
+D2b follow-up: [global server search](TASK-SEARCH.md) adds filtered/sorted pages
+independent of the full workspace view. The latter still loads the complete
+workspace; its older search/scale follow-ups below are historical context.
+
 D2a follow-up: [conditional task writes and conflict recovery](TASK-VERSIONS.md)
 are now implemented. The remaining server-side filtering/sorting, storage
 quotas and concurrent-capacity work below is still open; the older binary

@@ -162,17 +162,9 @@ fn validateSurrealResponse(allocator: std.mem.Allocator, raw_response: []const u
                     else => return HttpError.InvalidResponse,
                 };
                 if (!std.mem.eql(u8, status, "OK")) {
-                    if (obj.get("result")) |result_value| {
-                        switch (result_value) {
-                            .string => |msg| {
-                                const preview_len = @min(msg.len, 300);
-                                log.warn("❌ SurrealDB query error: {s}", .{msg[0..preview_len]});
-                            },
-                            else => log.warn("❌ SurrealDB query returned status {s}", .{status}),
-                        }
-                    } else {
-                        log.warn("❌ SurrealDB query returned status {s}", .{status});
-                    }
+                    // DB error text can quote bound search terms, private task
+                    // fields or credentials. Never put its preview in journals.
+                    log.warn("Database query failed; response details withheld", .{});
                     return HttpError.QueryError;
                 }
             }
