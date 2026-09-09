@@ -154,6 +154,7 @@ pub var verify_limiter: ?RateLimiter = null;
 pub var reset_password_limiter: ?RateLimiter = null;
 pub var resend_verification_limiter: ?RateLimiter = null;
 pub var task_write_limiter: ?RateLimiter = null;
+pub var task_read_limiter: ?RateLimiter = null;
 pub var workspace_invite_limiter: ?RateLimiter = null;
 pub var password_change_limiter: ?RateLimiter = null;
 
@@ -182,6 +183,7 @@ pub fn initAll(allocator: std.mem.Allocator) void {
     // Task write operations (create/toggle/delete): 60 per minute per user.
     // Stops an authenticated user from spamming the DB.
     task_write_limiter = RateLimiter.init(allocator, .{ .max_requests = 60, .window_seconds = 60 });
+    task_read_limiter = RateLimiter.init(allocator, .{ .max_requests = 600, .window_seconds = 60 });
     // Workspace invites trigger email. Keep the budget tight per inviting user.
     workspace_invite_limiter = RateLimiter.init(allocator, .{ .max_requests = 10, .window_seconds = 3600 });
     // Password change verifies the current password — cap online guessing at
@@ -201,6 +203,7 @@ pub fn cleanupAll() void {
     if (reset_password_limiter) |*l| l.cleanup();
     if (resend_verification_limiter) |*l| l.cleanup();
     if (task_write_limiter) |*l| l.cleanup();
+    if (task_read_limiter) |*l| l.cleanup();
     if (workspace_invite_limiter) |*l| l.cleanup();
     if (password_change_limiter) |*l| l.cleanup();
 }
@@ -252,6 +255,7 @@ pub fn deinitAll() void {
     if (reset_password_limiter) |*l| l.deinit();
     if (resend_verification_limiter) |*l| l.deinit();
     if (task_write_limiter) |*l| l.deinit();
+    if (task_read_limiter) |*l| l.deinit();
     if (workspace_invite_limiter) |*l| l.deinit();
     if (password_change_limiter) |*l| l.deinit();
 
@@ -263,6 +267,7 @@ pub fn deinitAll() void {
     reset_password_limiter = null;
     resend_verification_limiter = null;
     task_write_limiter = null;
+    task_read_limiter = null;
     workspace_invite_limiter = null;
     password_change_limiter = null;
 }

@@ -116,6 +116,16 @@ not a newly generated key. A send already accepted by SMTP cannot be recalled;
 check endpoint credential validity and communicate duplicate/expired emails
 without copying their tokens into logs or tickets.
 
+### Pagination D1 walkthrough — 2026-09-09
+
+Isolated checks cover failure on page 2,
+permission revocation between pages, delayed responses after workspace change,
+overlapping refreshes and local writes. Keep the prior complete list only on
+ordinary load failures; discard it on explicit workspace denial. Do not blindly
+replay writes or restore database contents. D1 needs no schema migration and
+may roll back to the P3-aware `941b7c1` release; pre-P3 rollback is still unsafe
+after trash use. See [pagination evidence and limits](TASK-PAGINATION.md).
+
 ## Draft incident communication (do not send automatically)
 
 “On [UTC date/time] we detected [confirmed event]. We have [containment].

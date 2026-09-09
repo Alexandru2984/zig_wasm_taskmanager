@@ -24,6 +24,7 @@ test {
     _ = @import("config/config.zig");
     _ = @import("util/validation.zig");
     _ = @import("util/rate_limiter.zig");
+    _ = @import("util/task_page.zig");
     _ = @import("db/http_client.zig");
     _ = @import("services/auth.zig");
     _ = @import("services/mail_payload.zig");

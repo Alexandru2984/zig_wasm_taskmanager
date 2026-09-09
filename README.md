@@ -20,6 +20,9 @@ systemd-sandboxed VPS deployment.
 - Full task editing: title, notes, tags, priority, due date, assignee and
   recurrence, edited inline; plus search across titles/notes/tags, filters
   (active, done, overdue, high priority) and five sort orders.
+- Cursor-based task loading without the former 2,000-row truncation, visible
+  progress/cancellation and 50-task list/board pages. Search and counts cover
+  the full loaded workspace, not just the visible page. See [pagination](docs/TASK-PAGINATION.md).
 - A Kanban board alongside the list, with drag-and-drop on pointer devices and
   arrow buttons everywhere else.
 - Subtasks, which are ordinary tasks with a parent, so they inherit editing,
@@ -115,7 +118,7 @@ See [durable email operations](docs/DURABLE-EMAIL.md) before upgrading an existi
 ./scripts/integration_test.sh # API against a throwaway SurrealDB
 npm ci
 node scripts/mail_ops_test.mjs
-RUN_SECURITY=1 RUN_TRASH=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
+RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
 ```
 
 All three run in CI on every push.
@@ -170,7 +173,8 @@ Main endpoint groups:
   role, remove) and invitations (create, list, revoke, accept)
 - `/api/tasks*`: task CRUD with priority, due date, notes, tags, board status,
   recurrence, assignee and parent; `PUT` applies a partial update, or toggles
-  completion when the body is empty
+  completion when the body is empty; use `GET /api/tasks?page=1` and follow
+  `next_cursor` with `as_of` for complete reads
 - `/api/sessions*`: list and revoke sessions
 - `/api/email-deliveries`: latest 100 own delivery records, with no payloads or tokens
 - `/api/trash*`: scoped deleted-task pages and original-record restoration

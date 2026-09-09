@@ -997,16 +997,18 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
     });
 }
 
-/// Every task the user can see, subtasks included.
-///
-/// Subtasks come back in the same list rather than through a separate call:
-/// the front end already holds the whole set in memory to filter and sort it,
-/// and nesting them there costs one pass over an array instead of a request
-/// per parent.
-pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 {
+/// Bounded keyset scan, including children. Membership is rechecked on every
+/// page; a cursor is a position, never proof of permission. The creation cutoff
+/// excludes later inserts, but this is not a multi-request database snapshot.
+pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8, page: @import("../util/task_page.zig").Query) ![]u8 {
     return queryWithVars(allocator,
-        \\SELECT * FROM tasks WHERE deleted_at = NONE AND (workspace_id IN (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id) OR (user_id = $user_id AND workspace_id = NONE)) ORDER BY created_at DESC LIMIT 2000;
-    , .{ .user_id = rec(user_id) });
+        \\LET $allowed = (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id);
+        \\IF $scoped AND $workspace_id NOT IN $allowed { THROW "APP_FORBIDDEN"; };
+        \\SELECT * FROM tasks WHERE deleted_at = NONE AND time::millis(created_at) <= $as_of
+        \\    AND (workspace_id IN $allowed OR (user_id = $user_id AND workspace_id = NONE))
+        \\    AND (!$scoped OR workspace_id = $workspace_id OR (workspace_id = NONE AND user_id = $user_id))
+        \\    AND (!$has_cursor OR id < $cursor) ORDER BY id DESC LIMIT $limit;
+    , .{ .user_id = rec(user_id), .workspace_id = rec(page.workspace orelse "workspaces:unset"), .scoped = page.workspace != null, .cursor = rec(page.cursor orelse "tasks:unset"), .has_cursor = page.cursor != null, .limit = page.limit + 1, .as_of = page.as_of });
 }
 
 /// Delete a task together with anything hanging off it, so completing the

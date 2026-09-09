@@ -38,7 +38,14 @@ const state = {
     savedViews: [],
     savedViewContext: null,
     activeSavedView: '',
+    taskPage: 0,
+    taskPageContext: '',
+    childPages: new Map(),
 };
+
+const TASKS_PER_PAGE = 50;
+let taskLoadGeneration = 0;
+let taskLoadAbort = null;
 
 const STATUSES = ['todo', 'doing', 'done'];
 const STATUS_LABEL = { todo: 'To do', doing: 'In progress', done: 'Done' };
@@ -123,9 +130,12 @@ function csrfHeaders(headers = {}) {
  * session lapsed — the app drops to the signed-out view rather than leaving a
  * stale username in the corner while every request fails.
  */
-async function api(path, { method = 'GET', body = null, quiet = false } = {}) {
+async function api(path, { method = 'GET', body = null, quiet = false, signal } = {}) {
     const requestUser = state.user;
-    const options = { method, credentials: 'include', headers: {} };
+    // Do not publish an older multi-page read over an in-flight local write.
+    const taskWrite = method !== 'GET' && /^\/api\/(tasks|trash)(\/|$)/.test(path);
+    if (taskWrite && taskLoadAbort) cancelTaskLoad(true);
+    const options = { method, credentials: 'include', headers: {}, signal };
 
     if (body !== null) {
         options.headers['Content-Type'] = 'application/json';
@@ -142,6 +152,10 @@ async function api(path, { method = 'GET', body = null, quiet = false } = {}) {
         if (!quiet) toast('Connection error. Check your network.', 'error');
         return { ok: false, status: 0, data: null };
     }
+
+    // A refresh may also have started while this write was waiting for its
+    // response. Fence that scan before the caller applies the write result.
+    if (taskWrite && taskLoadAbort && state.user === requestUser) cancelTaskLoad(true);
 
     let data = null;
     try {
@@ -244,6 +258,7 @@ async function checkAuth() {
 
 function showLoggedIn(user) {
     if (state.user?.id !== user.id) {
+        cancelTaskLoad();
         resetTrash();
         $('mailDeliveryList').replaceChildren();
         $('mailDeliveryStatus').textContent = '';
@@ -295,6 +310,8 @@ function renderVerifiedBadge(user) {
 }
 
 function showLoggedOut() {
+    cancelTaskLoad();
+    state.childPages.clear();
     resetTrash();
     $('toastRegion').replaceChildren();
     state.user = null;
@@ -806,13 +823,18 @@ function renderWorkspaceBar() {
 }
 
 function switchWorkspace(id) {
+    cancelTaskLoad();
     resetTrash();
     state.currentWorkspaceId = id;
+    state.tasks = [];
+    state.members = [];
+    state.childPages.clear();
     try {
         localStorage.setItem('workspaceId', id);
     } catch (_) { /* ignore */ }
     renderWorkspaceBar();
     renderTasks();
+    return loadTasks();
 }
 
 async function handleCreateWorkspace(e) {
@@ -841,6 +863,7 @@ async function handleCreateWorkspace(e) {
 // ============ TASKS ============
 
 async function loadTasks() {
+    cancelTaskLoad();
     if (!isLoggedIn()) {
         $('taskLoadError').classList.add('hidden');
         state.tasks = getAnonTasks();
@@ -848,23 +871,77 @@ async function loadTasks() {
         return;
     }
 
+    const requestUser = state.user, workspace = state.currentWorkspaceId;
+    if (!workspace) {
+        state.tasks = [];
+        $('taskLoadError').classList.remove('hidden');
+        renderTasks();
+        return;
+    }
+    const generation = taskLoadGeneration;
+    const controller = taskLoadAbort = new AbortController();
+    const current = () => generation === taskLoadGeneration && state.user === requestUser && state.currentWorkspaceId === workspace;
+    const staged = [], seen = new Set();
+    let cursor = null, asOf = null, loaded = false;
     setLoading(true);
-    const requestUser = state.user;
-    const { ok, data } = await api('/api/tasks', { quiet: true });
-    // A response started before logout/account change must never repopulate
-    // the new identity's view with the old account's private task data.
-    if (state.user !== requestUser) return;
+    $('taskLoadError').classList.add('hidden');
+    try {
+        do {
+            $('taskLoadStatus').textContent = `Loading tasks… ${staged.length} received. Search and counts update when complete.`;
+            const query = new URLSearchParams({ page: '1', workspace_id: workspace });
+            if (cursor) { query.set('cursor', cursor); query.set('as_of', String(asOf)); }
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            let result;
+            try { result = await api(`/api/tasks?${query}`, { quiet: true, signal: controller.signal }); }
+            finally { clearTimeout(timeout); }
+            if (!current()) return;
+            const { ok, data, status } = result;
+            if (status === 403) {
+                state.tasks = []; state.selection.clear(); state.editingId = null;
+                state.members = []; state.childPages.clear(); resetTrash();
+                break;
+            }
+            if (!ok || !Array.isArray(data?.items) || data.items.length > 100 ||
+                !Number.isSafeInteger(data.as_of) || (asOf !== null && data.as_of !== asOf) ||
+                !(data.next_cursor === null || (typeof data.next_cursor === 'string' && data.items.length > 0 && data.next_cursor === data.items.at(-1).id))) break;
+            asOf = data.as_of;
+            let valid = true;
+            for (const task of data.items) {
+                if (!task || typeof task.id !== 'string' || seen.has(task.id) || (cursor && task.id >= cursor)) { valid = false; break; }
+                seen.add(task.id); staged.push(task);
+            }
+            if (!valid) break;
+            cursor = data.next_cursor;
+            if (!cursor) loaded = true;
+        } while (cursor);
+    } finally {
+        if (current()) {
+            taskLoadAbort = null;
+            setLoading(false);
+            $('taskLoadError').classList.toggle('hidden', loaded);
+            if (loaded) {
+                state.tasks = staged;
+                state.selection = new Set([...state.selection].filter(id => seen.has(id)));
+            }
+            renderTasks();
+        }
+    }
+}
+
+function cancelTaskLoad(report = false) {
+    taskLoadGeneration++;
+    taskLoadAbort?.abort();
+    taskLoadAbort = null;
     setLoading(false);
-    const loaded = ok && Array.isArray(data);
-    $('taskLoadError').classList.toggle('hidden', loaded);
-    if (loaded) state.tasks = data;
-    renderTasks();
+    $('taskLoadProgress').classList.add('hidden');
+    if (report) { $('taskLoadError').classList.remove('hidden'); renderTasks(); }
 }
 
 function setLoading(loading) {
     state.loading = loading;
-    $('taskListSkeleton').classList.toggle('hidden', !loading);
-    $('taskList').classList.toggle('hidden', loading);
+    $('taskListSkeleton').classList.toggle('hidden', !loading || state.tasks.length > 0);
+    $('taskLoadProgress').classList.toggle('hidden', !loading);
+    $('refreshTasksBtn').disabled = loading;
 }
 
 function parseTags(input) {
@@ -1034,6 +1111,16 @@ function bindSavedViews() {
         state.activeSavedView = ''; renderTasks(); toast('Saved view deleted');
     });
     $('retryTasksBtn').addEventListener('click', loadTasks);
+    $('refreshTasksBtn').addEventListener('click', () => loadTasks());
+    $('cancelTasksBtn').addEventListener('click', () => cancelTaskLoad(true));
+    for (const [id, delta] of [['tasksPrevious', -1], ['tasksNext', 1]]) {
+        $(id).addEventListener('click', () => {
+            state.taskPage += delta;
+            state.selection.clear(); state.editingId = null; state.addingSubtaskFor = null;
+            renderTasks();
+            $('taskPageStatus').focus();
+        });
+    }
 }
 
 const PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
@@ -1190,8 +1277,21 @@ function renderTaskItem(task) {
     if (kids.length) {
         const list = document.createElement('ul');
         list.className = 'subtask-list';
-        for (const kid of kids) list.appendChild(renderSubtask(kid));
+        const page = Math.min(state.childPages.get(task.id) || 0, Math.ceil(kids.length / TASKS_PER_PAGE) - 1);
+        state.childPages.set(task.id, page);
+        for (const kid of kids.slice(page * TASKS_PER_PAGE, (page + 1) * TASKS_PER_PAGE)) list.appendChild(renderSubtask(kid));
         content.appendChild(list);
+        if (kids.length > TASKS_PER_PAGE) {
+            const nav = document.createElement('div'); nav.className = 'task-pagination';
+            for (const [label, delta] of [['Previous subtasks', -1], ['Next subtasks', 1]]) {
+                const button = iconButton(label, label, 'btn btn-ghost btn-sm', { act: 'page-subtasks', id: task.id, delta });
+                button.disabled = delta < 0 ? page === 0 : (page + 1) * TASKS_PER_PAGE >= kids.length;
+                nav.append(button);
+            }
+            const status = badge(`Subtasks ${page * TASKS_PER_PAGE + 1}–${Math.min(kids.length, (page + 1) * TASKS_PER_PAGE)} of ${kids.length}`, 'pagination-status');
+            status.tabIndex = -1; status.dataset.parentPage = task.id;
+            nav.append(status); content.append(nav);
+        }
     }
 
     if (state.addingSubtaskFor === String(task.id)) {
@@ -1410,10 +1510,25 @@ function renderTasks() {
     renderTagChips(scoped);
     renderBulkBar();
 
-    const visible = scoped
+    const matched = scoped
         .filter(t => matchesFilter(t))
         .filter(t => matchesSearch(t, needle))
         .filter(t => !state.tagFilter || (t.tags || []).includes(state.tagFilter));
+
+    const context = JSON.stringify([state.user?.id, state.currentWorkspaceId, state.search, state.filter, state.tagFilter, state.sort, state.view]);
+    if (state.taskPageContext !== context) { state.taskPageContext = context; state.taskPage = 0; state.selection.clear(); }
+    state.taskPage = Math.max(0, Math.min(state.taskPage, Math.ceil(matched.length / TASKS_PER_PAGE) - 1));
+    // Preserve the existing active/completed split, with one shared page limit.
+    const ordered = state.view === 'list' && state.filter === 'all'
+        ? [...sortTasks(matched.filter(t => !t.completed)), ...sortTasks(matched.filter(t => t.completed))]
+        : sortTasks(matched);
+    const start = state.taskPage * TASKS_PER_PAGE;
+    const visible = ordered.slice(start, start + TASKS_PER_PAGE);
+    $('taskPagination').classList.toggle('hidden', matched.length <= TASKS_PER_PAGE);
+    $('taskPageStatus').textContent = `${matched.length ? start + 1 : 0}–${Math.min(start + TASKS_PER_PAGE, matched.length)} of ${matched.length} matching tasks`;
+    $('tasksPrevious').disabled = state.taskPage === 0;
+    $('tasksNext').disabled = start + TASKS_PER_PAGE >= matched.length;
+    renderBulkBar();
 
     // The board shows the same filtered set, grouped differently.
     const boardEl = $('board');
@@ -1575,7 +1690,10 @@ async function moveTask(id, status) {
 }
 
 function renderEmptyState(hasTasksButFiltered) {
-    if (hasTasksButFiltered) {
+    if (isLoggedIn() && !$('taskLoadError').classList.contains('hidden')) {
+        $('emptyTitle').textContent = 'Tasks not loaded';
+        $('emptyText').textContent = 'Retry to load the current workspace.';
+    } else if (hasTasksButFiltered) {
         $('emptyTitle').textContent = 'Nothing matches';
         $('emptyText').textContent = 'Try a different search or filter.';
     } else {
@@ -2581,6 +2699,11 @@ function bindTaskList(listEl) {
         else if (act === 'select') toggleSelected(id);
         else if (act === 'add-subtask') { state.addingSubtaskFor = String(id); renderTasks(); }
         else if (act === 'cancel-subtask') { state.addingSubtaskFor = null; renderTasks(); }
+        else if (act === 'page-subtasks') {
+            state.childPages.set(id, (state.childPages.get(id) || 0) + Number(el.dataset.delta));
+            renderTasks();
+            document.querySelector(`[data-parent-page="${CSS.escape(id)}"]`)?.focus();
+        }
     });
 
     listEl.addEventListener('submit', (e) => {

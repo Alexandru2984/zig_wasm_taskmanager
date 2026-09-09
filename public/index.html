@@ -27,7 +27,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/favicon.svg">
     <link rel="manifest" href="/site.webmanifest">
-    <link rel="stylesheet" href="/style.css?v=852fa915">
+    <link rel="stylesheet" href="/style.css?v=6d467bb4">
 
     <!-- Structured data. The CSP forbids inline <script>, but this is
          application/ld+json, which is data rather than script: the parser
@@ -234,6 +234,11 @@
                 </div>
             </div>
 
+            <div class="task-refresh"><button type="button" class="btn btn-ghost btn-sm" id="refreshTasksBtn">Refresh tasks</button></div>
+            <div id="taskLoadProgress" class="task-load-error hidden">
+                <span id="taskLoadStatus" role="status"></span>
+                <button type="button" class="btn btn-secondary btn-sm" id="cancelTasksBtn">Cancel loading</button>
+            </div>
             <div id="taskListSkeleton" class="hidden" aria-hidden="true">
                 <div class="skeleton skeleton-row"></div>
                 <div class="skeleton skeleton-row"></div>
@@ -241,7 +246,7 @@
             </div>
 
             <div id="taskLoadError" class="task-load-error hidden" role="status">
-                <span>Tasks could not be refreshed. Your last loaded tasks are still shown.</span>
+                <span>Refresh incomplete. Your last complete list is shown, if available. Try again for current tasks.</span>
                 <button type="button" class="btn btn-secondary btn-sm" id="retryTasksBtn">Try again</button>
             </div>
             <ul class="task-list" id="taskList" aria-label="Tasks"></ul>
@@ -264,6 +269,11 @@
                 </h2>
                 <ul class="task-list task-list-completed" id="completedTaskList"></ul>
             </section>
+            <nav id="taskPagination" class="task-pagination hidden" aria-label="Task pages">
+                <button type="button" class="btn btn-secondary btn-sm" id="tasksPrevious">Previous</button>
+                <span id="taskPageStatus" class="pagination-status" role="status" tabindex="-1"></span>
+                <button type="button" class="btn btn-secondary btn-sm" id="tasksNext">Next</button>
+            </nav>
         </main>
 
         <footer class="footer">
@@ -586,6 +596,6 @@
         </div>
     </div>
 
-    <script src="/app.js?v=85d4d8eb"></script>
+    <script src="/app.js?v=e2917e12"></script>
 </body>
 </html>

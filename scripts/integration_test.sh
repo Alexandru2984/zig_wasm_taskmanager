@@ -149,6 +149,11 @@ if [ "${RUN_TRASH:-0}" = 1 ]; then
     BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" \
         node scripts/trash_test.mjs
 fi
+if [ "${RUN_PAGINATION:-0}" = 1 ]; then
+    say "Task pagination and capacity measurements"
+    BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" \
+        node scripts/pagination_test.mjs
+fi
 if [ "${RUN_UI:-0}" = 1 ]; then
     say "Browser suite"
     BASE_URL="http://127.0.0.1:$APP_PORT" node scripts/ui_test.mjs

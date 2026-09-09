@@ -30,7 +30,24 @@ pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         return;
     };
 
-    const db_result = db.getTasksByUser(req_alloc, user_id) catch {
+    r.parseQuery();
+    const paging = @import("../util/task_page.zig");
+    const options = paging.parse(try r.getParamStr(req_alloc, "page"), try r.getParamStr(req_alloc, "workspace_id"), try r.getParamStr(req_alloc, "cursor"), try r.getParamStr(req_alloc, "limit"), try r.getParamStr(req_alloc, "as_of"), std.time.milliTimestamp()) catch {
+        try http.jsonError(r, 400, "Invalid pagination parameters");
+        return;
+    };
+    if (rate_limiter.task_read_limiter) |*limiter| {
+        if (!limiter.isAllowed(user_id)) {
+            r.setHeader("Retry-After", "60") catch {};
+            try http.jsonError(r, 429, "Too many task reads. Please wait 1 minute.");
+            return;
+        }
+    }
+    const db_result = db.getTasksByUser(req_alloc, user_id, options) catch |err| {
+        if (err == error.PermissionDenied) {
+            try http.jsonError(r, 403, "Workspace unavailable");
+            return;
+        }
         try http.jsonError(r, 503, "Tasks are temporarily unavailable. Please retry.");
         return;
     };
@@ -39,19 +56,23 @@ pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Task), req_alloc, db_result, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
-    if (parsed.value.len == 0) {
-        try http.jsonSuccess(r, [0]models.TaskResponse{});
+    const rows = if (parsed.value.len > 0) parsed.value[0].result else &.{};
+    // Old clients must never mistake a truncated array for a complete list.
+    if (!options.paged and rows.len > options.limit) {
+        try http.jsonError(r, 409, "This list requires pagination. Use /api/tasks?page=1 and follow next_cursor with as_of.");
         return;
     }
 
     var tasks = std.ArrayListUnmanaged(models.TaskResponse){};
     defer tasks.deinit(req_alloc);
 
-    for (parsed.value[0].result) |task| {
+    for (rows[0..@min(rows.len, options.limit)]) |task| {
         try tasks.append(req_alloc, toResponse(task));
     }
 
-    try http.jsonSuccess(r, tasks.items);
+    if (options.paged) {
+        try http.jsonSuccess(r, .{ .items = tasks.items, .next_cursor = if (rows.len > options.limit) @as(?[]const u8, rows[options.limit - 1].id) else null, .as_of = options.as_of });
+    } else try http.jsonSuccess(r, tasks.items);
 }
 
 pub fn getTrash(r: zap.Request, a: std.mem.Allocator) !void {

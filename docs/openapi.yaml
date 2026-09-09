@@ -344,10 +344,67 @@ paths:
           description: No such invitation in this workspace
   /api/tasks:
     get:
-      summary: List tasks for the current user
+      summary: Read a bounded task page for the current user
+      description: >-
+        Use page=1 and follow next_cursor, retaining as_of and workspace_id.
+        Pages include children and are ordered by immutable task ID descending.
+        Membership is rechecked on each request. as_of excludes later creation
+        milliseconds, not a frozen snapshot of edits, deletes or permissions.
+        Without page=1, a legacy array is returned only when the complete list
+        fits in 100 rows; larger lists fail explicitly with 409, never truncate.
+        Owned legacy tasks without a workspace remain visible with any allowed
+        workspace. Without workspace_id, all currently accessible workspaces
+        are included. Browser search/sort currently operate after full traversal.
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, enum: [1] }
+        - name: workspace_id
+          in: query
+          schema: { type: string, example: "workspaces:abc123" }
+        - name: cursor
+          in: query
+          description: Last returned task ID; requires page=1 and as_of
+          schema: { type: string, example: "tasks:abc123" }
+        - name: limit
+          in: query
+          description: Requires page=1
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - name: as_of
+          in: query
+          description: Creation cutoff in Unix milliseconds returned by the first page; retain on following pages
+          schema: { type: integer, format: int64, minimum: 1 }
       responses:
         "200":
-          description: Task list
+          description: Bounded page, or complete legacy array for at most 100 tasks; Cache-Control no-store
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [items, next_cursor, as_of]
+                    properties:
+                      items:
+                        type: array
+                        maxItems: 100
+                        items: { $ref: "#/components/schemas/Task" }
+                      next_cursor: { type: string, nullable: true }
+                      as_of: { type: integer, format: int64 }
+                  - type: array
+                    maxItems: 100
+                    items: { $ref: "#/components/schemas/Task" }
+        "400":
+          description: Invalid page, limit, typed record ID or cutoff; cursor without as_of
+        "401":
+          description: Not authenticated
+        "403":
+          description: Requested workspace unavailable to this user
+        "409":
+          description: Legacy client must opt into pagination
+        "429":
+          description: 600 task reads per user per minute exceeded; Retry-After 60
+        "503":
+          description: Task storage temporarily unavailable; do not treat as an empty list
     post:
       summary: Create a task
       requestBody:

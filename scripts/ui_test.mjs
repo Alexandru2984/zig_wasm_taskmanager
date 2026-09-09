@@ -339,13 +339,13 @@ try {
     await m.click('[data-filter="all"]');
 
     const countBeforeError = await m.evaluate(() => state.tasks.length);
-    await m.route('**/api/tasks', route => route.request().method() === 'GET'
+    await m.route('**/api/tasks?*', route => route.request().method() === 'GET'
         ? route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"Temporarily unavailable"}' })
         : route.continue());
     await m.evaluate(() => loadTasks());
     record('a refresh error preserves visible tasks and offers retry',
         await m.evaluate(n => state.tasks.length === n, countBeforeError) && await m.locator('#taskLoadError').isVisible());
-    await m.unroute('**/api/tasks');
+    await m.unroute('**/api/tasks?*');
     await m.click('#retryTasksBtn');
     await m.waitForSelector('#taskLoadError', { state: 'hidden' });
 
@@ -420,12 +420,12 @@ try {
         const privateTasks = [...state.tasks];
         const originalFetch = window.fetch;
         let finish;
-        window.fetch = path => path === '/api/tasks'
+        window.fetch = path => path.startsWith('/api/tasks?')
             ? new Promise(resolve => { finish = resolve; }) : originalFetch(path);
         try {
             const pending = loadTasks();
             showLoggedOut();
-            finish(new Response(JSON.stringify(privateTasks), { headers: { 'Content-Type': 'application/json' } }));
+            finish(new Response(JSON.stringify({ items: privateTasks, next_cursor: null, as_of: Date.now() }), { headers: { 'Content-Type': 'application/json' } }));
             await pending;
             return state.user === null && state.tasks.length === 0 &&
                 document.querySelectorAll('.task-item').length === 0;
