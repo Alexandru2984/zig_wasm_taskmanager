@@ -168,6 +168,12 @@ if [ "${RUN_UI:-0}" = 1 ]; then
     say "Browser suite"
     BASE_URL="http://127.0.0.1:$APP_PORT" node scripts/ui_test.mjs
 fi
+if [ "${RUN_QUOTAS:-0}" = 1 ]; then
+    say "Transactional task quotas, usage and synthetic mixed load"
+    BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" \
+        TEST_WORKDIR="$WORKDIR" TEST_APP_BINARY="$WORKDIR/build/bin/taskmanager" \
+        TEST_LIBRARY_DIR="$FACIL_DIR" TEST_MAIL_KEY="$MAIL_TEST_KEY" node scripts/quota_test.mjs
+fi
 if [ "${RUN_OUTBOX:-0}" = 1 ]; then
     say "Durable email regressions (local TLS SMTP fixture only)"
     BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" \

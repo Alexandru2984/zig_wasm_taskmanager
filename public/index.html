@@ -27,7 +27,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/favicon.svg">
     <link rel="manifest" href="/site.webmanifest">
-    <link rel="stylesheet" href="/style.css?v=d11a5150">
+    <link rel="stylesheet" href="/style.css?v=bd15d971">
 
     <!-- Structured data. The CSP forbids inline <script>, but this is
          application/ld+json, which is data rather than script: the parser
@@ -94,6 +94,7 @@
                         <button class="dropdown-item" role="menuitem" data-action="open-trash">
                             <span aria-hidden="true">↶</span> Task trash
                         </button>
+                        <button class="dropdown-item" role="menuitem" data-action="open-usage">Workspace usage &amp; limits</button>
                         <button class="dropdown-item" role="menuitem" data-action="open-account">
                             <span aria-hidden="true">🔐</span> Security &amp; data
                         </button>
@@ -547,6 +548,21 @@
         </div>
     </div>
 
+    <!-- Logical task storage, separate from physical VPS disk usage. -->
+    <div class="modal" id="usageModal" role="dialog" aria-modal="true" aria-labelledby="usageTitle" hidden>
+        <div class="modal-overlay" data-action="hide-modal" data-target="usageModal"></div>
+        <div class="modal-content modal-lg">
+            <button class="modal-close" data-action="hide-modal" data-target="usageModal" aria-label="Close">×</button>
+            <h2 id="usageTitle">Workspace usage &amp; limits</h2>
+            <p class="modal-desc" id="usageWorkspace"></p>
+            <p id="usageStatus" role="status" aria-live="polite" tabindex="-1"></p>
+            <ul class="panel-list" id="usageList"></ul>
+            <p class="modal-desc">Task counts include parents, subtasks, completed tasks and trash. Text is the UTF-8 size of titles, notes and tags, not physical disk usage. Database metadata, indexes, logs and backups are not included.</p>
+            <p class="modal-desc">Trash does not free capacity. Restore and non-growing edits remain available above quota. Shorten task text to reduce its usage, or contact the operator to review capacity. Nothing is deleted automatically.</p>
+            <button class="btn btn-ghost" type="button" id="refreshUsage" data-action="refresh-usage">Refresh usage</button>
+        </div>
+    </div>
+
     <!-- Task trash -->
     <div class="modal" id="trashModal" role="dialog" aria-modal="true" aria-labelledby="trashTitle" hidden>
         <div class="modal-overlay" data-action="hide-modal" data-target="trashModal"></div>
@@ -632,6 +648,6 @@
         </div>
     </div>
 
-    <script src="/app.js?v=d85adaa5"></script>
+    <script src="/app.js?v=a20aa252"></script>
 </body>
 </html>

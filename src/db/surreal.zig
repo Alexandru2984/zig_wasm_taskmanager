@@ -4,6 +4,7 @@ const config = @import("../config/config.zig");
 const validation = @import("../util/validation.zig");
 const http_client = @import("http_client.zig");
 const models = @import("../domain/models.zig");
+const task_quota = @import("../util/task_quota.zig");
 
 // Database config struct (kept for compatibility)
 const DbConfig = struct {
@@ -118,6 +119,23 @@ const taskScopeFence = actorFence ++
 ++ "\n";
 const taskFence = taskScopeFence ++
     \\IF $before.deleted_at != NONE { THROW "APP_NOT_FOUND"; };
+++ "\n";
+
+// Callers hold workspaceFence (actorFence for own legacy rows). Evaluate after
+// writes in the same transaction, including recurrence. Trash still counts;
+// equal/shrinking writes remain possible for existing overages. No cached tally.
+const taskQuotaCheck =
+    \\IF $quota_growth_count > 0 OR $quota_growth_bytes > 0 {
+    \\    LET $usage = (SELECT count() AS retained, math::sum(payload_size) AS text_bytes FROM
+    \\        (SELECT bytes::len(<bytes>string::concat(title, notes ?? '', array::join(tags ?? [], ''))) AS payload_size
+    \\         FROM tasks WHERE workspace_id = $workspace_id AND ($workspace_id != NONE OR user_id = $actor_id) TIMEOUT 2s) GROUP ALL TIMEOUT 2s)[0];
+    \\    IF $quota_growth_count > 0 AND ($usage.retained ?? 0) > $quota_tasks { THROW "APP_TASK_QUOTA"; };
+    \\    IF $quota_growth_bytes > 0 AND ($usage.text_bytes ?? 0) > $quota_bytes { THROW "APP_TEXT_QUOTA"; };
+    \\};
+++ "\n";
+const workspaceQuotaCheck =
+    \\LET $owned = (SELECT count() FROM workspaces WHERE owner_id = $actor_id GROUP ALL TIMEOUT 2s)[0].count ?? 0;
+    \\IF $owned >= $quota_workspaces { THROW "APP_WORKSPACE_QUOTA"; };
 ++ "\n";
 
 const MigrationRow = struct {
@@ -669,6 +687,7 @@ const WorkspaceListRow = struct {
 };
 
 pub fn ensurePersonalWorkspace(allocator: std.mem.Allocator, user_id: []const u8, user_name: []const u8) ![]const u8 {
+    const limits = try task_quota.get();
     const existing = try queryWithVars(allocator,
         \\SELECT workspace_id FROM workspace_members WHERE user_id = $user_id LIMIT 1;
     , .{ .user_id = rec(user_id) });
@@ -694,6 +713,7 @@ pub fn ensurePersonalWorkspace(allocator: std.mem.Allocator, user_id: []const u8
     const initialized = try queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ actorFence ++
         \\LET $existing = (SELECT workspace_id FROM workspace_members WHERE user_id = $actor_id LIMIT 1);
         \\LET $selected = IF array::len($existing) > 0 { $existing; } ELSE {
+    ++ "\n" ++ workspaceQuotaCheck ++
         \\    LET $created = (CREATE workspaces SET name = $name, owner_id = $actor_id, created_at = time::now());
         \\    CREATE workspace_members SET workspace_id = $created[0].id, user_id = $actor_id, role = "owner", created_at = time::now();
         \\    UPDATE tasks SET workspace_id = $created[0].id, version = (version ?? 0) + 1 WHERE user_id = $actor_id AND workspace_id = NONE;
@@ -701,7 +721,7 @@ pub fn ensurePersonalWorkspace(allocator: std.mem.Allocator, user_id: []const u8
         \\};
         \\RETURN $selected;
         \\COMMIT TRANSACTION;
-    , .{ .actor_id = rec(user_id), .name = workspace_name });
+    , .{ .actor_id = rec(user_id), .name = workspace_name, .quota_workspaces = limits.workspaces });
     defer allocator.free(initialized);
 
     const parsed_initialized = try std.json.parseFromSlice([]models.SurrealResponse(ExistingRow), allocator, initialized, .{ .ignore_unknown_fields = true });
@@ -712,12 +732,29 @@ pub fn ensurePersonalWorkspace(allocator: std.mem.Allocator, user_id: []const u8
 }
 
 pub fn createWorkspace(allocator: std.mem.Allocator, owner_id: []const u8, name: []const u8) ![]u8 {
-    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ actorFence ++
+    const limits = try task_quota.get();
+    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ actorFence ++ workspaceQuotaCheck ++
         \\LET $created = (CREATE workspaces SET name = $name, owner_id = $actor_id, created_at = time::now());
         \\CREATE workspace_members SET workspace_id = $created[0].id, user_id = $actor_id, role = "owner", created_at = time::now();
         \\RETURN $created;
         \\COMMIT TRANSACTION;
-    , .{ .name = name, .actor_id = rec(owner_id) });
+    , .{ .name = name, .actor_id = rec(owner_id), .quota_workspaces = limits.workspaces });
+}
+
+pub fn getWorkspaceUsage(a: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8) ![]u8 {
+    return queryWithVars(a,
+        \\LET $role = (SELECT VALUE role FROM workspace_members WHERE user_id = $user_id AND workspace_id = $workspace_id)[0];
+        \\IF $role = NONE { THROW "APP_FORBIDDEN"; };
+        \\LET $scope_usage = (SELECT count() AS retained, math::sum(trashed) AS trash, math::sum(payload_size) AS text_bytes FROM
+        \\    (SELECT (IF deleted_at = NONE { 0 } ELSE { 1 }) AS trashed, bytes::len(<bytes>string::concat(title, notes ?? '', array::join(tags ?? [], ''))) AS payload_size
+        \\     FROM tasks WHERE workspace_id = $workspace_id TIMEOUT 2s) GROUP ALL TIMEOUT 2s)[0];
+        \\LET $legacy_usage = (SELECT count() AS retained, math::sum(trashed) AS trash, math::sum(payload_size) AS text_bytes FROM
+        \\    (SELECT (IF deleted_at = NONE { 0 } ELSE { 1 }) AS trashed, bytes::len(<bytes>string::concat(title, notes ?? '', array::join(tags ?? [], ''))) AS payload_size
+        \\     FROM tasks WHERE workspace_id = NONE AND user_id = $user_id TIMEOUT 2s) GROUP ALL TIMEOUT 2s)[0];
+        \\LET $owned = (SELECT count() FROM workspaces WHERE owner_id = $user_id GROUP ALL TIMEOUT 2s)[0].count ?? 0;
+        \\RETURN [{ retained: $scope_usage.retained ?? 0, trash: $scope_usage.trash ?? 0, text_bytes: $scope_usage.text_bytes ?? 0,
+        \\    legacy_retained: $legacy_usage.retained ?? 0, legacy_trash: $legacy_usage.trash ?? 0, legacy_text_bytes: $legacy_usage.text_bytes ?? 0, owned_workspaces: $owned }];
+    , .{ .user_id = rec(user_id), .workspace_id = rec(workspace_id) });
 }
 
 pub fn getWorkspaceById(allocator: std.mem.Allocator, workspace_id: []const u8) ![]u8 {
@@ -942,6 +979,7 @@ pub const NewTask = struct {
 };
 
 pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
+    const limits = try task_quota.get();
     // Optional columns are appended only when supplied, so an ordinary task is
     // not written with NONE assignments it never asked for. Every fragment
     // below is a compile-time string; only values are bound.
@@ -967,9 +1005,10 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
         \\}};
         \\IF $has_assignee AND array::len(SELECT id FROM workspace_members WHERE user_id = $assignee_id AND workspace_id = $workspace_id) != 1 {{ THROW "APP_INVALID"; }};
         \\LET $created = (CREATE tasks SET {s});
+        \\{s}
         \\RETURN $created;
         \\COMMIT TRANSACTION;
-    , .{ actorFence, workspaceFence, workspaceRole, sets.items });
+    , .{ actorFence, workspaceFence, workspaceRole, sets.items, taskQuotaCheck });
     defer allocator.free(sql);
 
     var due_owned: ?[]u8 = null;
@@ -998,6 +1037,10 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
         .assignee_id = rec(task.assignee_id orelse "users:unset"),
         .has_parent = task.parent_id != null,
         .has_assignee = task.assignee_id != null,
+        .quota_tasks = limits.tasks,
+        .quota_bytes = limits.text_bytes,
+        .quota_growth_count = @as(i64, 1),
+        .quota_growth_bytes = task_quota.textBytes(task.title, task.notes, task.tags),
     });
 }
 
@@ -1134,6 +1177,7 @@ pub const TaskPatch = struct {
 };
 
 pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, actor_id: []const u8, patch: TaskPatch) ![]u8 {
+    const limits = try task_quota.get();
     // Read a snapshot to calculate calendar-aware recurrence in Zig. The
     // transaction below rechecks its version and writes the same row, so
     // concurrent mutations conflict at commit under snapshot isolation.
@@ -1194,16 +1238,20 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, actor_id: [
         \\IF $has_assignee AND array::len(SELECT id FROM workspace_members WHERE user_id = $assignee_id AND workspace_id = $workspace_id) != 1 {{ THROW "APP_INVALID"; }};
         \\LET $changed = (UPDATE $record_id SET {s} RETURN AFTER);
         \\LET $task = $changed[0];
-        \\IF $task.completed AND !$before.completed AND !$before.recurrence_spawned AND $next_due != NONE {{
+        \\LET $spawn = $task.completed AND !$before.completed AND !$before.recurrence_spawned AND $next_due != NONE;
+        \\IF $spawn {{
         \\    CREATE tasks SET user_id = $task.user_id, workspace_id = $task.workspace_id, title = $task.title,
         \\        priority = $task.priority, notes = $task.notes, tags = $task.tags, recurrence = $task.recurrence,
         \\        assignee_id = $task.assignee_id, parent_id = $task.parent_id,
         \\        due_date = <datetime>$next_due, status = "todo", completed = false;
         \\    UPDATE $record_id SET recurrence_spawned = true;
         \\}};
+        \\LET $quota_growth_count = IF $spawn {{ 1 }} ELSE {{ 0 }};
+        \\LET $quota_growth_bytes = $new_text_bytes - $old_text_bytes + IF $spawn {{ $new_text_bytes }} ELSE {{ 0 }};
+        \\{s}
         \\RETURN $changed;
         \\COMMIT TRANSACTION;
-    , .{ taskFence, sets.items });
+    , .{ taskFence, sets.items, taskQuotaCheck });
     defer allocator.free(sql);
 
     // due_date is normalised to a form SurrealDB accepts before binding.
@@ -1236,6 +1284,10 @@ pub fn updateTask(allocator: std.mem.Allocator, task_id: []const u8, actor_id: [
         .expected_version = patch.expected_version,
         .expected_completed = before.completed,
         .next_due = next,
+        .quota_tasks = limits.tasks,
+        .quota_bytes = limits.text_bytes,
+        .old_text_bytes = task_quota.textBytes(before.title, before.notes, before.tags),
+        .new_text_bytes = task_quota.textBytes(patch.title orelse before.title, patch.notes orelse before.notes, patch.tags orelse before.tags),
     });
 }
 

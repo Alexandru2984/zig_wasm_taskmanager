@@ -2059,4 +2059,5 @@ kbd {
 .task-search-results li { display: block; overflow-wrap: anywhere; }
 .task-search-results p { margin-block: .35rem; }
 .task-search-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; font: inherit; }
+#usageList li { display: block; overflow-wrap: anywhere; }
 @media (max-width: 480px) { .task-search-filters { grid-template-columns: minmax(0, 1fr); } }

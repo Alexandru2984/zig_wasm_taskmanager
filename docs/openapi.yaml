@@ -224,6 +224,61 @@ paths:
           description: Created workspace
         "401":
           description: Not authenticated
+        "409":
+          description: Concurrent state change; review before retrying
+        "422":
+          description: Owned workspace quota reached; use an existing workspace or contact the operator
+  /api/workspaces/{id}/usage:
+    get:
+      summary: Read current logical task usage and deployment-wide limits
+      description: >-
+        Requires current membership, including viewer. Retained tasks include
+        children, completed tasks and trash. Text is UTF-8 bytes of titles,
+        notes and tags, not physical database storage. Legacy counts cover
+        only the current user's unattached tasks, as a separate quota scope.
+        Owned workspace count belongs to the current user, not the selected
+        workspace's owner. No titles, IDs of tasks or member identities are
+        returned. No pagination; private response is no-store.
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: Authorized usage and positive operator-configured limits
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workspace_id, usage, limits]
+                properties:
+                  workspace_id: { type: string }
+                  usage:
+                    type: object
+                    required: [retained, trash, text_bytes, legacy_retained, legacy_trash, legacy_text_bytes, owned_workspaces]
+                    properties:
+                      retained: { type: integer, format: int64, minimum: 0 }
+                      trash: { type: integer, format: int64, minimum: 0 }
+                      text_bytes: { type: integer, format: int64, minimum: 0 }
+                      legacy_retained: { type: integer, format: int64, minimum: 0 }
+                      legacy_trash: { type: integer, format: int64, minimum: 0 }
+                      legacy_text_bytes: { type: integer, format: int64, minimum: 0 }
+                      owned_workspaces: { type: integer, format: int64, minimum: 0 }
+                  limits:
+                    type: object
+                    required: [tasks, text_bytes, workspaces]
+                    properties:
+                      tasks: { type: integer, minimum: 1, maximum: 1000000, default: 10000 }
+                      text_bytes: { type: integer, format: int64, minimum: 1, maximum: 10737418240, default: 52428800 }
+                      workspaces: { type: integer, minimum: 1, maximum: 1000, default: 25 }
+        "400":
+          description: Invalid typed workspace ID
+        "401":
+          description: Not authenticated
+        "403":
+          description: Workspace unavailable to this user
+        "429":
+          description: Shared search/usage budget of 120 reads per user per minute exceeded; Retry-After 60
+        "503":
+          description: Usage unavailable; do not substitute zero
   /api/workspaces/invites/accept:
     post:
       summary: Accept a workspace invite for the authenticated user
@@ -407,6 +462,9 @@ paths:
           description: Task storage temporarily unavailable; do not treat as an empty list
     post:
       summary: Create a task
+      description: >-
+        Transactionally enforces the workspace's retained-task and UTF-8 text
+        budgets, including trash and subtasks. Quota denial leaves no task.
       requestBody:
         required: true
         content:
@@ -418,6 +476,10 @@ paths:
           description: Created task
         "401":
           description: Not authenticated
+        "409":
+          description: Concurrent state change; review before retrying
+        "422":
+          description: Task or text quota reached; retained trash counts and no automatic purge occurs
   /api/tasks/search:
     post:
       summary: Read one filtered and sorted page across accessible workspaces
@@ -494,6 +556,10 @@ paths:
         alone. With no body, completion is toggled. If-Match is required for
         both forms; use the tag from the task read, not a newly fetched tag
         silently attached to an old draft. A failed condition does not mutate.
+        Growing text and recurring successors obey logical quotas. Quota
+        denial rolls back the update, version and successor together. Existing
+        overages still allow shrinking text and non-growing edits. Explicitly
+        disable recurrence to complete without creating another task.
       parameters:
         - $ref: "#/components/parameters/TaskId"
         - $ref: "#/components/parameters/TaskVersion"
@@ -514,6 +580,8 @@ paths:
           description: Transaction conflict; review current state before retrying
         "412":
           description: Task changed since the supplied version
+        "422":
+          description: Text growth or recurring successor exceeds quota; preserve the unsaved draft
         "428":
           description: If-Match required; reload old browser tabs
     delete:

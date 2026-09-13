@@ -46,6 +46,7 @@ const state = {
 const TASKS_PER_PAGE = 50;
 let taskLoadGeneration = 0;
 let taskLoadAbort = null;
+let usageGeneration = 0, usageAbort = null;
 const taskDrafts = new Map();
 const pendingTaskWrites = new Set();
 
@@ -141,6 +142,7 @@ async function api(path, { method = 'GET', body = null, quiet = false, signal, v
     // Do not publish an older multi-page read over an in-flight local write.
     const taskWrite = method !== 'GET' && path !== '/api/tasks/search' && /^\/api\/(tasks|trash)(\/|$)/.test(path);
     if (taskWrite) resetTaskSearch(true);
+    if (taskWrite) resetUsage();
     if (taskWrite && taskLoadAbort) cancelTaskLoad(true);
     const options = { method, credentials: 'include', headers: {}, signal };
     if (conditional) {
@@ -170,6 +172,7 @@ async function api(path, { method = 'GET', body = null, quiet = false, signal, v
     // response. Fence that scan before the caller applies the write result.
     if (taskWrite && taskLoadAbort && state.user === requestUser) cancelTaskLoad(true);
     if (taskWrite && state.user === requestUser) resetTaskSearch(true);
+    if (taskWrite && state.user === requestUser) resetUsage();
 
     let data = null;
     try {
@@ -272,6 +275,7 @@ async function checkAuth() {
 }
 
 function showLoggedIn(user) {
+    if (state.user !== user) resetUsage(true);
     if (state.user !== user) resetTaskSearch(true);
     if (state.user?.id !== user.id) {
         cancelTaskLoad();
@@ -327,6 +331,7 @@ function renderVerifiedBadge(user) {
 }
 
 function showLoggedOut() {
+    resetUsage(true);
     resetTaskSearch(true);
     cancelTaskLoad();
     taskDrafts.clear();
@@ -843,6 +848,7 @@ function renderWorkspaceBar() {
 
 function switchWorkspace(id) {
     if ([...taskDrafts.values()].some(draft => draft.dirty) && !window.confirm('Discard unsaved task edits and switch workspace?')) { renderWorkspaceBar(); return; }
+    resetUsage(true);
     resetTaskSearch(true);
     taskDrafts.clear();
     cancelTaskLoad();
@@ -883,6 +889,51 @@ async function handleCreateWorkspace(e) {
 }
 
 // ============ TASKS ============
+
+function resetUsage(close = false) {
+    usageGeneration++; usageAbort?.abort(); usageAbort = null;
+    $('usageList').replaceChildren(); $('usageWorkspace').textContent = '';
+    $('usageStatus').textContent = 'Refresh to read current usage.';
+    $('refreshUsage').disabled = false;
+    if (close && !$('usageModal').hidden) hideModal('usageModal');
+}
+
+async function openUsage() {
+    if (!isLoggedIn() || !state.currentWorkspaceId) return;
+    closeDropdown(); showModal('usageModal'); await loadUsage();
+}
+
+async function loadUsage() {
+    resetUsage();
+    if (!isLoggedIn() || !state.currentWorkspaceId || $('usageModal').hidden) return;
+    const generation = usageGeneration, user = state.user, workspace = state.currentWorkspaceId;
+    const controller = usageAbort = new AbortController();
+    $('usageStatus').textContent = 'Reading usage…'; $('refreshUsage').disabled = true;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let result;
+    try { result = await api(`/api/workspaces/${encodeURIComponent(workspace)}/usage`, { quiet: true, signal: controller.signal }); }
+    finally { clearTimeout(timeout); }
+    if (generation !== usageGeneration || state.user !== user || state.currentWorkspaceId !== workspace || $('usageModal').hidden) return;
+    usageAbort = null; $('refreshUsage').disabled = false;
+    const { ok, data } = result, usage = data?.usage, limits = data?.limits;
+    if (!ok || data?.workspace_id !== workspace || !usage || !limits ||
+        ['retained','trash','text_bytes','legacy_retained','legacy_trash','legacy_text_bytes','owned_workspaces'].some(key => !Number.isSafeInteger(usage[key]) || usage[key] < 0) ||
+        ['tasks','text_bytes','workspaces'].some(key => !Number.isSafeInteger(limits[key]) || limits[key] <= 0)) {
+        $('usageStatus').textContent = data?.error || 'Usage unavailable. Refresh to retry; no zero usage is assumed.'; return;
+    }
+    $('usageWorkspace').textContent = state.workspaces.find(ws => ws.id === workspace)?.name || 'Selected workspace';
+    const bytes = value => `${value.toLocaleString()} bytes (${(value / 1048576).toFixed(2)} MiB)`;
+    for (const text of [
+        `Retained tasks: ${usage.retained.toLocaleString()} / ${limits.tasks.toLocaleString()} — ${usage.trash.toLocaleString()} in trash`,
+        `Task text: ${bytes(usage.text_bytes)} / ${bytes(limits.text_bytes)}`,
+        `Your owned workspaces: ${usage.owned_workspaces.toLocaleString()} / ${limits.workspaces.toLocaleString()}`,
+        ...(usage.legacy_retained ? [`Your unattached legacy tasks: ${usage.legacy_retained.toLocaleString()} / ${limits.tasks.toLocaleString()} (${usage.legacy_trash} in trash), text ${bytes(usage.legacy_text_bytes)} / ${bytes(limits.text_bytes)}. This is a separate scope, not counted again in the workspace.`] : []),
+    ]) { const li = document.createElement('li'); li.textContent = text; $('usageList').appendChild(li); }
+    const full = usage.retained >= limits.tasks || usage.text_bytes >= limits.text_bytes;
+    const near = usage.retained >= limits.tasks * .8 || usage.text_bytes >= limits.text_bytes * .8;
+    $('usageStatus').textContent = full ? 'At or above a workspace limit. Growth may be refused; existing data is preserved.' : near ? 'Approaching a workspace limit (80% or more).' : 'Current usage is below the workspace limits.';
+    $('usageStatus').focus();
+}
 
 // Global search keeps ONE server page and positional tokens in tab memory.
 // It never replaces the complete workspace list or its counts/child progress.
@@ -2857,6 +2908,7 @@ function showModal(id) {
 function hideModal(id) {
     const modal = $(id);
     if (!modal) return;
+    if (id === 'usageModal') resetUsage();
     if (id === 'taskSearchModal') {
         resetTaskSearch();
         $('remoteSearchWorkspace').replaceChildren(new Option('All accessible workspaces', ''));
@@ -3200,6 +3252,8 @@ function bindActions() {
             case 'open-workspace': openWorkspacePanel(); break;
             case 'open-activity': openActivityPanel(); break;
             case 'open-trash': openTrash(); break;
+            case 'open-usage': openUsage(); break;
+            case 'refresh-usage': loadUsage(); break;
             case 'refresh-trash': loadTrash(); break;
             case 'more-trash': loadTrash(true); break;
             case 'restore-task': restoreTrashedTask(el.dataset.id, el, el.dataset.batch); break;

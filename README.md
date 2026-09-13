@@ -34,6 +34,11 @@ systemd-sandboxed VPS deployment.
 - Conditional task edits/deletion and two-tab conflict recovery: retain an
   unsaved draft, review the current record, then choose which fields to keep.
   [Task versions](docs/TASK-VERSIONS.md) document the required `If-Match` contract.
+- Global server-side task finder with filtered/sorted pages across accessible
+  workspaces, independent of the main view's complete dataset.
+- Transactional task/text and owned-workspace quotas, plus an accessible
+  usage panel. Trash remains counted; existing data is preserved when limits
+  are lowered. These are [logical budgets](docs/TASK-QUOTAS.md), not disk quotas.
 - Keyboard shortcuts, and a CSV export that runs in the browser.
 - Multi-workspace task tenancy with owner/admin/member/viewer roles, member
   listing, and email invite acceptance.
@@ -121,7 +126,7 @@ See [durable email operations](docs/DURABLE-EMAIL.md) before upgrading an existi
 ./scripts/integration_test.sh # API against a throwaway SurrealDB
 npm ci
 node scripts/mail_ops_test.mjs
-RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_VERSIONS=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
+RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_VERSIONS=1 RUN_SEARCH=1 RUN_QUOTAS=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
 ```
 
 All three run in CI on every push.
@@ -174,6 +179,8 @@ Main endpoint groups:
 - `/api/profile*`: profile and password changes
 - `/api/workspaces`: workspace listing and creation; members (list, change
   role, remove) and invitations (create, list, revoke, accept)
+- `GET /api/workspaces/{id}/usage`: authorized task/trash/text usage and
+  operator-configured limits; quota-denied writes return 422
 - `/api/tasks*`: task CRUD with priority, due date, notes, tags, board status,
   recurrence, assignee and parent; `PUT` applies a partial update, or toggles
   completion when the body is empty; use `GET /api/tasks?page=1` and follow

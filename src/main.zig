@@ -27,6 +27,7 @@ test {
     _ = @import("util/task_page.zig");
     _ = @import("util/task_version.zig");
     _ = @import("util/task_search.zig");
+    _ = @import("util/task_quota.zig");
     _ = @import("db/http_client.zig");
     _ = @import("services/auth.zig");
     _ = @import("services/mail_payload.zig");
@@ -42,6 +43,8 @@ pub fn main() !void {
     defer app.deinit(); // Clean shutdown with leak detection
 
     allocator = app.allocator();
+    // Misconfigured quotas must fail startup, never become unlimited storage.
+    _ = try @import("util/task_quota.zig").get();
 
     // Apply the configured log level (defaults to info) before anything noisy.
     if (config.get("LOG_LEVEL")) |lvl| log.setLevelFromString(lvl);
@@ -497,6 +500,21 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         const rest = path["/api/workspaces/".len..];
         const MembersSuffix = "/members";
         const InvitesSuffix = "/invites";
+
+        if (std.mem.endsWith(u8, rest, "/usage")) {
+            const workspace_id = http.decodePathSegment(req_alloc, rest[0 .. rest.len - "/usage".len]) orelse "";
+            if (!@import("db/http_client.zig").validRecordIdFor(workspace_id, "workspaces")) {
+                try http.jsonError(r, 400, "Invalid workspace ID");
+                return;
+            }
+            if (!std.mem.eql(u8, req_method, "GET")) {
+                r.setHeader("Allow", "GET") catch {};
+                try http.jsonError(r, 405, "Method not allowed");
+                return;
+            }
+            try workspaces_handler.usage(r, workspace_id, req_alloc);
+            return;
+        }
 
         if (std.mem.endsWith(u8, rest, MembersSuffix)) {
             const workspace_id = http.decodePathSegment(req_alloc, rest[0 .. rest.len - MembersSuffix.len]) orelse {

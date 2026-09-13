@@ -9,9 +9,10 @@ independent of the full workspace view. The latter still loads the complete
 workspace; its older search/scale follow-ups below are historical context.
 
 D2a follow-up: [conditional task writes and conflict recovery](TASK-VERSIONS.md)
-are now implemented. The remaining server-side filtering/sorting, storage
-quotas and concurrent-capacity work below is still open; the older binary
-rollback guidance must also account for task-version invalidation.
+are now implemented; older binary rollback guidance must account for version
+invalidation. D2c adds [logical quotas, usage and a mixed-load fixture](TASK-QUOTAS.md).
+The older D2 follow-ups below are historical; main-view memory bounding,
+physical/global storage control and broader capacity profiling remain open.
 
 ## API and compatibility
 

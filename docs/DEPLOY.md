@@ -72,6 +72,15 @@ From migration 013 onward, provision and retain `MAIL_OUTBOX_KEY` in the runtime
 config before canary/promotion. See [durable email](DURABLE-EMAIL.md) for private
 key recovery, disabled-worker canaries and rollback implications.
 
+Task quotas require no migration. [TASK-QUOTAS.md](TASK-QUOTAS.md) defines
+`WORKSPACE_TASK_LIMIT` (default 10,000), `WORKSPACE_TEXT_BYTES_LIMIT` (52,428,800)
+and `OWNED_WORKSPACE_LIMIT` (25). All writers must use identical positive values;
+invalid values refuse startup. Take a private config copy/export and inspect
+aggregate usage before lowering limits; existing rows are preserved but growth
+may be refused. Trash counts and no purge is introduced. Reverting to a
+pre-quota binary removes enforcement and the usage API; publish matched assets
+and never restore a stale DB snapshot over newer writes as a routine rollback.
+
 ## Stage, migrate, promote
 
 Migration 014 changes task DELETE to recoverable trash. Read

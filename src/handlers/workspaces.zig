@@ -86,6 +86,32 @@ pub fn createWorkspace(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     });
 }
 
+pub fn usage(r: zap.Request, workspace_id: []const u8, a: std.mem.Allocator) !void {
+    const user = http.getCurrentUserId(a, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    if (@import("../util/rate_limiter.zig").task_search_limiter) |*limiter| {
+        if (!limiter.isAllowed(user)) {
+            r.setHeader("Retry-After", "60") catch {};
+            try http.jsonError(r, 429, "Too many usage reads. Please wait 1 minute.");
+            return;
+        }
+    }
+    const result = db.impl.getWorkspaceUsage(a, user, workspace_id) catch |err| {
+        try http.jsonError(r, if (err == error.PermissionDenied) 403 else 503, if (err == error.PermissionDenied) "Workspace unavailable" else "Usage is temporarily unavailable. Please retry.");
+        return;
+    };
+    const Usage = struct { retained: i64, trash: i64, text_bytes: i64, legacy_retained: i64, legacy_trash: i64, legacy_text_bytes: i64, owned_workspaces: i64 };
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(Usage), a, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (parsed.value.len == 0 or parsed.value[0].result.len != 1) {
+        try http.jsonError(r, 503, "Usage is temporarily unavailable.");
+        return;
+    }
+    try http.jsonSuccess(r, .{ .workspace_id = workspace_id, .usage = parsed.value[0].result[0], .limits = try @import("../util/task_quota.zig").get() });
+}
+
 pub fn listMembers(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem.Allocator) !void {
     const user_id = http.getCurrentUserId(req_alloc, r) orelse {
         try http.jsonError(r, 401, "Not authenticated");

@@ -5,6 +5,10 @@ workspaces, including subtasks and tasks not loaded in the main browser list.
 It adds one-page-at-a-time discovery, not replacement of the main workspace
 loader, storage quotas, full-text indexing or a finished capacity programme.
 
+Follow-up D2c adds [logical quotas, usage and a four-client mixed-load fixture](TASK-QUOTAS.md).
+Older quota/load follow-ups below are historical; main-view loading replacement,
+physical/global storage control and broader capacity profiling remain open.
+
 ## Product workflow
 
 The signed-in navigation opens a keyboard-accessible finder. Choose text,

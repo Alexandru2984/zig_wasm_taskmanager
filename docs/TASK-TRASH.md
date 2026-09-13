@@ -8,6 +8,10 @@ Follow-up D2a adds a technical `version` counter: deletion and restoration
 advance it, while the original business metadata/timestamps remain preserved.
 Task DELETE now requires `If-Match`; see [task versions](TASK-VERSIONS.md).
 
+Follow-up D2c adds [logical task/text quotas](TASK-QUOTAS.md), including trash.
+Restoring never consumes capacity twice. A permanent purge/retention workflow
+remains separate work; neither export nor moving a task to trash frees a slot.
+
 ## Behavior
 
 - Migration `014_task_trash` adds optional `deleted_at` and `delete_batch`
