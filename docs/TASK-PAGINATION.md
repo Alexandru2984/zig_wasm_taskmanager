@@ -1,18 +1,22 @@
 # Task pagination — P4 / D1
 
+D2d supersedes the historical full-workspace browser traversal below with a
+[bounded main view](TASK-VIEW.md), global server totals, lazy child pages and
+an explicitly complete CSV traversal. The GET pagination contract remains.
+
 Verified 2026-09-09. This is the bounded first part of P4, not completion of the whole scale plan.
 It replaces the silent 2,000-row read limit without pretending that a partial
 browser list is a complete workspace.
 
 D2b follow-up: [global server search](TASK-SEARCH.md) adds filtered/sorted pages
-independent of the full workspace view. The latter still loads the complete
-workspace; its older search/scale follow-ups below are historical context.
+independent of the then-full workspace view. Its older search/scale follow-ups
+below are historical context; D2d replaces that browser traversal.
 
 D2a follow-up: [conditional task writes and conflict recovery](TASK-VERSIONS.md)
 are now implemented; older binary rollback guidance must account for version
 invalidation. D2c adds [logical quotas, usage and a mixed-load fixture](TASK-QUOTAS.md).
-The older D2 follow-ups below are historical; main-view memory bounding,
-physical/global storage control and broader capacity profiling remain open.
+The older D2 follow-ups below are historical; physical/global storage control
+and broader capacity profiling remain open.
 
 ## API and compatibility
 

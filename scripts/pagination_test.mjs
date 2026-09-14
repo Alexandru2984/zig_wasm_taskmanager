@@ -122,48 +122,53 @@ if (process.env.RUN_UI === '1') {
         await page.addInitScript(ws=>localStorage.setItem('workspaceId',ws),workspace);
         const browserStart = performance.now();
         await page.goto(base.origin,{waitUntil:'networkidle'});
-        await page.waitForFunction(expected=>state.tasks.length === expected && !state.loading,total+1,{timeout:60000});
-        console.log(`Browser full workspace load: ${Math.round(performance.now()-browserStart)} ms (320px, ${total+1} tasks)`);
-        await check('browser loads all tasks but renders at most 50 parents with phone-safe page controls',async()=>{
+        const settled=()=>page.waitForFunction(()=>!state.loading&&!mainView.timer&&!!mainView.data);
+        await settled();
+        console.log(`Browser first bounded page: ${Math.round(performance.now()-browserStart)} ms (320px, ${total+1} source tasks, 50 retained parents)`);
+        await check('browser retains only 50 parents while server counts cover all 2000-plus roots',async()=>{
+            assert.equal(await page.evaluate(()=>state.tasks.length),50);
             assert.equal(await page.locator('.task-item').count(),50);
             assert.equal(await page.locator('#totalCount').textContent(),String(parents+1));
             assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
-            await page.click('#tasksNext');assert.match(await page.locator('#taskPageStatus').textContent(),/^51–100/);
+            await page.click('#tasksNext');await settled();assert.match(await page.locator('#taskPageStatus').textContent(),/^51–100/);
             assert.equal(await page.evaluate(()=>document.activeElement.id),'taskPageStatus');
         });
         await check('search, tags, saved views and board include results outside the first page',async()=>{
-            await page.fill('#searchInput','needle beyond old limit');assert.equal(await page.locator('.task-item').count(),1);
+            await page.fill('#searchInput','needle beyond old limit');await settled();assert.equal(await page.locator('.task-item').count(),1);
             assert.ok((await page.locator('.task-item').textContent()).includes('Fixture 02001'));
-            await page.click('[data-view="board"]');assert.equal(await page.locator('.board-card').count(),1);
-            await page.fill('#searchInput','');assert.equal(await page.locator('.board-card').count(),50);
-            await page.click('[data-view="list"]');
-            await page.locator('#tagChips [data-tag="far-tag"]').click();assert.equal(await page.locator('.task-item').count(),1);
-            await page.locator('#tagChips [data-tag="far-tag"]').click();
+            await page.click('[data-view="board"]');await settled();assert.equal(await page.locator('.board-card').count(),1);
+            await page.fill('#searchInput','');await settled();assert.equal(await page.locator('.board-card').count(),50);
+            await page.click('[data-view="list"]');await settled();
+            await page.locator('#tagChips [data-tag="far-tag"]').click();await settled();assert.equal(await page.locator('.task-item').count(),1);
+            await page.locator('#tagChips [data-tag="far-tag"]').click();await settled();
             await page.evaluate(()=>{state.savedViews.push({id:'paging',name:'Paging view',search:'needle beyond old limit',filter:'all',tagFilter:null,sort:'title',view:'list'});renderTasks();});
             await page.locator('.saved-view-panel > summary').click();
-            await page.selectOption('#savedViews','paging');assert.equal(await page.locator('.task-item').count(),1);
-            await page.fill('#searchInput','');
+            await page.selectOption('#savedViews','paging');await settled();assert.equal(await page.locator('.task-item').count(),1);
+            await page.fill('#searchInput','');await settled();
         });
         await check('child paging retains complete progress and makes the final child reachable',async()=>{
-            await page.fill('#searchInput','Fixture 00000');assert.equal(await page.locator('.subtask').count(),50);
+            await page.fill('#searchInput','Fixture 00000');await settled();
+            assert.equal(await page.locator('.subtask').count(),0);
+            await page.locator('[data-act="show-subtasks"]').click();await page.waitForFunction(()=>mainView.child&&!mainView.child.busy);
+            assert.equal(await page.locator('.subtask').count(),50);
             assert.ok((await page.locator('.task-content').textContent()).includes('/55'));
-            await page.getByRole('button',{name:'Next subtasks',exact:true}).click();assert.equal(await page.locator('.subtask').count(),5);
+            await page.getByRole('button',{name:'Next subtasks',exact:true}).click();await page.waitForFunction(()=>!mainView.child.busy);assert.equal(await page.locator('.subtask').count(),5);
             assert.ok(await page.evaluate(()=>document.activeElement.hasAttribute('data-parent-page')));
-            await page.fill('#searchInput','');
+            await page.fill('#searchInput','');await settled();
         });
-        await check('partial network failure never publishes an incomplete list; explicit retry succeeds',async()=>{
+        await check('page failure preserves the previous bounded page and explicit retry succeeds',async()=>{
             let calls = 0;
-            await page.route('**/api/tasks?*',route=>++calls === 2 ? route.fulfill({status:503,contentType:'application/json',body:'{"error":"fixture failure"}'}) : route.continue());
-            await page.evaluate(()=>loadTasks());assert.equal(calls,2);
-            assert.equal(await page.evaluate(()=>state.tasks.length),total+1);
+            await page.route('**/api/tasks/view',route=>{calls++;return route.fulfill({status:503,contentType:'application/json',body:'{"error":"fixture failure"}'});});
+            await page.evaluate(()=>loadTasks());assert.equal(calls,1);
+            assert.equal(await page.evaluate(()=>state.tasks.length),50);
             assert.ok(await page.locator('#taskLoadError').isVisible());
-            await page.unroute('**/api/tasks?*');await page.click('#retryTasksBtn');
+            await page.unroute('**/api/tasks/view');await page.click('#retryTasksBtn');
             await page.waitForFunction(()=>!state.loading && document.getElementById('taskLoadError').classList.contains('hidden'),null,{timeout:60000});
         });
         await check('late workspace responses cannot replace the newly selected workspace',async()=>{
             assert.ok(await page.evaluate(async other=>{
                 const original = window.fetch;let finish;
-                window.fetch=(path,options)=>path.startsWith('/api/tasks?') ? new Promise(resolve=>{finish=resolve;}) : original(path,options);
+                window.fetch=(path,options)=>path==='/api/tasks/view' ? new Promise(resolve=>{finish=resolve;}) : original(path,options);
                 const pending=loadTasks(); const complete=finish;
                 window.fetch=original;
                 await switchWorkspace(other);
@@ -188,7 +193,7 @@ if (process.env.RUN_UI === '1') {
                 try {
                     const old=loadTasks(), finishOld=finish;
                     const fresh=loadTasks(), finishFresh=finish;
-                    const response=items=>new Response(JSON.stringify({items,next_cursor:null,as_of:Date.now()}),{headers:{'Content-Type':'application/json'}});
+                    const response=items=>new Response(JSON.stringify({...mainView.data,items,next_cursor:null,as_of:Date.now()}),{headers:{'Content-Type':'application/json'}});
                     finishFresh(response(before));await fresh;finishOld(response([]));await old;
                     return state.tasks.length===before.length && !state.loading;
                 } finally {window.fetch=original;}
@@ -208,11 +213,11 @@ if (process.env.RUN_UI === '1') {
             }));
         });
         await check('denied refresh clears retained private tasks and is not reported as an empty workspace',async()=>{
-            await page.route('**/api/tasks?*',route=>route.fulfill({status:403,contentType:'application/json',body:'{"error":"Workspace unavailable"}'}));
+            await page.route('**/api/tasks/view',route=>route.fulfill({status:403,contentType:'application/json',body:'{"error":"Workspace unavailable"}'}));
             await page.evaluate(()=>loadTasks());assert.equal(await page.evaluate(()=>state.tasks.length),0);
             assert.equal(await page.locator('#emptyTitle').textContent(),'Tasks not loaded');
             assert.ok(await page.locator('#taskLoadError').isVisible());
-            await page.unroute('**/api/tasks?*');
+            await page.unroute('**/api/tasks/view');
         });
         await check('pagination browser has no uncaught errors',async()=>assert.deepEqual(errors,[]));
     } finally {await browser.close();}

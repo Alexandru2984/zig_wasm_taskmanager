@@ -20,9 +20,10 @@ systemd-sandboxed VPS deployment.
 - Full task editing: title, notes, tags, priority, due date, assignee and
   recurrence, edited inline; plus search across titles/notes/tags, filters
   (active, done, overdue, high priority) and five sort orders.
-- Cursor-based task loading without the former 2,000-row truncation, visible
-  progress/cancellation and 50-task list/board pages. Search and counts cover
-  the full loaded workspace, not just the visible page. See [pagination](docs/TASK-PAGINATION.md).
+- Server-paged list/board: at most 50 parents and one 50-child page in the main
+  task collection, with global workspace counters and server search/filter/sort.
+  Exact-tag filtering reaches beyond the top 50 facets; drafts survive failed
+  refreshes. See [bounded main view](docs/TASK-VIEW.md).
 - A Kanban board alongside the list, with drag-and-drop on pointer devices and
   arrow buttons everywhere else.
 - Subtasks, which are ordinary tasks with a parent, so they inherit editing,
@@ -35,11 +36,13 @@ systemd-sandboxed VPS deployment.
   unsaved draft, review the current record, then choose which fields to keep.
   [Task versions](docs/TASK-VERSIONS.md) document the required `If-Match` contract.
 - Global server-side task finder with filtered/sorted pages across accessible
-  workspaces, independent of the main view's complete dataset.
+  workspaces, independent of the main view's loaded page.
 - Transactional task/text and owned-workspace quotas, plus an accessible
   usage panel. Trash remains counted; existing data is preserved when limits
   are lowered. These are [logical budgets](docs/TASK-QUOTAS.md), not disk quotas.
-- Keyboard shortcuts, and a CSV export that runs in the browser.
+- Keyboard shortcuts and complete, cancellable workspace CSV export, independent
+  of the visible page, with formula-leading cell mitigation and no partial
+  download after an error. Browser export has an explicit size budget.
 - Multi-workspace task tenancy with owner/admin/member/viewer roles, member
   listing, and email invite acceptance.
 - Email verification, password reset and invitations through an encrypted,
@@ -126,7 +129,7 @@ See [durable email operations](docs/DURABLE-EMAIL.md) before upgrading an existi
 ./scripts/integration_test.sh # API against a throwaway SurrealDB
 npm ci
 node scripts/mail_ops_test.mjs
-RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_VERSIONS=1 RUN_SEARCH=1 RUN_QUOTAS=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
+RUN_MAIN_VIEW=1 RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_VERSIONS=1 RUN_SEARCH=1 RUN_QUOTAS=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
 ```
 
 All three run in CI on every push.

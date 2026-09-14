@@ -274,6 +274,7 @@ try {
         (await m.locator('.task-badge', { hasText: '0/1' }).count()) >= 1);
 
     await m.click('[data-view="board"]');
+    await m.waitForFunction(() => !state.loading && !mainView.timer);
     await m.waitForSelector('#board:not(.hidden)', { timeout: 10000 });
     record('the board has three columns', (await m.locator('.board-column').count()) === 3);
 
@@ -333,19 +334,22 @@ try {
     record('due date reaches the API in UTC', await m.evaluate(utc =>
         state.tasks.find(t => t.title === 'A timezone-aware deadline').due_date === utc, dates.utc));
     await m.click('[data-filter="upcoming"]');
+    await m.waitForFunction(() => !state.loading && !mainView.timer);
     record('Next 7 days shows the future deadline', await m.locator('#taskList > .task-item').count() === 1);
     await m.click('[data-filter="today"]');
+    await m.waitForFunction(() => !state.loading && !mainView.timer);
     record('Today excludes a later deadline', await m.locator('#taskList > .task-item').count() === 0);
     await m.click('[data-filter="all"]');
+    await m.waitForFunction(() => !state.loading && !mainView.timer);
 
     const countBeforeError = await m.evaluate(() => state.tasks.length);
-    await m.route('**/api/tasks?*', route => route.request().method() === 'GET'
+    await m.route('**/api/tasks/view', route => route.request().method() === 'POST'
         ? route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"Temporarily unavailable"}' })
         : route.continue());
     await m.evaluate(() => loadTasks());
     record('a refresh error preserves visible tasks and offers retry',
         await m.evaluate(n => state.tasks.length === n, countBeforeError) && await m.locator('#taskLoadError').isVisible());
-    await m.unroute('**/api/tasks?*');
+    await m.unroute('**/api/tasks/view');
     await m.click('#retryTasksBtn');
     await m.waitForSelector('#taskLoadError', { state: 'hidden' });
 
@@ -355,6 +359,7 @@ try {
             await m.evaluate(theme => applyTheme(theme), theme);
             for (const view of ['list', 'board']) {
                 await m.click(`[data-view="${view}"]`);
+                await m.waitForFunction(() => !state.loading && !mainView.timer);
                 record(`no page overflow: ${width}px ${theme} ${view}`,
                     await m.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
             }
@@ -375,6 +380,7 @@ try {
         await m.screenshot({ path: `${process.env.UI_ARTIFACT_DIR}/mobile.png`, fullPage: true });
         await m.setViewportSize({ width: 1440, height: 1000 });
         await m.click('[data-view="board"]');
+        await m.waitForFunction(() => !state.loading && !mainView.timer);
         await m.evaluate(() => window.scrollTo(0, 0));
         await m.screenshot({ path: `${process.env.UI_ARTIFACT_DIR}/board.png`, fullPage: true });
     }
@@ -383,6 +389,9 @@ try {
     // a lossy replacement task. Exercise both toast Undo and the durable panel.
     await m.click('[data-view="list"]');
     await m.click('[data-filter="all"]');
+    await m.waitForFunction(() => !state.loading && !mainView.timer);
+    await m.locator('[data-act="show-subtasks"]').first().click();
+    await m.waitForFunction(() => mainView.child && !mainView.child.busy);
     const family = await m.evaluate(() => {
         const child = state.tasks.find(task => task.parent_id);
         return { parent: state.tasks.find(task => task.id === child.parent_id), child };
@@ -392,6 +401,8 @@ try {
     record('parent deletion removes its children from the active UI', await m.evaluate(id => !state.tasks.some(task => task.id === id), family.child.id));
     await m.locator('.toast-action').filter({ hasText: 'Undo' }).last().click();
     await m.waitForFunction(id => state.tasks.some(task => task.id === id), family.parent.id);
+    await m.locator(`[data-act="show-subtasks"][data-id="${family.parent.id}"]`).click();
+    await m.waitForFunction(() => mainView.child && !mainView.child.busy);
     record('Undo restores original parent and child IDs and metadata', await m.evaluate(family => {
         const p = state.tasks.find(task => task.id === family.parent.id), c = state.tasks.find(task => task.id === family.child.id);
         return p.notes === family.parent.notes && p.created_at === family.parent.created_at && c.parent_id === p.id && c.notes === family.child.notes;
@@ -420,8 +431,8 @@ try {
         const privateTasks = [...state.tasks];
         const originalFetch = window.fetch;
         let finish;
-        window.fetch = path => path.startsWith('/api/tasks?')
-            ? new Promise(resolve => { finish = resolve; }) : originalFetch(path);
+        window.fetch = (path, options) => path === '/api/tasks/view'
+            ? new Promise(resolve => { finish = resolve; }) : originalFetch(path, options);
         try {
             const pending = loadTasks();
             showLoggedOut();

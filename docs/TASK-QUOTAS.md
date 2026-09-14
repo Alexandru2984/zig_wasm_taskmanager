@@ -1,5 +1,8 @@
 # Task quotas and bounded load exercise — P4 / D2c
 
+D2d adds the [bounded main view and complete CSV workflow](TASK-VIEW.md),
+replacing full-workspace browser loading without changing these quotas.
+
 2026-09-13. This batch adds configurable logical task budgets, current usage
 visibility and a small reproducible mixed-load exercise. It does not finish
 physical-host storage control, main-view loading replacement, retention policy,

@@ -120,6 +120,62 @@ pub fn getTasks(r: zap.Request, req_alloc: std.mem.Allocator) !void {
 
 var active_searches = std.atomic.Value(u8).init(0);
 
+pub fn taskView(r: zap.Request, a: std.mem.Allocator) !void {
+    const user = http.getCurrentUserId(a, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    if (rate_limiter.task_search_limiter) |*limiter| {
+        if (!limiter.isAllowed(user)) {
+            r.setHeader("Retry-After", "60") catch {};
+            try http.jsonError(r, 429, "Too many task views. Please wait 1 minute.");
+            return;
+        }
+    }
+    const view = @import("../util/task_view.zig");
+    const input = http.parseBody(a, r, view.Input) catch {
+        try http.jsonError(r, 400, "Invalid task view body");
+        return;
+    };
+    const query = view.parse(a, user, input, std.time.milliTimestamp()) catch {
+        try http.jsonError(r, 400, "Invalid task view or cursor. Refresh after changing filters.");
+        return;
+    };
+    const slot = active_searches.fetchAdd(1, .acq_rel);
+    defer _ = active_searches.fetchSub(1, .acq_rel);
+    if (slot >= 2) {
+        r.setHeader("Retry-After", "1") catch {};
+        try http.jsonError(r, 503, "Task views are busy. Please retry.");
+        return;
+    }
+    const raw = db.impl.taskView(a, user, query) catch |err| {
+        try http.jsonError(r, if (err == error.PermissionDenied) 403 else if (err == error.NotFound) 404 else 503, if (err == error.PermissionDenied) "Workspace unavailable" else if (err == error.NotFound) "Parent task unavailable" else "Task view temporarily unavailable. Please retry.");
+        return;
+    };
+    defer a.free(raw);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(view.Result), a, raw, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (parsed.value.len != 1 or parsed.value[0].result.len != 1) {
+        try http.jsonError(r, 503, "Task view temporarily unavailable");
+        return;
+    }
+    const result = parsed.value[0].result[0];
+    var items = std.ArrayListUnmanaged(models.TaskResponse){};
+    defer items.deinit(a);
+    const limit = input.query.limit;
+    for (result.rows[0..@min(result.rows.len, limit)]) |row| try items.append(a, toResponse(row.task));
+    try http.jsonSuccess(r, .{
+        .items = items.items,
+        .next_cursor = if (result.rows.len > limit) try @import("../util/task_search.zig").next(a, query.search, result.rows[limit - 1]) else null,
+        .as_of = query.search.as_of,
+        .matched = result.matched,
+        .counts = result.counts,
+        .tags = result.tags[0..@min(50, result.tags.len)],
+        .tags_more = result.tags.len > 50,
+        .children = result.children,
+    });
+}
+
 /// POST is deliberately read-only: search terms/tokens stay out of URL logs.
 /// CSRF still applies, as for other authenticated POST requests.
 pub fn searchTasks(r: zap.Request, a: std.mem.Allocator) !void {

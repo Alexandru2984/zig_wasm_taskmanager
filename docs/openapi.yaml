@@ -529,6 +529,48 @@ paths:
           description: 120 searches per user per minute exceeded; Retry-After 60
         "503":
           description: Query unavailable/timed out, or two search slots occupied (Retry-After 1); retry explicitly
+  /api/tasks/view:
+    post:
+      summary: Read a bounded workspace parent or child page with server totals
+      description: >-
+        Authenticated, read-only, CSRF-protected and no-store. One read
+        transaction checks membership and returns rows plus scoped aggregates.
+        Root counts and tag facets ignore query filters, include own legacy
+        roots, and exclude children and trash. Child requests return null counts
+        and empty facets. Each page rechecks membership; as_of excludes later
+        creation but does not freeze subsequent edits/deletions. Cursor context
+        includes actor, query, hierarchy, focus, completion grouping and calendar
+        boundaries. Tokens are positions, not authorization credentials.
+      parameters:
+        - name: X-CSRF-Token
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TaskViewRequest" }
+      responses:
+        "200":
+          description: One page and current scoped aggregates; Cache-Control no-store
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskViewResponse" }
+        "400":
+          description: Invalid body, typed ID, date bounds or cursor binding; restart after changing filters
+        "401":
+          description: Not authenticated
+        "403":
+          description: Missing/invalid CSRF or requested workspace unavailable
+        "404":
+          description: Requested parent missing, deleted, nested or outside authorized scope
+        "405":
+          description: POST required; Allow POST
+        "429":
+          description: Shared view/search/usage budget of 120 requests per user per minute exceeded; Retry-After 60
+        "503":
+          description: Query unavailable/timed out, or two view/search slots occupied (Retry-After 1); retry explicitly
   /api/tasks/{id}:
     get:
       summary: Read one active task and its current ETag
@@ -1035,6 +1077,100 @@ components:
           nullable: true
           minimum: 1
           description: Retain response cutoff to revisit page 1 with cursor null; must agree with a supplied cursor and not be in the future
+    TaskViewRequest:
+      type: object
+      required: [query, today, tomorrow, upcoming]
+      properties:
+        query:
+          allOf:
+            - $ref: "#/components/schemas/TaskSearchRequest"
+            - type: object
+              required: [workspace_id]
+              properties:
+                workspace_id:
+                  type: string
+                  nullable: false
+                  pattern: '^workspaces:[A-Za-z0-9_-]+$'
+                  description: Required authorized workspace; own unattached legacy tasks also appear
+                limit: { type: integer, minimum: 1, maximum: 50, default: 50 }
+        parent_id:
+          type: string
+          nullable: true
+          pattern: '^tasks:[A-Za-z0-9_-]+$'
+          description: Omit/null for roots; otherwise read children of an accessible active root
+        focus_id:
+          type: string
+          nullable: true
+          pattern: '^tasks:[A-Za-z0-9_-]+$'
+          description: Optional exact task within the selected root/child scope, not an access bypass
+        active_first:
+          type: boolean
+          default: false
+          description: Group active rows before completed rows, then apply the selected sort and ID tie-breaker
+        today:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 253402300799999
+          description: Local-day start in Unix milliseconds; today < tomorrow < upcoming, spanning at most 10 days
+        tomorrow:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 253402300799999
+          description: Next local-day start; calendar arithmetic must account for DST
+        upcoming:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 253402300799999
+          description: Exclusive upcoming-window end; UI uses local midnight eight calendar days from today
+    TaskViewResponse:
+      type: object
+      required: [items, next_cursor, as_of, matched, counts, tags, tags_more, children]
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          items: { $ref: "#/components/schemas/Task" }
+        next_cursor: { type: string, nullable: true, maxLength: 8192 }
+        as_of: { type: integer, format: int64, minimum: 1 }
+        matched:
+          type: integer
+          minimum: 0
+          description: Matching roots or children across all pages, before applying the cursor
+        counts:
+          type: object
+          nullable: true
+          required: [total, done, overdue, high, today, upcoming]
+          properties:
+            total: { type: integer, minimum: 0 }
+            done: { type: integer, minimum: 0 }
+            overdue: { type: integer, minimum: 0 }
+            high: { type: integer, minimum: 0 }
+            today: { type: integer, minimum: 0 }
+            upcoming: { type: integer, minimum: 0 }
+        tags:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            required: [tag, count]
+            properties:
+              tag: { type: string }
+              count: { type: integer, minimum: 1 }
+        tags_more: { type: boolean }
+        children:
+          type: array
+          maxItems: 51
+          description: Child progress for this page and possibly its one lookahead parent; no child task payloads
+          items:
+            type: object
+            required: [parent_id, total, done]
+            properties:
+              parent_id: { type: string }
+              total: { type: integer, minimum: 1 }
+              done: { type: integer, minimum: 0 }
     Task:
       type: object
       properties:

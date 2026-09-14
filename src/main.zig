@@ -28,6 +28,7 @@ test {
     _ = @import("util/task_version.zig");
     _ = @import("util/task_search.zig");
     _ = @import("util/task_quota.zig");
+    _ = @import("util/task_view.zig");
     _ = @import("db/http_client.zig");
     _ = @import("services/auth.zig");
     _ = @import("services/mail_payload.zig");
@@ -599,6 +600,14 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
             r.setStatus(.method_not_allowed);
             try r.sendBody("{\"error\": \"Method not allowed\"}");
         }
+    } else if (std.mem.eql(u8, path, "/api/tasks/view")) {
+        if (!std.mem.eql(u8, req_method, "POST")) {
+            r.setHeader("Allow", "POST") catch {};
+            try http.jsonError(r, 405, "Method not allowed");
+            return;
+        }
+        try tasks_handler.taskView(r, req_alloc);
+        return;
     } else if (std.mem.eql(u8, path, "/api/tasks/search")) {
         if (!std.mem.eql(u8, req_method, "POST")) {
             r.setHeader("Allow", "POST") catch {};

@@ -1058,6 +1058,101 @@ pub fn getTasksByUser(allocator: std.mem.Allocator, user_id: []const u8, page: @
     , .{ .user_id = rec(user_id), .workspace_id = rec(page.workspace orelse "workspaces:unset"), .scoped = page.workspace != null, .cursor = rec(page.cursor orelse "tasks:unset"), .has_cursor = page.cursor != null, .limit = page.limit + 1, .as_of = page.as_of });
 }
 
+pub fn taskView(a: std.mem.Allocator, user: []const u8, view: @import("../util/task_view.zig").Query) ![]u8 {
+    const q = view.search.input;
+    const scope =
+        \\ deleted_at = NONE AND time::millis(created_at) <= $as_of
+        \\ AND (workspace_id = $workspace_id OR (workspace_id = NONE AND user_id = $user_id))
+    ;
+    const filters = scope ++
+        \\ AND (IF $has_parent { parent_id = $parent_id AND workspace_id = $parent.workspace_id } ELSE { parent_id = NONE })
+        \\ AND (!$has_focus OR id = $focus_id)
+        \\ AND ($q = '' OR string::contains(string::lowercase(string::concat(title, ' ', notes ?? '', ' ', array::join(tags ?? [], ' '))), string::lowercase($q)))
+        \\ AND ($status = 'all' OR ($status = 'active' AND !completed) OR $status = (IF completed { 'done' } ELSE { status ?? 'todo' }))
+        \\ AND ($priority = 'all' OR priority = $priority)
+        \\ AND ($tag = '' OR $tag IN tags)
+        \\ AND ($assignee = 'any' OR ($assignee = 'me' AND assignee_id = $user_id) OR ($assignee = 'unassigned' AND assignee_id = NONE))
+        \\ AND ($due = 'any' OR ($due = 'none' AND due_date = NONE)
+        \\   OR ($due = 'overdue' AND !completed AND due_date != NONE AND time::millis(due_date) < $as_of)
+        \\   OR ($due = 'range' AND due_date != NONE AND time::millis(due_date) >= $due_from AND time::millis(due_date) < $due_before))
+    ;
+    // One read transaction gives this response coherent rows/aggregates. Each
+    // subsequent page rechecks membership; the entire traversal is NOT frozen.
+    return queryWithVars(a,
+        \\BEGIN TRANSACTION;
+        \\LET $allowed = (SELECT VALUE workspace_id FROM workspace_members WHERE user_id = $user_id TIMEOUT 2s);
+        \\IF $workspace_id NOT IN $allowed { THROW "APP_FORBIDDEN"; };
+        \\LET $parent = IF $has_parent { (SELECT * FROM ONLY $parent_id) } ELSE { NONE };
+        \\IF $has_parent AND ($parent = NONE OR $parent.deleted_at != NONE OR $parent.parent_id != NONE OR
+        \\   !($parent.workspace_id = $workspace_id OR ($parent.workspace_id = NONE AND $parent.user_id = $user_id))) { THROW "APP_NOT_FOUND"; };
+        \\LET $matched = (SELECT count() AS count FROM tasks WHERE
+    ++ filters ++
+        \\ GROUP ALL TIMEOUT 2s)[0].count ?? 0;
+        \\LET $rows = (SELECT * FROM (SELECT $this AS task,
+        \\   (IF $active_first AND completed { 1 } ELSE { 0 }) AS b,
+        \\   (IF $sort = 'created_desc' { -time::millis(created_at) }
+        \\    ELSE IF $sort = 'created_asc' { time::millis(created_at) }
+        \\    ELSE IF $sort = 'due_asc' { IF due_date = NONE { 9007199254740991 } ELSE { time::millis(due_date) } }
+        \\    ELSE IF $sort = 'priority' { IF priority = 'high' { 0 } ELSE IF priority = 'low' { 2 } ELSE { 1 } }
+        \\    ELSE { 0 }) AS n,
+        \\   (IF $sort = 'title' { string::lowercase(title) } ELSE { '' }) AS s
+        \\   FROM tasks WHERE
+    ++ filters ++
+        \\ TIMEOUT 2s) WHERE !$has_cursor OR b > $after_b OR (b = $after_b AND
+        \\   (n > $after_n OR (n = $after_n AND (s > $after_s OR (s = $after_s AND task.id > $after_id)))))
+        \\ ORDER BY b ASC, n ASC, s ASC, task.id ASC LIMIT $limit TIMEOUT 2s);
+        \\LET $counts = IF $has_parent { NONE } ELSE {
+        \\ (SELECT count() AS total, math::sum(done) AS done, math::sum(overdue) AS overdue, math::sum(high) AS high, math::sum(today) AS today, math::sum(upcoming) AS upcoming FROM
+        \\   (SELECT (IF completed { 1 } ELSE { 0 }) AS done,
+        \\     (IF !completed AND due_date != NONE AND time::millis(due_date) < $as_of { 1 } ELSE { 0 }) AS overdue,
+        \\     (IF !completed AND priority = 'high' { 1 } ELSE { 0 }) AS high,
+        \\     (IF !completed AND due_date != NONE AND time::millis(due_date) >= $today AND time::millis(due_date) < $tomorrow { 1 } ELSE { 0 }) AS today,
+        \\     (IF !completed AND due_date != NONE AND time::millis(due_date) >= $tomorrow AND time::millis(due_date) < $upcoming { 1 } ELSE { 0 }) AS upcoming
+        \\    FROM tasks WHERE parent_id = NONE AND
+    ++ scope ++
+        \\ TIMEOUT 2s) GROUP ALL TIMEOUT 2s)[0] ?? { total: 0, done: 0, overdue: 0, high: 0, today: 0, upcoming: 0 } };
+        \\LET $tags = (
+        \\ SELECT * FROM (SELECT tag, count() AS count FROM (SELECT tags AS tag FROM tasks WHERE !$has_parent AND parent_id = NONE AND array::len(tags ?? []) > 0 AND
+    ++ scope ++
+        \\ SPLIT tags TIMEOUT 2s) GROUP BY tag TIMEOUT 2s) ORDER BY count DESC, tag ASC LIMIT 51 TIMEOUT 2s);
+        \\LET $children = (
+        \\ SELECT parent_id, count() AS total, math::sum(done) AS done FROM
+        \\  (SELECT parent_id, (IF completed { 1 } ELSE { 0 }) AS done FROM tasks WHERE !$has_parent AND parent_id IN $rows.task.id
+        \\    AND workspace_id = parent_id.workspace_id AND
+    ++ scope ++
+        \\ TIMEOUT 2s) GROUP BY parent_id TIMEOUT 2s);
+        \\RETURN [{ rows: $rows, matched: $matched, counts: $counts ?? NULL, tags: $tags ?? [], children: $children ?? [] }];
+        \\COMMIT TRANSACTION;
+    , .{
+        .user_id = rec(user),
+        .workspace_id = rec(q.workspace_id.?),
+        .parent_id = rec(view.input.parent_id orelse "tasks:unset"),
+        .has_parent = view.input.parent_id != null,
+        .focus_id = rec(view.input.focus_id orelse "tasks:unset"),
+        .has_focus = view.input.focus_id != null,
+        .active_first = view.input.active_first,
+        .today = view.input.today,
+        .tomorrow = view.input.tomorrow,
+        .upcoming = view.input.upcoming,
+        .q = q.q,
+        .status = q.status,
+        .priority = q.priority,
+        .tag = q.tag,
+        .assignee = q.assignee,
+        .due = q.due,
+        .due_from = q.due_from orelse 0,
+        .due_before = q.due_before orelse 0,
+        .sort = q.sort,
+        .limit = q.limit + 1,
+        .as_of = view.search.as_of,
+        .has_cursor = view.search.after != null,
+        .after_id = rec(if (view.search.after) |c| c.id else "tasks:unset"),
+        .after_b = if (view.search.after) |c| c.b else 0,
+        .after_n = if (view.search.after) |c| c.n else 0,
+        .after_s = if (view.search.after) |c| c.s else "",
+    });
+}
+
 pub fn searchTasks(a: std.mem.Allocator, user: []const u8, search_query: @import("../util/task_search.zig").Query) ![]u8 {
     const q = search_query.input;
     return queryWithVars(a,

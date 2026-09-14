@@ -1,5 +1,9 @@
 # Global task finder — P4 / D2b
 
+D2d adds the [bounded main view](TASK-VIEW.md). Finder reveal now loads a
+focused parent/child page instead of refreshing a full browser dataset;
+the search endpoint and its independently scoped cursor contract remain.
+
 2026-09-09. **Find tasks** searches the server across currently accessible
 workspaces, including subtasks and tasks not loaded in the main browser list.
 It adds one-page-at-a-time discovery, not replacement of the main workspace

@@ -27,7 +27,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/favicon.svg">
     <link rel="manifest" href="/site.webmanifest">
-    <link rel="stylesheet" href="/style.css?v=bd15d971">
+    <link rel="stylesheet" href="/style.css?v=e2e54585">
 
     <!-- Structured data. The CSP forbids inline <script>, but this is
          application/ld+json, which is data rather than script: the parser
@@ -212,6 +212,12 @@
                     </select>
                 </div>
                 <div class="filter-chips hidden" id="tagChips" role="group" aria-label="Filter by tag"></div>
+                <p id="moreTagsNotice" class="modal-desc hidden">Showing the 50 most-used tags. Use an exact tag below for any other tag.</p>
+                <form id="exactTagForm" class="exact-tag-form">
+                    <label for="exactTagInput">Exact tag</label>
+                    <input id="exactTagInput" type="text" maxlength="128" placeholder="Tag name; blank clears filter">
+                    <button type="submit" class="btn btn-ghost btn-sm">Apply tag</button>
+                </form>
                 <details class="saved-view-panel">
                 <summary>Saved views <span>Keep your everyday filters handy</span></summary>
                 <div class="saved-view-controls">
@@ -248,9 +254,10 @@
             </div>
 
             <div id="taskLoadError" class="task-load-error hidden" role="status">
-                <span>Refresh incomplete. Your last complete list is shown, if available. Try again for current tasks.</span>
+                <span>Page refresh incomplete. Any retained page and totals may be stale. Resolve an unsaved draft or try again for current tasks.</span>
                 <button type="button" class="btn btn-secondary btn-sm" id="retryTasksBtn">Try again</button>
             </div>
+            <div id="focusedTaskNotice" class="task-pagination hidden"><span>Selected task, not the full workspace list.</span><button type="button" id="backToTasks" class="btn btn-ghost btn-sm">Back to all tasks</button></div>
             <ul class="task-list" id="taskList" aria-label="Tasks"></ul>
 
             <div class="board hidden" id="board" aria-label="Task board"></div>
@@ -648,6 +655,7 @@
         </div>
     </div>
 
-    <script src="/app.js?v=a20aa252"></script>
+    <script src="/app.js?v=c7f0544f"></script>
+    <script src="/task-view.js?v=0f7146bb"></script>
 </body>
 </html>

@@ -17,9 +17,9 @@ pub const Input = struct {
     as_of: ?i64 = null,
     cursor: ?[]const u8 = null,
 };
-pub const Cursor = struct { v: u8 = 1, id: []const u8, n: i64, s: []const u8, as_of: i64, binding: []const u8 };
+pub const Cursor = struct { v: u8 = 1, id: []const u8, n: i64, s: []const u8, b: u8 = 0, as_of: i64, binding: []const u8 };
 pub const Query = struct { input: Input, as_of: i64, after: ?Cursor, binding: []const u8 };
-pub const Row = struct { task: models.Task, n: i64, s: []const u8 };
+pub const Row = struct { task: models.Task, n: i64, s: []const u8, b: u8 = 0 };
 
 fn choice(value: []const u8, choices: []const []const u8) bool {
     for (choices) |item| if (std.mem.eql(u8, value, item)) return true;
@@ -69,7 +69,7 @@ pub fn parse(a: std.mem.Allocator, user: []const u8, raw: Input, now: i64) !Quer
         // Request arena owns parsed strings through query completion.
         const parsed = std.json.parseFromSlice(Cursor, a, bytes, .{ .allocate = .alloc_always }) catch return error.InvalidInput;
         const c = parsed.value;
-        if (c.v != 1 or !ids.validRecordIdFor(c.id, "tasks") or !safeText(c.s, 2048) or
+        if (c.v != 1 or c.b > 1 or !ids.validRecordIdFor(c.id, "tasks") or !safeText(c.s, 2048) or
             c.n < -9007199254740991 or c.n > 9007199254740991 or c.as_of <= 0 or c.as_of > now or
             !std.mem.eql(u8, c.binding, binding) or (raw.as_of != null and raw.as_of.? != c.as_of)) return error.InvalidInput;
         after = c;
@@ -78,7 +78,7 @@ pub fn parse(a: std.mem.Allocator, user: []const u8, raw: Input, now: i64) !Quer
 }
 
 pub fn next(a: std.mem.Allocator, query: Query, row: Row) ![]const u8 {
-    const json = try std.json.Stringify.valueAlloc(a, Cursor{ .id = row.task.id, .n = row.n, .s = row.s, .as_of = query.as_of, .binding = query.binding }, .{});
+    const json = try std.json.Stringify.valueAlloc(a, Cursor{ .id = row.task.id, .n = row.n, .s = row.s, .b = row.b, .as_of = query.as_of, .binding = query.binding }, .{});
     defer a.free(json);
     const encoder = std.base64.url_safe_no_pad.Encoder;
     const encoded = try a.alloc(u8, encoder.calcSize(json.len));

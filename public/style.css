@@ -2060,4 +2060,6 @@ kbd {
 .task-search-results p { margin-block: .35rem; }
 .task-search-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; font: inherit; }
 #usageList li { display: block; overflow-wrap: anywhere; }
+.exact-tag-form { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-block: .75rem; }
+.exact-tag-form input { flex: 1 1 10rem; min-width: 0; }
 @media (max-width: 480px) { .task-search-filters { grid-template-columns: minmax(0, 1fr); } }

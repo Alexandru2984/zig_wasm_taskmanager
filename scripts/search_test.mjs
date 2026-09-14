@@ -169,6 +169,7 @@ if(process.env.RUN_UI==='1') {
             await page.evaluate(()=>taskDrafts.clear());
             await page.click('#taskSearchReveal');
             await page.waitForFunction(ws=>state.currentWorkspaceId===ws&&!state.loading&&document.getElementById('taskSearchModal').hidden,workspace);
+            await page.waitForFunction(task=>mainView.focus && mainView.child && !mainView.child.busy && state.tasks.some(t=>t.id===task),fixture[206].id);
             assert.ok(await page.evaluate(task=>document.activeElement.querySelector('[data-act="toggle"]')?.dataset.id===task,fixture[206].id));
         });
         await check('one bounded page, previous/next and title sort are keyboard/mobile safe',async()=>{

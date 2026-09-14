@@ -32,7 +32,7 @@ keep production credentials out of it.
 ```bash
 npm ci
 ./scripts/check.sh
-OPTIMIZE=ReleaseSafe RUN_SECURITY=1 RUN_UI=1 ./scripts/integration_test.sh
+OPTIMIZE=ReleaseSafe RUN_MAIN_VIEW=1 RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_VERSIONS=1 RUN_SEARCH=1 RUN_QUOTAS=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh
 zig build -j4 -Doptimize=ReleaseSafe
 ./scripts/stamp-assets.sh
 ```
@@ -82,6 +82,12 @@ pre-quota binary removes enforcement and the usage API; publish matched assets
 and never restore a stale DB snapshot over newer writes as a routine rollback.
 
 ## Stage, migrate, promote
+
+The [bounded main view](TASK-VIEW.md) needs no migration or runtime-config
+change. Publish `app.js`, `task-view.js`, HTML/CSS and the executable together;
+stamp all asset URLs before committing. Its binary-only rollback target is
+`80853b0`, with matching assets and a browser reload; quotas, versions and trash
+remain compatible. No DB restore or unrelated nginx/service change is needed.
 
 Migration 014 changes task DELETE to recoverable trash. Read
 [TASK-TRASH.md](TASK-TRASH.md) before promotion/rollback: an older binary cannot

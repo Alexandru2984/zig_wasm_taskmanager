@@ -135,12 +135,18 @@ function csrfHeaders(headers = {}) {
  */
 async function api(path, { method = 'GET', body = null, quiet = false, signal, version } = {}) {
     const requestUser = state.user;
+    const requestWorkspace = state.currentWorkspaceId;
     const conditional = ['PUT', 'DELETE'].includes(method) && path.startsWith('/api/tasks/');
     const taskId = conditional ? decodeURIComponent(path.slice('/api/tasks/'.length)) : null;
     const pendingKey = `${requestUser?.id}:${taskId}`;
     if (conditional && pendingTaskWrites.has(pendingKey)) return { ok: false, status: 409, data: { busy: true, error: 'This task already has an update in progress.' } };
     // Do not publish an older multi-page read over an in-flight local write.
-    const taskWrite = method !== 'GET' && path !== '/api/tasks/search' && /^\/api\/(tasks|trash)(\/|$)/.test(path);
+    const taskWrite = method !== 'GET' && !['/api/tasks/search', '/api/tasks/view'].includes(path) && /^\/api\/(tasks|trash)(\/|$)/.test(path);
+    if (taskWrite) {
+        mainView.childAbort?.abort(); mainView.childAbort = null; mainView.childGeneration++;
+        if (mainView.child?.busy) { mainView.child.busy = false; mainView.child.error = true; }
+        csvAbort?.abort();
+    }
     if (taskWrite) resetTaskSearch(true);
     if (taskWrite) resetUsage();
     if (taskWrite && taskLoadAbort) cancelTaskLoad(true);
@@ -170,9 +176,10 @@ async function api(path, { method = 'GET', body = null, quiet = false, signal, v
 
     // A refresh may also have started while this write was waiting for its
     // response. Fence that scan before the caller applies the write result.
-    if (taskWrite && taskLoadAbort && state.user === requestUser) cancelTaskLoad(true);
-    if (taskWrite && state.user === requestUser) resetTaskSearch(true);
-    if (taskWrite && state.user === requestUser) resetUsage();
+    if (taskWrite && state.user === requestUser && state.currentWorkspaceId === requestWorkspace) {
+        if (taskLoadAbort) cancelTaskLoad(true);
+        resetTaskSearch(true); resetUsage();
+    }
 
     let data = null;
     try {
@@ -275,6 +282,7 @@ async function checkAuth() {
 }
 
 function showLoggedIn(user) {
+    if (state.user?.id !== user.id) resetMainView();
     if (state.user !== user) resetUsage(true);
     if (state.user !== user) resetTaskSearch(true);
     if (state.user?.id !== user.id) {
@@ -284,6 +292,7 @@ function showLoggedIn(user) {
         $('mailDeliveryList').replaceChildren();
         $('mailDeliveryStatus').textContent = '';
         state.tasks = [];
+        state.members = [];
         state.currentWorkspaceId = null;
         state.savedViewContext = null;
     }
@@ -331,6 +340,7 @@ function renderVerifiedBadge(user) {
 }
 
 function showLoggedOut() {
+    resetMainView();
     resetUsage(true);
     resetTaskSearch(true);
     cancelTaskLoad();
@@ -345,6 +355,7 @@ function showLoggedOut() {
     state.savedViewContext = null;
     state.selection.clear();
     state.workspaces = [];
+    state.members = [];
     state.currentWorkspaceId = null;
     $('authButtons').classList.remove('hidden');
     $('userMenu').classList.add('hidden');
@@ -848,6 +859,7 @@ function renderWorkspaceBar() {
 
 function switchWorkspace(id) {
     if ([...taskDrafts.values()].some(draft => draft.dirty) && !window.confirm('Discard unsaved task edits and switch workspace?')) { renderWorkspaceBar(); return; }
+    resetMainView();
     resetUsage(true);
     resetTaskSearch(true);
     taskDrafts.clear();
@@ -1065,98 +1077,20 @@ async function previewSearchTask(id) {
 async function revealSearchTask() {
     const task = taskSearch.preview, user = state.user;
     if (!task || !user) return;
-    if ([...taskDrafts.values()].some(draft => draft.dirty) && !window.confirm('Discard unsaved task edits and open this search result?')) return;
-    const workspace = task.workspace_id || state.currentWorkspaceId;
-    if (!workspace) { $('taskSearchStatus').textContent = 'Select a workspace first to open this legacy task.'; return; }
-    taskDrafts.clear(); state.editingId = null;
-    // Close search before the workspace switch, which also invalidates reads.
-    hideModal('taskSearchModal');
-    if (state.currentWorkspaceId !== workspace) await switchWorkspace(workspace);
-    else await loadTasks();
-    if (state.user !== user || state.currentWorkspaceId !== workspace) return;
-    if (!$('taskLoadError').classList.contains('hidden')) { toast('Could not load the workspace. Retry the workspace refresh.', 'error'); return; }
-    const current = state.tasks.find(row => row.id === task.id), parent = current?.parent_id || task.id;
-    if (!current || !state.tasks.some(row => row.id === parent)) { toast('Task is no longer available in this workspace.', 'error'); return; }
-    state.search = ''; state.filter = 'all'; state.tagFilter = null; state.activeSavedView = ''; state.selection.clear();
-    setView('list');
-    const roots = topLevel(workspaceTasks());
-    const ordered = [...sortTasks(roots.filter(row => !row.completed)), ...sortTasks(roots.filter(row => row.completed))];
-    state.taskPage = Math.floor(ordered.findIndex(row => row.id === parent) / TASKS_PER_PAGE);
-    if (current.parent_id) state.childPages.set(parent, Math.floor(subtasksOf(parent).findIndex(row => row.id === current.id) / TASKS_PER_PAGE));
-    state.completedCollapsed = false; renderTasks();
-    const target = [...document.querySelectorAll('[data-act="toggle"]')].find(el => el.dataset.id === current.id);
-    target?.closest('li')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    // The checkbox is disabled for viewers; focus the containing row instead.
-    const row = target?.closest('li'); if (row) { row.tabIndex = -1; row.focus({ preventScroll: true }); }
+    await openMainTask(task);
 }
 
-async function loadTasks() {
+async function loadTasks(options = {}) {
+    if (isLoggedIn()) return loadMainTasks(options);
     cancelTaskLoad();
-    if (!isLoggedIn()) {
-        $('taskLoadError').classList.add('hidden');
-        state.tasks = getAnonTasks();
-        renderTasks();
-        return;
-    }
-
-    const requestUser = state.user, workspace = state.currentWorkspaceId;
-    if (!workspace) {
-        state.tasks = [];
-        $('taskLoadError').classList.remove('hidden');
-        renderTasks();
-        return;
-    }
-    const generation = taskLoadGeneration;
-    const controller = taskLoadAbort = new AbortController();
-    const current = () => generation === taskLoadGeneration && state.user === requestUser && state.currentWorkspaceId === workspace;
-    const staged = [], seen = new Set();
-    let cursor = null, asOf = null, loaded = false;
-    setLoading(true);
     $('taskLoadError').classList.add('hidden');
-    try {
-        do {
-            $('taskLoadStatus').textContent = `Loading tasks… ${staged.length} received. Search and counts update when complete.`;
-            const query = new URLSearchParams({ page: '1', workspace_id: workspace });
-            if (cursor) { query.set('cursor', cursor); query.set('as_of', String(asOf)); }
-            const timeout = setTimeout(() => controller.abort(), 15000);
-            let result;
-            try { result = await api(`/api/tasks?${query}`, { quiet: true, signal: controller.signal }); }
-            finally { clearTimeout(timeout); }
-            if (!current()) return;
-            const { ok, data, status } = result;
-            if (status === 403) {
-                state.tasks = []; state.selection.clear(); state.editingId = null;
-                state.members = []; state.childPages.clear(); resetTrash();
-                break;
-            }
-            if (!ok || !Array.isArray(data?.items) || data.items.length > 100 ||
-                !Number.isSafeInteger(data.as_of) || (asOf !== null && data.as_of !== asOf) ||
-                !(data.next_cursor === null || (typeof data.next_cursor === 'string' && data.items.length > 0 && data.next_cursor === data.items.at(-1).id))) break;
-            asOf = data.as_of;
-            let valid = true;
-            for (const task of data.items) {
-                if (!task || typeof task.id !== 'string' || seen.has(task.id) || (cursor && task.id >= cursor)) { valid = false; break; }
-                seen.add(task.id); staged.push(task);
-            }
-            if (!valid) break;
-            cursor = data.next_cursor;
-            if (!cursor) loaded = true;
-        } while (cursor);
-    } finally {
-        if (current()) {
-            taskLoadAbort = null;
-            setLoading(false);
-            $('taskLoadError').classList.toggle('hidden', loaded);
-            if (loaded) {
-                state.tasks = staged;
-                state.selection = new Set([...state.selection].filter(id => seen.has(id)));
-            }
-            renderTasks();
-        }
-    }
+    state.tasks = getAnonTasks(); renderTasks();
 }
 
 function cancelTaskLoad(report = false) {
+    clearTimeout(mainView.timer); mainView.timer = null;
+    mainView.childAbort?.abort(); mainView.childAbort = null; mainView.childGeneration++;
+    if (mainView.child?.busy) { mainView.child.busy = false; mainView.child.error = true; }
     taskLoadGeneration++;
     taskLoadAbort?.abort();
     taskLoadAbort = null;
@@ -1219,6 +1153,7 @@ function subtasksOf(id) {
 }
 
 function subtaskProgress(id) {
+    if (isLoggedIn()) return mainProgress(id);
     const kids = subtasksOf(id);
     if (!kids.length) return null;
     return { done: kids.filter(k => k.completed).length, total: kids.length };
@@ -1274,7 +1209,7 @@ function validSavedView(view) {
     return view && typeof view.id === 'string' && view.id.length <= 64 &&
         typeof view.name === 'string' && view.name.length > 0 && view.name.length <= 48 &&
         typeof view.search === 'string' && view.search.length <= 500 &&
-        (view.tagFilter === null || (typeof view.tagFilter === 'string' && view.tagFilter.length <= 32)) &&
+        (view.tagFilter === null || (typeof view.tagFilter === 'string' && view.tagFilter.length <= 128)) &&
         VIEW_FILTERS.includes(view.filter) && VIEW_SORTS.includes(view.sort) &&
         ['list', 'board'].includes(view.view);
 }
@@ -1300,6 +1235,8 @@ function syncSavedViews() {
     $('deleteViewBtn').disabled = !state.activeSavedView;
     $('searchInput').value = state.search;
     $('sortSelect').value = state.sort;
+    $('exactTagInput').value = state.tagFilter || '';
+    document.querySelectorAll('[data-view]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.view === state.view)));
     document.querySelectorAll('#filterChips [data-filter]').forEach(chip => {
         chip.setAttribute('aria-pressed', String(chip.dataset.filter === state.filter));
     });
@@ -1337,6 +1274,7 @@ function bindSavedViews() {
         state.activeSavedView = e.target.value;
         const view = state.savedViews.find(item => item.id === e.target.value);
         if (view) {
+            mainView.focus = null;
             state.search = view.search; state.filter = view.filter; state.tagFilter = view.tagFilter;
             state.sort = view.sort; state.selection.clear();
             setView(view.view);
@@ -1353,6 +1291,7 @@ function bindSavedViews() {
     $('cancelTasksBtn').addEventListener('click', () => cancelTaskLoad(true));
     for (const [id, delta] of [['tasksPrevious', -1], ['tasksNext', 1]]) {
         $(id).addEventListener('click', () => {
+            if (isLoggedIn()) { changeMainPage(delta); return; }
             state.taskPage += delta;
             state.selection.clear(); state.editingId = null; state.addingSubtaskFor = null;
             renderTasks();
@@ -1511,7 +1450,8 @@ function renderTaskItem(task) {
     if (meta.childElementCount) content.appendChild(meta);
 
     // Subtasks live under their parent, never as rows of their own.
-    const kids = subtasksOf(task.id);
+    if (isLoggedIn()) renderMainChildren(task, content);
+    const kids = isLoggedIn() ? [] : subtasksOf(task.id);
     if (kids.length) {
         const list = document.createElement('ul');
         list.className = 'subtask-list';
@@ -1765,6 +1705,12 @@ function captureTaskDraft(form) {
     draft.dirty = Object.keys(draft.values).some(key => draft.values[key] !== draft.initial[key]);
 }
 
+function startTaskEdit(id) {
+    if (state.editingId !== null && String(state.editingId) !== String(id) && !leaveMainDrafts()) return;
+    if (String(state.editingId) !== String(id)) taskDrafts.clear();
+    state.editingId = id; renderTasks();
+}
+
 async function reviewTaskConflict(id) {
     const draft = taskDrafts.get(id), user = state.user, workspace = state.currentWorkspaceId;
     if (!draft || draft.reviewing) return;
@@ -1794,6 +1740,7 @@ function resolveTaskDraft(id, keepEdits) {
 
 function renderTasks() {
     syncSavedViews();
+    prepareMainView();
     const list = $('taskList');
     const completedList = $('completedTaskList');
     const completedSection = $('completedSection');
@@ -1809,24 +1756,28 @@ function renderTasks() {
     renderTagChips(scoped);
     renderBulkBar();
 
-    const matched = scoped
+    const matched = isLoggedIn() ? scoped : scoped
         .filter(t => matchesFilter(t))
         .filter(t => matchesSearch(t, needle))
         .filter(t => !state.tagFilter || (t.tags || []).includes(state.tagFilter));
 
     const context = JSON.stringify([state.user?.id, state.currentWorkspaceId, state.search, state.filter, state.tagFilter, state.sort, state.view]);
-    if (state.taskPageContext !== context) { state.taskPageContext = context; state.taskPage = 0; state.selection.clear(); }
-    state.taskPage = Math.max(0, Math.min(state.taskPage, Math.ceil(matched.length / TASKS_PER_PAGE) - 1));
+    if (!isLoggedIn()) {
+        if (state.taskPageContext !== context) { state.taskPageContext = context; state.taskPage = 0; state.selection.clear(); }
+        state.taskPage = Math.max(0, Math.min(state.taskPage, Math.ceil(matched.length / TASKS_PER_PAGE) - 1));
+    }
     // Preserve the existing active/completed split, with one shared page limit.
     const ordered = state.view === 'list' && state.filter === 'all'
         ? [...sortTasks(matched.filter(t => !t.completed)), ...sortTasks(matched.filter(t => t.completed))]
         : sortTasks(matched);
     const start = state.taskPage * TASKS_PER_PAGE;
-    const visible = ordered.slice(start, start + TASKS_PER_PAGE);
-    $('taskPagination').classList.toggle('hidden', matched.length <= TASKS_PER_PAGE);
-    $('taskPageStatus').textContent = `${matched.length ? start + 1 : 0}–${Math.min(start + TASKS_PER_PAGE, matched.length)} of ${matched.length} matching tasks`;
-    $('tasksPrevious').disabled = state.taskPage === 0;
-    $('tasksNext').disabled = start + TASKS_PER_PAGE >= matched.length;
+    const visible = isLoggedIn() ? matched : ordered.slice(start, start + TASKS_PER_PAGE);
+    const total = isLoggedIn() ? mainView.data?.matched : matched.length;
+    $('taskPagination').classList.toggle('hidden', isLoggedIn() ? !mainView.data : matched.length <= TASKS_PER_PAGE);
+    $('taskPageStatus').textContent = total === undefined ? 'Tasks not loaded' : `${total ? start + 1 : 0}–${Math.min(start + TASKS_PER_PAGE, total)} of ${total} matching tasks${isLoggedIn() ? ' · Server page; counts cover the workspace' : ''}${isLoggedIn() && mainView.page >= 199 && mainView.next ? ' · Narrow filters to continue beyond 200 pages' : ''}`;
+    $('tasksPrevious').disabled = isLoggedIn() ? state.loading || mainView.page === 0 : state.taskPage === 0;
+    $('tasksNext').disabled = isLoggedIn() ? state.loading || !mainView.next || mainView.page >= 199 : start + TASKS_PER_PAGE >= matched.length;
+    $('focusedTaskNotice').classList.toggle('hidden', !isLoggedIn() || !mainView.focus);
     renderBulkBar();
 
     // The board shows the same filtered set, grouped differently.
@@ -1850,14 +1801,14 @@ function renderTasks() {
     const active = splitCompleted ? visible.filter(t => !t.completed) : visible;
     const done = splitCompleted ? visible.filter(t => t.completed) : [];
 
-    for (const task of sortTasks(active)) list.appendChild(renderTaskItem(task));
+    for (const task of isLoggedIn() ? active : sortTasks(active)) list.appendChild(renderTaskItem(task));
 
     if (done.length) {
         completedSection.classList.remove('hidden');
         $('completedSectionCount').textContent = String(done.length);
         completedList.classList.toggle('hidden', state.completedCollapsed);
         if (!state.completedCollapsed) {
-            for (const task of sortTasks(done)) completedList.appendChild(renderTaskItem(task));
+            for (const task of isLoggedIn() ? done : sortTasks(done)) completedList.appendChild(renderTaskItem(task));
         }
     } else {
         completedSection.classList.add('hidden');
@@ -1888,12 +1839,12 @@ function renderBoard(visible) {
         const inColumn = visible.filter(t => taskStatus(t) === status);
         const count = document.createElement('span');
         count.className = 'board-column-count';
-        count.textContent = String(inColumn.length);
+        count.textContent = `${inColumn.length}${isLoggedIn() ? ' on page' : ''}`;
         head.appendChild(count);
 
         const cards = document.createElement('ul');
         cards.className = 'board-cards';
-        for (const task of sortTasks(inColumn)) cards.appendChild(renderCard(task, status));
+        for (const task of isLoggedIn() ? inColumn : sortTasks(inColumn)) cards.appendChild(renderCard(task, status));
 
         column.append(head, cards);
         board.appendChild(column);
@@ -2023,6 +1974,13 @@ function setProgress(percent) {
 }
 
 function renderCounts(tasks) {
+    if (isLoggedIn()) {
+        const c = mainView.data?.counts;
+        for (const [id, value] of Object.entries({ countAll:c?.total, countActive:c ? c.total-c.done : undefined, countDone:c?.done, countOverdue:c?.overdue, countHigh:c?.high, countToday:c?.today, countUpcoming:c?.upcoming, totalCount:c?.total, completedCount:c?.done })) $(id).textContent = value === undefined ? '—' : String(value);
+        const percent = c?.total ? Math.round(c.done / c.total * 100) : 0; setProgress(percent);
+        if (c) $('progress').setAttribute('aria-valuenow', String(percent)); else $('progress').removeAttribute('aria-valuenow');
+        return;
+    }
     const done = tasks.filter(t => t.completed).length;
     const total = tasks.length;
 
@@ -2046,7 +2004,8 @@ function renderTagChips(tasks) {
     const container = $('tagChips');
     container.textContent = '';
 
-    const tags = allTags(tasks);
+    const tags = isLoggedIn() ? (mainView.data?.tags || []).map(row => [row.tag, row.count]) : allTags(tasks);
+    $('moreTagsNotice').classList.toggle('hidden', !isLoggedIn() || !mainView.data?.tags_more);
     if (!tags.length) {
         container.classList.add('hidden');
         return;
@@ -2088,14 +2047,15 @@ async function addTask(title, dueDate, priority, tags, notes = '') {
     if (tags.length) body.tags = tags;
     if (state.currentWorkspaceId) body.workspace_id = state.currentWorkspaceId;
 
+    const user = state.user, workspace = state.currentWorkspaceId;
     const { ok, data } = await api('/api/tasks', { method: 'POST', body });
+    if (state.user !== user || state.currentWorkspaceId !== workspace) return;
     if (!ok) {
         toast(data?.error || 'Could not add the task', 'error');
         return;
     }
 
-    state.tasks.push(data);
-    renderTasks();
+    await loadTasks();
     announce(`Added ${title}`);
 }
 
@@ -2134,7 +2094,9 @@ async function changeTask(id, body) {
     if (!result.ok) { renderTasks(); taskWriteError(id, result); return; }
     const task = state.tasks.find(task => task.id === id); if (task) Object.assign(task, result.data);
     renderTasks();
-    if (result.data.completed && result.data.recurrence !== 'none') await loadTasks();
+    const parent = task?.parent_id;
+    await loadTasks();
+    if (parent) await loadMainChildren(parent);
 }
 
 async function deleteTask(id) {
@@ -2144,13 +2106,13 @@ async function deleteTask(id) {
         return;
     }
 
-    const removed = state.tasks.find(t => t.id === id), user = state.user;
+    const removed = state.tasks.find(t => t.id === id), user = state.user, workspace = state.currentWorkspaceId;
     if (!removed || trashMutations.has(id)) return;
     trashMutations.add(id);
     const result = await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
     const { ok, data } = result;
     trashMutations.delete(id);
-    if (state.user !== user) return;
+    if (state.user !== user || state.currentWorkspaceId !== workspace) return;
     if (!ok) {
         taskWriteError(id, result);
         return;
@@ -2162,6 +2124,8 @@ async function deleteTask(id) {
         label: 'Undo',
         onClick: () => { if (state.user === user) restoreTrashedTask(id, null, data.delete_batch); },
     });
+    await loadTasks();
+    if (removed.parent_id) await loadMainChildren(removed.parent_id);
 }
 
 const trashMutations = new Set();
@@ -2289,7 +2253,7 @@ async function saveTaskEdit(form) {
     if (task) Object.assign(task, data);
     taskDrafts.delete(id);
     state.editingId = null;
-    renderTasks();
+    await loadTasks();
     toast('Task updated', 'success');
 }
 
@@ -2384,18 +2348,20 @@ async function applyOne(action, id) {
 // ============ SUBTASKS ============
 
 async function addSubtask(parentId, title) {
+    const user = state.user, workspace = state.currentWorkspaceId;
     const body = { title, parent_id: parentId };
     const parent = state.tasks.find(t => String(t.id) === String(parentId));
     if (parent && parent.workspace_id) body.workspace_id = parent.workspace_id;
 
     const { ok, data } = await api('/api/tasks', { method: 'POST', body });
+    if (state.user !== user || state.currentWorkspaceId !== workspace) return;
     if (!ok) {
         toast(data?.error || 'Could not add the subtask', 'error');
         return;
     }
-    state.tasks.push(data);
     state.addingSubtaskFor = null;
-    renderTasks();
+    await loadTasks();
+    await loadMainChildren(String(parentId));
 }
 
 // ============ CSV EXPORT ============
@@ -2404,17 +2370,19 @@ async function addSubtask(parentId, title) {
 /// quote character; a field is quoted whenever it holds a delimiter, a quote
 /// or a newline.
 function csvField(value) {
-    const text = value === null || value === undefined ? '' : String(value);
+    let text = value === null || value === undefined ? '' : String(value);
+    // Quoting alone does not prevent spreadsheet formula execution.
+    if (/^\s*[=+@-]/.test(text) || /^[\t\r]/.test(text)) text = "'" + text;
     if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
     return text;
 }
 
-function tasksAsCsv() {
+function tasksAsCsv(tasks = workspaceTasks()) {
     const columns = ['id', 'title', 'notes', 'status', 'completed', 'priority',
         'due_date', 'tags', 'recurrence', 'parent_id', 'created_at'];
     const rows = [columns.join(',')];
 
-    for (const task of workspaceTasks()) {
+    for (const task of tasks) {
         rows.push(columns.map(c => {
             if (c === 'tags') return csvField((task.tags || []).join(' '));
             return csvField(task[c]);
@@ -2424,7 +2392,11 @@ function tasksAsCsv() {
 }
 
 function downloadCsv() {
-    const blob = new Blob([tasksAsCsv()], { type: 'text/csv;charset=utf-8' });
+    if (isLoggedIn()) return downloadCompleteCsv();
+    saveCsv(tasksAsCsv()); toast('CSV downloaded', 'success');
+}
+function saveCsv(text) {
+    const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -2435,7 +2407,6 @@ function downloadCsv() {
     // Revoking immediately can cancel the download in some browsers; a tick is
     // enough for the navigation to have started.
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    toast('CSV downloaded', 'success');
 }
 
 // ============ WORKSPACE MEMBERS & INVITES ============
@@ -3012,16 +2983,19 @@ function bindTaskList(listEl) {
 
         if (act === 'toggle') toggleTask(id);
         else if (act === 'delete') deleteTask(id);
-        else if (act === 'edit') { state.editingId = id; renderTasks(); }
+        else if (act === 'edit') startTaskEdit(id);
         else if (act === 'cancel-edit') { taskDrafts.delete(String(state.editingId)); state.editingId = null; renderTasks(); }
         else if (act === 'review-conflict') reviewTaskConflict(id);
         else if (act === 'use-latest') resolveTaskDraft(id, false);
         else if (act === 'keep-draft') resolveTaskDraft(id, true);
-        else if (act === 'filter-tag') { state.tagFilter = tag; renderTasks(); }
+        else if (act === 'filter-tag') { state.tagFilter = tag; mainView.focus = null; renderTasks(); }
         else if (act === 'select') toggleSelected(id);
         else if (act === 'add-subtask') { state.addingSubtaskFor = String(id); renderTasks(); }
         else if (act === 'cancel-subtask') { state.addingSubtaskFor = null; renderTasks(); }
+        else if (act === 'show-subtasks') loadMainChildren(id);
+        else if (act === 'hide-subtasks') { clearMainChildren(); renderTasks(); }
         else if (act === 'page-subtasks') {
+            if (isLoggedIn()) { loadMainChildren(id, (mainView.child?.page || 0) + Number(el.dataset.delta), mainView.child?.focus); return; }
             state.childPages.set(id, (state.childPages.get(id) || 0) + Number(el.dataset.delta));
             renderTasks();
             document.querySelector(`[data-parent-page="${CSS.escape(id)}"]`)?.focus();
@@ -3143,15 +3117,18 @@ function bindViewSwitch() {
 }
 
 function bindToolbar() {
-    // Search filters what is already loaded, so it can run on every keystroke
-    // without a request. A debounce would only add latency.
+    $('backToTasks').addEventListener('click', () => { if (!leaveMainDrafts()) return; mainView.focus = null; renderTasks(); });
+    $('exactTagForm').addEventListener('submit', e => { e.preventDefault(); state.tagFilter = $('exactTagInput').value.trim() || null; mainView.focus = null; renderTasks(); });
+    // prepareMainView debounces signed-in server searches.
     $('searchInput').addEventListener('input', (e) => {
         state.search = e.target.value;
+        mainView.focus = null;
         renderTasks();
     });
 
     $('sortSelect').addEventListener('change', (e) => {
         state.sort = e.target.value;
+        mainView.focus = null;
         try { localStorage.setItem(`${viewStorageKey()}:sort`, state.sort); } catch (_) { /* ignore */ }
         renderTasks();
     });
@@ -3160,6 +3137,7 @@ function bindToolbar() {
         const chip = e.target.closest('[data-filter]');
         if (!chip) return;
         state.filter = chip.dataset.filter;
+        mainView.focus = null;
         document.querySelectorAll('#filterChips .chip').forEach(c => {
             c.setAttribute('aria-pressed', String(c === chip));
         });
@@ -3172,6 +3150,7 @@ function bindToolbar() {
         // Clicking the active tag clears the filter, so the chip is a toggle
         // rather than a one-way trip that needs a separate "clear" control.
         state.tagFilter = state.tagFilter === chip.dataset.tag ? null : chip.dataset.tag;
+        mainView.focus = null;
         renderTasks();
     });
 
@@ -3314,7 +3293,7 @@ function bindActions() {
                 break;
             case 'e': {
                 const first = document.querySelector('[data-act="edit"]');
-                if (first) { state.editingId = first.dataset.id; renderTasks(); }
+                if (first) startTaskEdit(first.dataset.id);
                 break;
             }
             case '?':
@@ -3378,7 +3357,9 @@ async function loadMembersForLabels() {
     }
     const ws = currentWorkspace();
     if (!ws) return;
+    const user = state.user, generation = taskLoadGeneration, view = mainView.data;
     const { ok, data } = await api(`/api/workspaces/${encodeURIComponent(ws.id)}/members`, { quiet: true });
+    if (state.user !== user || state.currentWorkspaceId !== ws.id || taskLoadGeneration !== generation || mainView.data !== view) return;
     state.members = ok && Array.isArray(data) ? data : [];
 }
 
