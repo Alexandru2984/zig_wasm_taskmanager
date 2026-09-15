@@ -100,7 +100,7 @@ if(process.env.RUN_UI==='1'){
         await check('logout aborts export and clears main-view queries, totals, focus and late responses',async()=>{
             assert.ok(await page.evaluate(async()=>{
                 const original=window.fetch,originalSave=saveCsv,finish=[];let downloads=0;
-                window.fetch=path=>new Promise(resolve=>{finish.push(()=>resolve(new Response(JSON.stringify(String(path).endsWith('/members')?[{name:'Private late member'}]:{items:[],next_cursor:null,as_of:Date.now()}),{headers:{'Content-Type':'application/json'}})));});
+                window.fetch=path=>new Promise(resolve=>{const body=String(path).includes('/directory?')?{workspace_id:state.currentWorkspaceId,items:[{user_id:'users:private_late',name:'Private late member',role:'member'}],next_cursor:null}:{items:[],next_cursor:null,as_of:Date.now()};finish.push(()=>resolve(new Response(JSON.stringify(body),{headers:{'Content-Type':'application/json'}})));});
                 saveCsv=()=>downloads++;
                 try{state.members=[{name:'Private retained member'}];const pending=downloadCsv(),labels=loadMembersForLabels();const requested=finish.length;showLoggedOut();finish.forEach(resolve=>resolve());await Promise.all([pending,labels]);return requested===2&&downloads===0&&state.tasks.length===0&&state.members.length===0&&mainView.data===null&&mainView.input===null&&mainView.focus===null&&mainView.savedFocus===null&&mainView.context===''&&mainView.child===null;}
                 finally{window.fetch=original;saveCsv=originalSave;}

@@ -27,7 +27,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/favicon.svg">
     <link rel="manifest" href="/site.webmanifest">
-    <link rel="stylesheet" href="/style.css?v=e2e54585">
+    <link rel="stylesheet" href="/style.css?v=4a8e7f1f">
 
     <!-- Structured data. The CSP forbids inline <script>, but this is
          application/ld+json, which is data rather than script: the parser
@@ -467,15 +467,26 @@
             <button class="modal-close" data-action="hide-modal" data-target="workspaceModal" aria-label="Close">×</button>
             <h2 id="workspaceTitle">Workspace</h2>
             <p class="modal-desc" id="workspaceSubtitle">Members and invitations</p>
+            <form id="workspaceRenameForm" class="hidden">
+                <div class="form-group"><label for="workspaceRename">Workspace name</label><input id="workspaceRename" required maxlength="80" autocomplete="off"></div>
+                <div id="workspaceRenameError" class="form-error" role="alert"></div>
+                <button class="btn btn-secondary" type="submit">Save workspace name</button>
+            </form>
 
             <div class="tabs" role="tablist">
                 <button class="tab-btn active" data-action="switch-tab" data-tab="members" data-scope="workspace" role="tab" aria-selected="true">Members</button>
-                <button class="tab-btn" data-action="switch-tab" data-tab="invites" data-scope="workspace" role="tab" aria-selected="false">Invitations</button>
+                <button class="tab-btn" id="workspaceInvitesTab" data-action="switch-tab" data-tab="invites" data-scope="workspace" role="tab" aria-selected="false">Invitations</button>
             </div>
 
             <div class="tab-content active" id="workspaceTabMembers" role="tabpanel">
+                <form id="memberSearchForm" class="team-search">
+                    <label for="memberSearch">Find teammates by name</label>
+                    <input id="memberSearch" type="search" maxlength="80" autocomplete="off">
+                    <button class="btn btn-ghost" type="submit">Search / refresh</button>
+                    <button class="btn btn-ghost" type="button" id="memberNext" disabled>Next teammates</button>
+                </form>
                 <ul class="panel-list" id="memberList"></ul>
-                <div class="panel-empty hidden" id="memberEmpty">No members to show.</div>
+                <div class="panel-empty hidden" id="memberEmpty" role="status">No members to show.</div>
             </div>
 
             <div class="tab-content" id="workspaceTabInvites" role="tabpanel">
@@ -655,7 +666,7 @@
         </div>
     </div>
 
-    <script src="/app.js?v=c7f0544f"></script>
-    <script src="/task-view.js?v=0f7146bb"></script>
+    <script src="/app.js?v=e490d9d3"></script>
+    <script src="/task-view.js?v=538cda55"></script>
 </body>
 </html>

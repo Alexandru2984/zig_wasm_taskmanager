@@ -77,7 +77,7 @@ async function loadMainTasks(options = {}) {
     try {
         const result = await readMainPage(body, controller.signal);
         if (!current()) return false;
-        if ([403,404].includes(result.status)) { clearMainChildren(); mainView.data = null; state.tasks = []; taskDrafts.clear(); state.editingId = null; state.selection.clear(); state.members = []; resetTrash(); resetUsage(true); }
+        if ([403,404].includes(result.status)) { clearMainChildren(); mainView.data = null; state.tasks = []; taskDrafts.clear(); state.editingId = null; state.selection.clear(); resetWorkspacePanel(true); resetTrash(); resetUsage(true); }
         const data = result.data;
         if (!result.ok || !validMainPage(data) || (body.query.as_of && data.as_of !== body.query.as_of)) return false;
         // A refresh must not silently hide an editor whose row moved or was
@@ -118,7 +118,7 @@ async function loadMainChildren(parent, page = 0, focus = null) {
     try {
         const result = await readMainPage(body, controller.signal);
         if (!current()) return false;
-        if ([403,404].includes(result.status)) { state.tasks = []; mainView.data = null; taskDrafts.clear(); state.editingId = null; state.addingSubtaskFor = null; state.selection.clear(); state.members = []; resetTrash(); resetUsage(true); $('taskLoadError').classList.remove('hidden'); }
+        if ([403,404].includes(result.status)) { state.tasks = []; mainView.data = null; taskDrafts.clear(); state.editingId = null; state.addingSubtaskFor = null; state.selection.clear(); resetWorkspacePanel(true); resetTrash(); resetUsage(true); $('taskLoadError').classList.remove('hidden'); }
         if (!result.ok || !validMainPage(result.data, true) || result.data.as_of !== mainView.asOf || result.data.items.some(task => task.parent_id !== parent)) { child.error = true; return false; }
         const data = result.data;
         state.tasks = [...state.tasks.filter(task => !task.parent_id), ...data.items];

@@ -123,8 +123,8 @@ pub fn listMembers(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem.
         return;
     }
 
-    const db_result = db.listWorkspaceMembers(req_alloc, workspace_id) catch {
-        try http.jsonError(r, 500, "Failed to load members");
+    const db_result = db.listWorkspaceMembers(req_alloc, user_id, workspace_id) catch |err| {
+        try http.mutationError(r, err, "Failed to load members");
         return;
     };
     defer req_alloc.free(db_result);
@@ -138,6 +138,61 @@ pub fn listMembers(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem.
     }
 
     try http.jsonSuccess(r, parsed.value[0].result);
+}
+
+pub fn directory(r: zap.Request, workspace_id: []const u8, a: std.mem.Allocator) !void {
+    const user = http.getCurrentUserId(a, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    if (rate_limiter.task_search_limiter) |*limiter| {
+        if (!limiter.isAllowed(user)) {
+            r.setHeader("Retry-After", "60") catch {};
+            try http.jsonError(r, 429, "Too many directory reads. Please wait 1 minute.");
+            return;
+        }
+    }
+    r.parseQuery();
+    const term = (try r.getParamStr(a, "q")) orelse "";
+    const after = try r.getParamStr(a, "after");
+    if (term.len > 80 or !std.unicode.utf8ValidateSlice(term) or (after != null and !@import("../db/http_client.zig").validRecordIdFor(after.?, "users"))) {
+        try http.jsonError(r, 400, "Invalid directory query");
+        return;
+    }
+    const result = db.impl.workspaceDirectory(a, user, workspace_id, term, after) catch |err| {
+        try http.mutationError(r, err, "Directory is temporarily unavailable");
+        return;
+    };
+    defer a.free(result);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.DirectoryMember), a, result, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (parsed.value.len != 1) return error.InvalidResponse;
+    const rows = parsed.value[0].result;
+    try http.jsonSuccess(r, .{ .workspace_id = workspace_id, .items = rows[0..@min(rows.len, 50)], .next_cursor = if (rows.len > 50) rows[49].user_id else @as(?[]const u8, null) });
+}
+
+pub fn rename(r: zap.Request, workspace_id: []const u8, a: std.mem.Allocator) !void {
+    const user = http.getCurrentUserId(a, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    const input = http.parseBody(a, r, models.RenameWorkspaceRequest) catch {
+        try http.jsonError(r, 400, "Name and expected_name are required");
+        return;
+    };
+    if (!validation.validateWorkspaceName(input.name) or !validation.validateWorkspaceName(input.expected_name)) {
+        try http.jsonError(r, 400, "Invalid workspace name");
+        return;
+    }
+    const result = db.impl.renameWorkspace(a, user, workspace_id, input.name, input.expected_name) catch |err| {
+        try http.mutationError(r, err, "Failed to rename workspace");
+        return;
+    };
+    defer a.free(result);
+    db.logActivity(a, user, "rename_workspace", "workspace", workspace_id) catch |err| {
+        log.warn("Failed to log workspace rename: {}", .{err});
+    };
+    try http.jsonSuccess(r, .{ .id = workspace_id, .name = input.name });
 }
 
 pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem.Allocator) !void {
@@ -442,8 +497,8 @@ pub fn listInvites(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem.
     }
 
     const now = std.time.timestamp();
-    const db_result = db.listPendingWorkspaceInvites(req_alloc, workspace_id, now) catch {
-        try http.jsonError(r, 500, "Failed to load invites");
+    const db_result = db.listPendingWorkspaceInvites(req_alloc, user_id, workspace_id, now) catch |err| {
+        try http.mutationError(r, err, "Failed to load invites");
         return;
     };
     defer req_alloc.free(db_result);

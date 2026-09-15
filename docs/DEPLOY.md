@@ -88,6 +88,12 @@ and never restore a stale DB snapshot over newer writes as a routine rollback.
 
 ## Stage, migrate, promote
 
+The [P6a team directory/assignment/rename](TEAM-COLLABORATION.md) needs no
+migration or runtime configuration change. Publish matching binary/assets and
+use the retained `a4c4485` live release for binary-only rollback. Renamed
+workspaces and task assignments remain compatible; never revert a DB export
+to undo a binary deployment. Client handoff/other-host packaging is deferred.
+
 The [bounded main view](TASK-VIEW.md) needs no migration or runtime-config
 change. Publish `app.js`, `task-view.js`, HTML/CSS and the executable together;
 stamp all asset URLs before committing. Its binary-only rollback target is

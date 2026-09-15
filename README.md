@@ -43,8 +43,10 @@ systemd-sandboxed VPS deployment.
 - Keyboard shortcuts and complete, cancellable workspace CSV export, independent
   of the visible page, with formula-leading cell mitigation and no partial
   download after an error. Browser export has an explicit size budget.
-- Multi-workspace task tenancy with owner/admin/member/viewer roles, member
-  listing, and email invite acceptance.
+- Multi-workspace task tenancy with owner/admin/member/viewer roles and email
+  invite acceptance. [Team directory and assignment](docs/TEAM-COLLABORATION.md)
+  are available to ordinary members without exposing emails, with bounded name
+  search/pages, plus owner/admin workspace renaming with conflict protection.
 - Email verification, password reset and invitations through an encrypted,
   transactional email outbox, with bounded retries and per-account delivery status.
   Signup still reveals existing addresses; timing equivalence is not established.

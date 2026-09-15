@@ -1522,6 +1522,20 @@ select {
     font-size: 0.9375rem;
 }
 
+.team-search, .assignee-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s2);
+    min-width: 0;
+    width: 100%;
+    margin-block: var(--s3);
+}
+.team-search label, .assignee-picker select, .assignee-picker small { width: 100%; }
+.team-search input, .assignee-picker input { flex: 1 1 12rem; min-width: 0; }
+.assignee-picker select { text-overflow: ellipsis; }
+.assignee-picker small { color: var(--text-muted); }
+#workspaceRenameForm { margin-bottom: var(--s4); }
+
 .danger-zone {
     margin-top: var(--s5);
     padding: var(--s4);

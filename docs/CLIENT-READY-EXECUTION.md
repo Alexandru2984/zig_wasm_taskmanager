@@ -4,13 +4,17 @@ Scope: the six batches requested after P1. This is an execution checklist,
 not a promise that listed features already exist. It refines
 [PRODUCT-IMPLEMENTATION.md](PRODUCT-IMPLEMENTATION.md).
 
+Owner update, 2026-09-15: the application stays on the existing VPS; no handoff
+is planned now. Continue shared product/security improvements, not packaging
+another host. External backup remains deferred.
+
 | Batch | Work | Acceptance | State |
 | --- | --- | --- | --- |
 | A / P1b | Remove DB bootstrap secrets from process arguments, rotate exposed administrator credential, separate bootstrap from ordinary startup | Persistent restart/rollback drill, old credential denied, runtime rights unchanged, live readiness; no customer data restore over newer writes | Complete, production verified 2026-09-08 |
 | B / P2 | Encrypted persistent email outbox, atomic enqueue with originating credential/invite changes, bounded leases/retries/expiry, delivery visibility and operator alert hook | Failure and restart/concurrent-worker tests; no plaintext queued tokens in DB export; validity checked immediately before SMTP (in-flight mail cannot be recalled); no actual SMTP in mutation tests | Complete, production source 708f6a6 verified 2026-09-08; external alert destination still owner-dependent |
 | C / P3 | Scoped task trash, restore and real undo, coherent parent/child behavior, reminders/export/deletion integration, mobile UI | [226 checks](TASK-TRASH.md), including original IDs/metadata, failed cascades, stale Undo, revocation, recurrence and mobile/keyboard behavior | Complete; no automatic purge or offline trash introduced |
 | D / P4 | Bounded pagination and server-side search/filter/sort, quotas, complete export, conflict UX and measured load | [D1](TASK-PAGINATION.md): 2,106 rows; [D2a](TASK-VERSIONS.md): conditional writes; [D2b](TASK-SEARCH.md): finder; [D2c](TASK-QUOTAS.md): quotas/mixed load; [D2d](TASK-VIEW.md): bounded main view, lazy children, complete CSV; 320 regression + 9 operator-helper checks | D1/D2a/D2b/D2c/D2d complete; physical/global storage control, streaming account export and broader capacity profiling remain |
-| E / P6-P7 | Member directory/assignment picker, workspace rename/archive/owner transfer, scoped comments and mentions | Owner invariant; archived workspace writes denied; comments escaped and bounded; minimal member disclosure; mobile/keyboard and RBAC tests | Planned |
+| E / P6-P7 | Member directory/assignment picker, workspace rename/archive/owner transfer, scoped comments and mentions | [P6a](TEAM-COLLABORATION.md): 21 scoped directory/assignment/rename API/browser checks, inherited regressions and isolated canary | P6a complete; archive, ownership transfer, comments and mentions remain |
 | F / P5-P10 | Portable app/DB deployment, separate migration identity, setup/upgrade/recovery docs, configurable identity, operator/user guides, accessibility pass | [P5a](PORTABLE-INSTALL.md): 14 portable scenarios, 71 browser and 56 unit checks; isolated fresh-volume install, rollback/restore and scoped runtime | P5a complete; fresh-host acceptance, TLS/proxy packaging, client branding and commercial choices remain |
 
 Implementation order follows dependencies; each tested sub-batch is committed

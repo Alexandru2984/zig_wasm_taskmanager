@@ -228,6 +228,91 @@ paths:
           description: Concurrent state change; review before retrying
         "422":
           description: Owned workspace quota reached; use an existing workspace or contact the operator
+  /api/workspaces/{id}:
+    patch:
+      summary: Rename a workspace as its owner or administrator
+      description: >-
+        Requires CSRF and current owner/admin authority checked atomically
+        with the name update. expected_name must match the current name;
+        stale state returns 409 without automatic replay. Name equality is
+        not a global revision (A to B to A may match A again). Other workspace
+        fields, ownership and tasks are unchanged. Names are 1–120 UTF-8 bytes
+        without markup angle brackets or control characters.
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, expected_name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+                expected_name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "200":
+          description: Name updated; private no-store response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, name]
+                properties:
+                  id: { type: string }
+                  name: { type: string }
+        "400": { description: Invalid input or missing expected name }
+        "401": { description: Not authenticated }
+        "403": { description: Insufficient role or invalid CSRF }
+        "404": { description: Workspace unavailable }
+        "409": { description: Name or concurrent state changed; explicitly review before retrying }
+  /api/workspaces/{id}/directory:
+    get:
+      summary: Search one minimal page of workspace teammates
+      description: >-
+        Available to every current workspace role, including viewers. Projects
+        only user ID, display name and role, never email or account secrets.
+        Name-only case-insensitive substring search; fixed pages of at most 50,
+        ordered by user ID. Membership is rechecked on every page, in the same
+        database transaction as the read. Cursors are not authorization or a
+        stable membership snapshot; refresh to discover newly added earlier
+        IDs. Shares the 120/minute per-account search/usage limit. No-store.
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+        - in: query
+          name: q
+          description: Display-name substring, at most 80 UTF-8 bytes; emails are not searched
+          schema: { type: string, maxLength: 80 }
+        - in: query
+          name: after
+          schema: { type: string, pattern: '^users:[A-Za-z0-9_-]+$' }
+      responses:
+        "200":
+          description: One minimal directory page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workspace_id, items, next_cursor]
+                properties:
+                  workspace_id: { type: string }
+                  next_cursor: { type: string, nullable: true }
+                  items:
+                    type: array
+                    maxItems: 50
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [user_id, name, role]
+                      properties:
+                        user_id: { type: string }
+                        name: { type: string }
+                        role: { type: string, enum: [owner, admin, member, viewer] }
+        "400": { description: Invalid workspace ID, cursor or search }
+        "401": { description: Not authenticated }
+        "403": { description: Workspace access denied }
+        "429": { description: Search/usage/directory request budget exhausted; Retry-After 60 }
+        "500": { description: Directory unavailable; retry explicitly }
   /api/workspaces/{id}/usage:
     get:
       summary: Read current logical task usage and deployment-wide limits

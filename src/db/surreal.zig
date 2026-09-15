@@ -837,10 +837,36 @@ pub fn canAdminWorkspace(allocator: std.mem.Allocator, user_id: []const u8, work
     return false;
 }
 
-pub fn listWorkspaceMembers(allocator: std.mem.Allocator, workspace_id: []const u8) ![]u8 {
+pub fn listWorkspaceMembers(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8) ![]u8 {
     return queryWithVars(allocator,
+        \\BEGIN TRANSACTION;
+        \\LET $role = (SELECT VALUE role FROM workspace_members WHERE workspace_id = $workspace_id AND user_id = $user_id)[0];
+        \\IF !($role INSIDE ["owner", "admin"]) { THROW "APP_FORBIDDEN"; };
         \\SELECT id, user_id.id AS user_id, user_id.email AS email, user_id.name AS name, role, created_at FROM workspace_members WHERE workspace_id = $workspace_id;
-    , .{ .workspace_id = rec(workspace_id) });
+        \\COMMIT TRANSACTION;
+    , .{ .user_id = rec(user_id), .workspace_id = rec(workspace_id) });
+}
+
+pub fn workspaceDirectory(a: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8, term: []const u8, after: ?[]const u8) ![]u8 {
+    return queryWithVars(a,
+        \\BEGIN TRANSACTION;
+        \\LET $role = (SELECT VALUE role FROM workspace_members WHERE workspace_id = $workspace_id AND user_id = $user_id)[0];
+        \\IF !($role INSIDE ["owner", "admin", "member", "viewer"]) { THROW "APP_FORBIDDEN"; };
+        \\SELECT user_id, user_id.name AS name, role FROM workspace_members WHERE workspace_id = $workspace_id
+        \\    AND ($after = NONE OR user_id > $after) AND user_id.name != NONE
+        \\    AND ($term = "" OR string::contains(string::lowercase(user_id.name), string::lowercase($term)))
+        \\    ORDER BY user_id ASC LIMIT 51 TIMEOUT 2s;
+        \\COMMIT TRANSACTION;
+    , .{ .user_id = rec(user_id), .workspace_id = rec(workspace_id), .term = term, .after = if (after) |value| rec(value) else null });
+}
+
+pub fn renameWorkspace(a: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8, name: []const u8, expected: []const u8) ![]u8 {
+    return queryWithVars(a, "BEGIN TRANSACTION;\n" ++ adminFence ++
+        \\LET $changed = (UPDATE workspaces SET name = $name WHERE id = $workspace_id AND name = $expected RETURN AFTER);
+        \\IF array::len($changed) != 1 { THROW "APP_CONFLICT"; };
+        \\RETURN $changed;
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(user_id), .workspace_id = rec(workspace_id), .name = name, .expected = expected });
 }
 
 pub fn createWorkspaceInvite(
@@ -942,10 +968,14 @@ pub fn removeWorkspaceMember(allocator: std.mem.Allocator, actor_id: []const u8,
     , .{ .actor_id = rec(actor_id), .workspace_id = rec(workspace_id), .user_id = rec(user_id) });
 }
 
-pub fn listPendingWorkspaceInvites(allocator: std.mem.Allocator, workspace_id: []const u8, now_ts: i64) ![]u8 {
+pub fn listPendingWorkspaceInvites(allocator: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8, now_ts: i64) ![]u8 {
     return queryWithVars(allocator,
+        \\BEGIN TRANSACTION;
+        \\LET $role = (SELECT VALUE role FROM workspace_members WHERE workspace_id = $workspace_id AND user_id = $user_id)[0];
+        \\IF !($role INSIDE ["owner", "admin"]) { THROW "APP_FORBIDDEN"; };
         \\SELECT id, email, role, expires_at, created_at FROM workspace_invites WHERE workspace_id = $workspace_id AND accepted_at = NONE AND expires_at >= $now_ts ORDER BY created_at DESC;
-    , .{ .workspace_id = rec(workspace_id), .now_ts = now_ts });
+        \\COMMIT TRANSACTION;
+    , .{ .user_id = rec(user_id), .workspace_id = rec(workspace_id), .now_ts = now_ts });
 }
 
 /// Revoke a pending invite, scoped to its workspace so an admin can't delete

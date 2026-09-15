@@ -6,6 +6,9 @@ Completed means implemented, tested and committed, not merely listed here.
 
 ## Decisions and boundaries
 
+- As of 2026-09-15 the owner keeps the application on this VPS only. Defer
+  client handoff, fresh-host/TLS packaging and commercial rollout; prioritize
+  useful product/security work on the existing application.
 - External backup is explicitly deferred at the owner's request. Do not connect
   Google Drive, buy storage or upload customer data. Retain protected local
   exports and recovery procedures. Loss of this VPS remains an uncovered risk.
@@ -31,7 +34,7 @@ Completed means implemented, tested and committed, not merely listed here.
 | P3 | Real task trash/restore, parent-child consistency and scoped undo UI | [226 checks](TASK-TRASH.md): IDs/metadata preserved, stale Undo fenced, concurrent permission changes denied, mobile/keyboard coverage | Complete; automatic purge/retention policy and offline trash not introduced |
 | P4 | Pagination, server-side search/filter/sort, resource quotas and load measurements | [D1 pagination](TASK-PAGINATION.md); [D2a versions](TASK-VERSIONS.md); [D2b finder](TASK-SEARCH.md); [D2c quotas](TASK-QUOTAS.md); [D2d bounded main view/complete CSV](TASK-VIEW.md): 320 regression + 9 operator-helper checks | D1/D2a/D2b/D2c/D2d complete; physical/global storage control, streaming account export and broader capacity profiling remain |
 | P5 | Portable installation and upgrade: generic config, full app/DB stack, migration identity, readiness, matched libraries, pinned artifacts and rollback | [P5a portable foundation](PORTABLE-INSTALL.md): 14 install/recovery scenarios, 71 browser and 56 unit checks; clean-volume bootstrap, scoped runtime, upgrade/rollback and isolated restore | P5a complete; independent fresh-host acceptance, TLS/proxy packaging and multi-architecture verification remain |
-| P6 | Team lifecycle: minimal member directory, assignment picker, rename/archive workspace, owner transfer and per-workspace saved-view sync | Owner invariant, scoped profiles, archive write prevention, multi-device and authorization tests | Planned |
+| P6 | Team lifecycle: minimal member directory, assignment picker, rename/archive workspace, owner transfer and per-workspace saved-view sync | [P6a directory/assignment/rename](TEAM-COLLABORATION.md): 21 dedicated API/browser checks, inherited regressions and isolated canary | P6a complete; archive, transfer and saved-view sync remain |
 | P7 | Team workflows: comments, mentions, notification preferences, templates and onboarding with optional synthetic examples | Sanitization, quotas, tenant isolation, accessible notification controls; a new user completes the core flow unaided | Planned |
 | P8 | CSV/JSON import preview and validation; agenda/calendar, date presets and timezone policy | Bounded import, duplicate strategy, preview before writes, partial-failure recovery, DST/calendar and mobile checks | Planned |
 | P9 | Account/operational hardening: uniform registration flow, MFA/passkeys/recovery, durable abuse controls, security events and alerts | Revocation/replay/recovery tests; explicit event retention; alert delivery to an owner-selected destination | Planned |

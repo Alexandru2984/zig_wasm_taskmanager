@@ -31,8 +31,7 @@ const state = {
     /// checked once per row on every render.
     selection: new Set(),
     selectMode: false,
-    /// Workspace members, for the assignee picker. Loaded lazily: it needs
-    /// admin rights, which most members will not have.
+    /// One minimal directory page; never emails or a full workspace roster.
     members: [],
     addingSubtaskFor: null,
     savedViews: [],
@@ -286,6 +285,7 @@ function showLoggedIn(user) {
     if (state.user !== user) resetUsage(true);
     if (state.user !== user) resetTaskSearch(true);
     if (state.user?.id !== user.id) {
+        resetWorkspacePanel(true);
         cancelTaskLoad();
         taskDrafts.clear();
         resetTrash();
@@ -340,6 +340,7 @@ function renderVerifiedBadge(user) {
 }
 
 function showLoggedOut() {
+    resetWorkspacePanel(true);
     resetMainView();
     resetUsage(true);
     resetTaskSearch(true);
@@ -859,6 +860,7 @@ function renderWorkspaceBar() {
 
 function switchWorkspace(id) {
     if ([...taskDrafts.values()].some(draft => draft.dirty) && !window.confirm('Discard unsaved task edits and switch workspace?')) { renderWorkspaceBar(); return; }
+    resetWorkspacePanel(true);
     resetMainView();
     resetUsage(true);
     resetTaskSearch(true);
@@ -874,7 +876,7 @@ function switchWorkspace(id) {
     } catch (_) { /* ignore */ }
     renderWorkspaceBar();
     renderTasks();
-    return loadTasks();
+    return Promise.all([loadTasks(), loadMembersForLabels()]);
 }
 
 async function handleCreateWorkspace(e) {
@@ -1164,7 +1166,7 @@ function memberName(userId) {
     const m = state.members.find(x => x.user_id === userId);
     if (m) return m.name || m.email;
     if (state.user && state.user.id === userId) return state.user.name;
-    return null;
+    return 'Assigned teammate';
 }
 
 function matchesSearch(task, needle) {
@@ -1633,25 +1635,7 @@ function renderTaskEditor(task) {
         recurrence.appendChild(option);
     }
 
-    // Only offered where it can be honoured: assigning needs the member list,
-    // which needs admin rights, and the offline store has no members at all.
-    let assignee = null;
-    if (isLoggedIn() && state.members.length) {
-        assignee = document.createElement('select');
-        assignee.setAttribute('aria-label', 'Assignee');
-        assignee.dataset.field = 'assignee_id';
-        const none = document.createElement('option');
-        none.value = '';
-        none.textContent = 'Unassigned';
-        assignee.appendChild(none);
-        for (const m of state.members) {
-            const option = document.createElement('option');
-            option.value = m.user_id;
-            option.textContent = m.name || m.email;
-            if (task.assignee_id === m.user_id) option.selected = true;
-            assignee.appendChild(option);
-        }
-    }
+    const assignee = isLoggedIn() && currentWorkspace() ? buildAssigneePicker({ ...task, assignee_id: draft.values?.assignee_id ?? task.assignee_id }) : null;
 
     row.append(priority, due);
     const row2 = document.createElement('div');
@@ -2415,50 +2399,135 @@ const ROLE_LABEL = {
     owner: 'Owner', admin: 'Admin', member: 'Member', viewer: 'Viewer',
 };
 
+let teamGeneration = 0, teamScope = 0, teamRead = 0, inviteRead = 0, labelRead = 0, teamNext = null, teamQuery = '';
+function resetWorkspacePanel(close = false) {
+    teamGeneration++; teamRead++; inviteRead++; teamNext = null; teamQuery = '';
+    if (close) { teamScope++; labelRead++; state.members = []; }
+    for (const id of ['memberList','inviteList']) $(id).replaceChildren();
+    for (const id of ['workspaceTitle','workspaceSubtitle','memberEmpty','inviteEmpty','workspaceRenameError']) $(id).textContent = '';
+    for (const id of ['memberSearch','workspaceRename']) $(id).value = '';
+    $('workspaceRenameForm').classList.add('hidden');
+    delete $('workspaceRenameForm').dataset.expected;
+    $('memberNext').disabled = true;
+    if (close && !$('workspaceModal').hidden) hideModal('workspaceModal');
+}
+function teamContext(panel = true) {
+    const user = state.user, workspace = state.currentWorkspaceId, generation = teamGeneration, scope = teamScope;
+    return () => state.user === user && state.currentWorkspaceId === workspace && teamScope === scope && (!panel || teamGeneration === generation);
+}
+async function readDirectory(workspace, term = '', after = null) {
+    const query = new URLSearchParams({ q: term });
+    if (after) query.set('after', after);
+    const result = await api(`/api/workspaces/${encodeURIComponent(workspace)}/directory?${query}`, { quiet: true });
+    const data = result.data;
+    if (result.ok && (data?.workspace_id !== workspace || !Array.isArray(data.items) || data.items.length > 50 ||
+        !data.items.every(row => /^users:[a-zA-Z0-9_-]+$/.test(row.user_id) && typeof row.name === 'string' && Object.hasOwn(ROLE_LABEL,row.role)) ||
+        !(data.next_cursor === null || /^users:[a-zA-Z0-9_-]+$/.test(data.next_cursor)))) return { ok: false, status: 503 };
+    return result;
+}
+function buildAssigneePicker(task) {
+    const box = document.createElement('div'); box.className = 'assignee-picker';
+    const select = document.createElement('select'); select.dataset.field = 'assignee_id'; select.setAttribute('aria-label','Assignee');
+    function choices(rows, selected, label) {
+        select.replaceChildren(new Option('Unassigned',''));
+        for (const row of rows) select.add(new Option(`${row.name || 'Teammate'} · ${row.user_id}`, row.user_id));
+        if (selected && !rows.some(row => row.user_id === selected)) select.add(new Option(label || `Current assignee · ${selected}`, selected));
+        select.value = selected || '';
+    }
+    choices(state.members, task.assignee_id);
+    const search = document.createElement('input'); search.type = 'search'; search.maxLength = 80;
+    search.placeholder = 'Find a teammate by name'; search.setAttribute('aria-label','Search teammates');
+    const find = document.createElement('button'); find.type = 'button'; find.className = 'btn btn-ghost'; find.textContent = 'Find teammates';
+    const more = document.createElement('button'); more.type = 'button'; more.className = 'btn btn-ghost'; more.textContent = 'Next teammates'; more.disabled = true;
+    const status = document.createElement('small'); status.setAttribute('role','status'); status.textContent = 'First 50 teammates. Search to find someone else.';
+    let sequence = 0, next = null, query = '';
+    const current = teamContext(false), workspace = state.currentWorkspaceId;
+    async function load(after = null) {
+        const read = ++sequence; if (!after) query = search.value.trim();
+        find.disabled = more.disabled = true; status.textContent = 'Loading teammates…';
+        const result = await readDirectory(workspace, query, after);
+        if (!current() || !box.isConnected || read !== sequence) return;
+        find.disabled = false;
+        if (!result.ok) {
+            if ([403,404].includes(result.status)) { state.members = []; choices([], select.value); }
+            status.textContent = 'Could not load teammates. Retry Find teammates; your assignment is unchanged.'; return;
+        }
+        choices(result.data.items, select.value, select.selectedOptions[0]?.textContent);
+        next = result.data.next_cursor; more.disabled = !next;
+        status.textContent = `${result.data.items.length} teammates on this page${next ? ' · More available' : ''}. Current selection is preserved.`;
+    }
+    find.addEventListener('click', () => load()); more.addEventListener('click', () => load(next));
+    search.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); void load(); } });
+    box.append(select, search, find, more, status); return box;
+}
+
 async function openWorkspacePanel() {
     closeDropdown();
-    const ws = currentWorkspace();
+    let ws = currentWorkspace();
     if (!ws) {
         toast('No workspace selected', 'error');
         return;
     }
 
-    $('workspaceTitle').textContent = ws.name;
-    $('workspaceSubtitle').textContent = canAdmin()
-        ? 'Members and invitations'
-        : 'You need admin access to manage this workspace';
+    resetWorkspacePanel();
+    const current = teamContext();
+    $('workspaceTitle').textContent = 'Loading workspace…';
     showModal('workspaceModal');
-
-    if (!canAdmin()) {
-        $('memberList').textContent = '';
-        $('memberEmpty').textContent = 'Only admins can see the member list.';
-        $('memberEmpty').classList.remove('hidden');
-        $('inviteForm').classList.add('hidden');
-        return;
-    }
-    $('inviteForm').classList.remove('hidden');
-    await Promise.all([loadMembers(), loadInvites()]);
+    // Reopening is the explicit conflict-review path. Do not reuse stale
+    // switcher metadata as the next rename expectation or permission display.
+    const latest = await api('/api/workspaces', { quiet: true });
+    if (!current() || $('workspaceModal').hidden) return;
+    const fresh = latest.ok && Array.isArray(latest.data) ? latest.data.find(row => row.id === ws.id) : null;
+    if (!fresh) { hideModal('workspaceModal'); toast('Could not refresh workspace access. Retry after refreshing the page.', 'error'); return; }
+    state.workspaces = state.workspaces.map(row => row.id === fresh.id ? fresh : row); ws = fresh;
+    renderWorkspaceBar();
+    $('workspaceTitle').textContent = ws.name;
+    $('workspaceSubtitle').textContent = canAdmin() ? 'Team, invitations and workspace name' : 'Your team · Names and roles only';
+    $('workspaceRename').value = ws.name;
+    $('workspaceRenameForm').dataset.expected = ws.name;
+    $('workspaceRenameForm').classList.toggle('hidden', !canAdmin());
+    $('workspaceInvitesTab').classList.toggle('hidden', !canAdmin());
+    $('inviteForm').classList.toggle('hidden', !canAdmin());
+    switchTab('workspace', 'members', document.querySelector('[data-scope="workspace"][data-tab="members"]'));
+    await Promise.all([loadMembers(), ...(canAdmin() ? [loadInvites()] : [])]);
 }
 
-async function loadMembers() {
+async function loadMembers(after = null) {
     const ws = currentWorkspace();
-    if (!ws) return;
-
-    const { ok, data } = await api(`/api/workspaces/${encodeURIComponent(ws.id)}/members`, { quiet: true });
+    if (!ws || $('workspaceModal').hidden) return;
+    const current = teamContext(), read = ++teamRead;
+    if (!after) teamQuery = $('memberSearch').value.trim();
+    $('memberNext').disabled = true;
+    $('memberEmpty').textContent = 'Loading teammates…'; $('memberEmpty').classList.remove('hidden');
+    $('memberList').replaceChildren();
+    const { ok, data } = await readDirectory(ws.id, teamQuery, after);
+    if (!current() || read !== teamRead || $('workspaceModal').hidden) return;
     const list = $('memberList');
     const empty = $('memberEmpty');
-    list.textContent = '';
+    if (!ok) { empty.textContent = 'Could not load teammates. Use Search / refresh to retry.'; return; }
+    teamNext = data.next_cursor; $('memberNext').disabled = !teamNext;
+    empty.textContent = data.items.length ? `${data.items.length} teammates on this page${teamNext ? ' · More available' : ''}. Names and roles only.` : 'No teammates match this name.';
+    for (const member of data.items) list.appendChild(renderMember(member, ws));
+}
 
-    if (!ok || !Array.isArray(data) || !data.length) {
-        empty.textContent = 'No members to show.';
-        empty.classList.remove('hidden');
+async function handleWorkspaceRename(event) {
+    event.preventDefault();
+    const ws = currentWorkspace(), current = teamContext();
+    if (!ws || !canAdmin()) return;
+    const form = event.target, button = formButton(form), expected = form.dataset.expected;
+    setError('workspaceRenameError', ''); setButtonLoading(button, true);
+    const result = await api(`/api/workspaces/${encodeURIComponent(ws.id)}`, {
+        method: 'PATCH', body: { name: $('workspaceRename').value.trim(), expected_name: expected }, quiet: true,
+    });
+    setButtonLoading(button, false);
+    if (!current()) return;
+    if (!result.ok) {
+        setError('workspaceRenameError', result.status === 409 ? 'The name or permissions changed. Your draft is kept. Reopen this panel to review the current name before retrying.' : result.data?.error || 'Could not rename the workspace. Reopen to check its current name before retrying.');
         return;
     }
-    empty.classList.add('hidden');
-
-    for (const member of data) {
-        list.appendChild(renderMember(member, ws));
-    }
+    ws.name = result.data.name; form.dataset.expected = ws.name;
+    $('workspaceRename').value = ws.name; $('workspaceTitle').textContent = ws.name;
+    renderWorkspaceBar(); toast('Workspace renamed', 'success');
 }
 
 function renderMember(member, workspace) {
@@ -2469,10 +2538,10 @@ function renderMember(member, workspace) {
     main.className = 'panel-item-main';
     const name = document.createElement('div');
     name.className = 'panel-item-title';
-    name.textContent = member.name || member.email;
+    name.textContent = member.name || 'Teammate';
     const email = document.createElement('div');
     email.className = 'panel-item-sub';
-    email.textContent = member.email;
+    email.textContent = member.user_id;
     main.append(name, email);
 
     const actions = document.createElement('div');
@@ -2482,11 +2551,11 @@ function renderMember(member, workspace) {
 
     // The owner's role is fixed and the owner cannot be removed — the server
     // refuses both, so the UI shows a static label instead of dead controls.
-    if (member.role === 'owner') {
-        actions.appendChild(badge(ROLE_LABEL.owner, 'badge badge-muted'));
+    if (member.role === 'owner' || !['owner','admin'].includes(workspace.role)) {
+        actions.appendChild(badge(ROLE_LABEL[member.role], 'badge badge-muted'));
     } else {
         const select = document.createElement('select');
-        select.setAttribute('aria-label', `Role for ${member.email}`);
+        select.setAttribute('aria-label', `Role for ${member.name} · ${member.user_id}`);
         select.dataset.userId = member.user_id;
         select.dataset.act = 'change-role';
         for (const role of ['admin', 'member', 'viewer']) {
@@ -2500,27 +2569,30 @@ function renderMember(member, workspace) {
 
         if (!isSelf) {
             actions.appendChild(iconButton(
-                `Remove ${member.email}`, '✕', 'icon-btn btn-delete',
+                `Remove ${member.name} · ${member.user_id}`, '✕', 'icon-btn btn-delete',
                 { userId: member.user_id, act: 'remove-member' },
             ));
         }
     }
 
     li.append(main, actions);
-    void workspace;
     return li;
 }
 
 async function loadInvites() {
     const ws = currentWorkspace();
-    if (!ws) return;
-
+    if (!ws || !canAdmin() || $('workspaceModal').hidden) return;
+    const current = teamContext(), read = ++inviteRead;
+    $('inviteList').replaceChildren();
+    $('inviteEmpty').textContent = 'Loading invitations…'; $('inviteEmpty').classList.remove('hidden');
     const { ok, data } = await api(`/api/workspaces/${encodeURIComponent(ws.id)}/invites`, { quiet: true });
+    if (!current() || read !== inviteRead || $('workspaceModal').hidden) return;
     const list = $('inviteList');
     const empty = $('inviteEmpty');
     list.textContent = '';
 
     if (!ok || !Array.isArray(data) || !data.length) {
+        empty.textContent = ok ? 'No pending invitations.' : 'Could not load invitations. Reopen this panel to retry.';
         empty.classList.remove('hidden');
         return;
     }
@@ -2558,6 +2630,7 @@ async function handleInvite(e) {
     const ws = currentWorkspace();
     if (!ws) return;
 
+    const current = teamContext();
     const btn = formButton(e.target);
     setError('inviteError', '');
     setButtonLoading(btn, true);
@@ -2568,6 +2641,8 @@ async function handleInvite(e) {
     });
     setButtonLoading(btn, false);
 
+    if (!current()) return;
+
     if (!ok) {
         setError('inviteError', data?.error || 'Could not send the invitation');
         return;
@@ -2575,49 +2650,59 @@ async function handleInvite(e) {
 
     e.target.reset();
     await loadInvites();
+    if (!current()) return;
     toast(`Invitation sent to ${data.email}`, 'success');
 }
 
 async function changeMemberRole(userId, role) {
     const ws = currentWorkspace();
     if (!ws) return;
+    const current = teamContext();
     const { ok, data } = await api(`/api/workspaces/${encodeURIComponent(ws.id)}/members`, {
         method: 'PUT',
         body: { user_id: userId, role },
     });
+    if (!current()) return;
     if (!ok) {
         toast(data?.error || 'Could not change the role', 'error');
         await loadMembers();
         return;
     }
     toast('Role updated', 'success');
-    await Promise.all([loadMembers(), loadWorkspaces()]);
+    await loadWorkspaces();
+    if (!current()) return;
+    await openWorkspacePanel();
 }
 
 async function removeMember(userId) {
     const ws = currentWorkspace();
     if (!ws) return;
+    const current = teamContext();
     if (!window.confirm('Remove this member from the workspace?')) return;
 
     const { ok, data } = await api(`/api/workspaces/${encodeURIComponent(ws.id)}/members`, {
         method: 'DELETE',
         body: { user_id: userId },
     });
+    if (!current()) return;
     if (!ok) {
         toast(data?.error || 'Could not remove the member', 'error');
         return;
     }
     toast('Member removed', 'success');
+    state.members = state.members.filter(row => row.user_id !== userId);
     await loadMembers();
 }
 
 async function revokeInvite(inviteId) {
     const ws = currentWorkspace();
     if (!ws) return;
+    const current = teamContext();
     const { ok, data } = await api(`/api/workspaces/${encodeURIComponent(ws.id)}/invites`, {
         method: 'DELETE',
         body: { invite_id: inviteId },
     });
+    if (!current()) return;
     if (!ok) {
         toast(data?.error || 'Could not revoke the invitation', 'error');
         return;
@@ -2707,6 +2792,7 @@ const ACTION_LABEL = {
     delete_task: 'Task moved to trash',
     restore_task: 'Task restored',
     create_workspace: 'Workspace created',
+    rename_workspace: 'Workspace renamed',
     invite_workspace_member: 'Invitation sent',
     accept_workspace_invite: 'Invitation accepted',
     revoke_workspace_invite: 'Invitation revoked',
@@ -2879,6 +2965,7 @@ function showModal(id) {
 function hideModal(id) {
     const modal = $(id);
     if (!modal) return;
+    if (id === 'workspaceModal') resetWorkspacePanel();
     if (id === 'usageModal') resetUsage();
     if (id === 'taskSearchModal') {
         resetTaskSearch();
@@ -3347,20 +3434,20 @@ async function refreshAll() {
     await loadMembersForLabels();
 }
 
-/// Members are needed to turn an assignee id into a name. The endpoint is
-/// admin-only, so a plain member simply gets no names — which is why the
-/// failure is silent rather than a toast about a permission they cannot have.
+/// A bounded, private directory page for labels. Other teammates remain
+/// discoverable through the editor's server-side name search and pagination.
 async function loadMembersForLabels() {
-    if (!isLoggedIn() || !canAdmin()) {
+    if (!isLoggedIn()) {
         state.members = [];
         return;
     }
     const ws = currentWorkspace();
     if (!ws) return;
-    const user = state.user, generation = taskLoadGeneration, view = mainView.data;
-    const { ok, data } = await api(`/api/workspaces/${encodeURIComponent(ws.id)}/members`, { quiet: true });
-    if (state.user !== user || state.currentWorkspaceId !== ws.id || taskLoadGeneration !== generation || mainView.data !== view) return;
-    state.members = ok && Array.isArray(data) ? data : [];
+    const current = teamContext(false), read = ++labelRead;
+    const { ok, data } = await readDirectory(ws.id);
+    if (!current() || read !== labelRead) return;
+    state.members = ok ? data.items : [];
+    renderTasks();
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -3370,6 +3457,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (savedView === 'board' || savedView === 'list') state.view = savedView;
     } catch (_) { /* ignore */ }
     bindActions();
+    $('workspaceRenameForm').addEventListener('submit', handleWorkspaceRename);
+    $('memberSearchForm').addEventListener('submit', event => { event.preventDefault(); void loadMembers(); });
+    $('memberNext').addEventListener('click', () => { if (teamNext) void loadMembers(teamNext); });
     setView(state.view);
     await initWasm();
     await checkAuth();

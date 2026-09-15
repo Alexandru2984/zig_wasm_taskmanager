@@ -174,6 +174,18 @@ pub const CreateWorkspaceRequest = struct {
     name: []const u8,
 };
 
+pub const RenameWorkspaceRequest = struct {
+    name: []const u8,
+    expected_name: []const u8,
+};
+
+// Deliberately excludes email, membership IDs, timestamps and account secrets.
+pub const DirectoryMember = struct {
+    user_id: []const u8,
+    name: []const u8,
+    role: []const u8,
+};
+
 pub const WorkspaceMemberResponse = struct {
     id: []const u8,
     user_id: []const u8,

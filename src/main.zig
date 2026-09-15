@@ -281,7 +281,7 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
             r.setHeader("Access-Control-Allow-Credentials", "true") catch {};
         }
     }
-    r.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS") catch {};
+    r.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS") catch {};
     r.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token, If-Match") catch {};
 
     // SECURITY: Additional security headers
@@ -501,6 +501,24 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         const rest = path["/api/workspaces/".len..];
         const MembersSuffix = "/members";
         const InvitesSuffix = "/invites";
+
+        if (std.mem.endsWith(u8, rest, "/directory") or std.mem.indexOfScalar(u8, rest, '/') == null) {
+            const is_directory = std.mem.endsWith(u8, rest, "/directory");
+            const segment = if (is_directory) rest[0 .. rest.len - "/directory".len] else rest;
+            const workspace_id = http.decodePathSegment(req_alloc, segment) orelse "";
+            if (!@import("db/http_client.zig").validRecordIdFor(workspace_id, "workspaces")) {
+                try http.jsonError(r, 400, "Invalid workspace ID");
+                return;
+            }
+            const method = if (is_directory) "GET" else "PATCH";
+            if (!std.mem.eql(u8, req_method, method)) {
+                r.setHeader("Allow", method) catch {};
+                try http.jsonError(r, 405, "Method not allowed");
+                return;
+            }
+            if (is_directory) try workspaces_handler.directory(r, workspace_id, req_alloc) else try workspaces_handler.rename(r, workspace_id, req_alloc);
+            return;
+        }
 
         if (std.mem.endsWith(u8, rest, "/usage")) {
             const workspace_id = http.decodePathSegment(req_alloc, rest[0 .. rest.len - "/usage".len]) orelse "";
