@@ -54,8 +54,9 @@ systemd-sandboxed VPS deployment.
 - JSON data export and account deletion, both reachable from the app.
 - Per-route rate limiting, strict CORS, CSP, HSTS, safe static-file serving,
   CSRF protection, and protected metrics.
-- Docker Compose for the database and a separate app Dockerfile; configuration
-  via `.env` or recognized environment variables.
+- Portable app/DB installation with private credential generation, separate
+  migration identity, image-pinned upgrades and rollback preserving later writes.
+  The existing VPS database-only Compose path remains separate.
 - Production deployment behind nginx/TLS with a hardened systemd service.
 
 ## Portfolio Summary
@@ -77,7 +78,16 @@ More: [docs/PORTFOLIO.md](docs/PORTFOLIO.md)
 
 ## Quick Start
 
-### Database with Docker
+### New client installation
+
+Use the [portable installation guide](docs/PORTABLE-INSTALL.md): build the image,
+prepare a new private directory outside the checkout, and run the installer.
+It deploys both app and database on chosen loopback ports with a database-scoped
+runtime identity. Upgrade, local export, rollback and interrupted-operation
+recovery are documented there. TLS/proxy configuration remains operator-owned;
+this is not yet a fully automated white-label installer.
+
+### Existing VPS database-only path
 
 The versioned Compose file runs the database only. Configure `.env` first,
 then start it and run the app from source as described below:
@@ -95,9 +105,10 @@ docker compose -f docker-compose.yml -f docker-compose.bootstrap.yml up -d surre
 # docs/DATABASE-HARDENING.md for the complete bootstrap/runtime separation.
 ```
 
-The app serves `http://127.0.0.1:9000`. For local HTTP only, set
+The source-run app serves `http://127.0.0.1:9000`. For local HTTP only, set
 `COOKIE_INSECURE=1` and `CORS_ORIGIN=http://127.0.0.1:9000`. The standalone
-Dockerfile can build an app image, but Compose does not deploy that image.
+Dockerfile builds the app image; the root Compose file remains DB-only.
+The separate portable stack above deploys both services without these VPS paths.
 
 ### From source
 
@@ -116,8 +127,8 @@ cp .env.example .env   # or provide configuration through the environment
 zig build run
 ```
 
-The app defaults to `http://127.0.0.1:9000`. Every `.env` key can be overridden
-by a process environment variable of the same name.
+The app defaults to `http://127.0.0.1:9000`. Recognized configuration keys can be
+overridden by process environment variables of the same name.
 `MAIL_OUTBOX_KEY` is required even when local SMTP is not configured. Keep it
 outside the DB and retain it across upgrades; a different key refuses startup.
 See [durable email operations](docs/DURABLE-EMAIL.md) before upgrading an existing install.
@@ -132,7 +143,9 @@ node scripts/mail_ops_test.mjs
 RUN_MAIN_VIEW=1 RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_VERSIONS=1 RUN_SEARCH=1 RUN_QUOTAS=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh # isolated full suite
 ```
 
-All three run in CI on every push.
+CI covers formatting/unit, API, browser and portable Docker installation tests.
+For the portable image locally, run `node scripts/portable_test.mjs IMAGE`;
+add `RUN_PORTABLE_UI=1` to exercise the browser suite against that image too.
 
 `integration_test.sh` starts a real SurrealDB in Docker, builds and runs the
 application against it, and drives the API through the smoke suite. It is not

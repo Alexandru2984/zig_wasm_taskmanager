@@ -127,7 +127,7 @@ jobs:
         run: ./scripts/integration_test.sh
 
   docker:
-    name: Docker image
+    name: Portable image, installation and rollback
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -138,11 +138,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
+          load: true
           tags: zig-tasks:ci
+          build-args: VCS_REF=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Exercise isolated install, upgrade and rollback
+        run: node scripts/portable_test.mjs zig-tasks:ci

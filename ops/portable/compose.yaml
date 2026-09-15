@@ -1,0 +1,67 @@
+# Separate from the existing VPS database-only Compose project.
+services:
+  db:
+    image: ${TM_DB_IMAGE:?Pinned database image required}
+    user: "0:0"
+    entrypoint: ["/surreal"]
+    command: ["start", "--log", "warn", "rocksdb:/data/database.db"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    pids_limit: 128
+    volumes: ["database:/data"]
+    tmpfs: ["/tmp:size=32m,mode=1777", "/logs:size=16m,mode=1777"]
+    ports: ["127.0.0.1:${TM_DB_PORT:?Loopback database port required}:8000"]
+    logging: &logging
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  app:
+    image: ${TM_APP_IMAGE:?Pinned application image required}
+    pull_policy: never
+    user: "10001:10001"
+    env_file:
+      - path: ${TM_DIRECTORY:?Private installation directory required}/runtime.env
+        format: raw
+    environment:
+      SURREAL_URL: http://db:8000
+      SURREAL_AUTH_LEVEL: database
+      DB_AUTO_MIGRATE: "0"
+      DB_MIGRATE_ONLY: "0"
+      INTERFACE: 0.0.0.0
+      PORT: "9000"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    pids_limit: 128
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    ports: ["127.0.0.1:${TM_APP_PORT:?Loopback application port required}:9000"]
+    depends_on: [db]
+    stop_grace_period: 45s
+    logging: *logging
+  migrate:
+    image: ${TM_APP_IMAGE:?Pinned application image required}
+    pull_policy: never
+    profiles: [ops]
+    user: "10001:10001"
+    env_file:
+      - path: ${TM_DIRECTORY:?Private installation directory required}/admin.env
+        format: raw
+    environment:
+      SURREAL_URL: http://db:8000
+      SURREAL_AUTH_LEVEL: root
+      DB_MIGRATE_ONLY: "1"
+      MAIL_WORKER_ENABLED: "0"
+      TASK_REMINDERS_ENABLED: "0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    pids_limit: 128
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    logging: *logging
+volumes:
+  database:

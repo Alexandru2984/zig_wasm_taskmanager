@@ -1,24 +1,21 @@
-# VCS
-.git
-.github
-
-# Build outputs / caches
-zig-out
-zig-cache
-.zig-cache
+# Allow-list: credentials, backups, node_modules and local tool directories
+# never enter the build context, including timestamped .env variants.
+**
+!Dockerfile
+!build.zig
+!build.zig.zon
+!src/
+!src/**
+!frontend/
+!frontend/src/
+!frontend/src/**
+!public/
+!public/**
 public/app.wasm
-
-# Secrets & local env
-.env
-.env.local
-
-# Docs & assets not needed in the image
-docs
-*.md
-scripts
-
-# Editor / OS noise
-.idea
-.vscode
-*.swp
-.DS_Store
+!scripts/
+!scripts/stamp-assets.sh
+**/.env
+**/.env.*
+**/*.env
+**/*.pem
+**/*.key

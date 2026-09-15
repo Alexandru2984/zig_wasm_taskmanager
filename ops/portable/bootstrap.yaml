@@ -1,0 +1,6 @@
+# Used once by portable.mjs, then the DB is recreated without this env_file.
+services:
+  db:
+    env_file:
+      - path: ${TM_DIRECTORY:?Private installation directory required}/bootstrap.env
+        format: raw

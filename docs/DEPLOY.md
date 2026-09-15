@@ -1,5 +1,10 @@
 # Production deployment
 
+This page describes the existing VPS service. For a **new client installation**
+without its fixed host paths/domain, use [PORTABLE-INSTALL.md](PORTABLE-INSTALL.md).
+The two paths are separate; do not point the portable initializer at existing
+production storage or replace this service with a test Compose project.
+
 The service uses a dedicated `taskmanager` Unix user, immutable release files
 under `/opt/taskmanager/releases`, and a private runtime configuration at
 `/etc/taskmanager/runtime.env`. nginx serves the public directory in
