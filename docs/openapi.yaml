@@ -266,6 +266,51 @@ paths:
         "403": { description: Insufficient role or invalid CSRF }
         "404": { description: Workspace unavailable }
         "409": { description: Name or concurrent state changed; explicitly review before retrying }
+  /api/workspaces/{id}/owner:
+    post:
+      summary: Transfer ownership to an existing verified teammate
+      description: >-
+        Only the current verified owner may transfer, with CSRF and current
+        password confirmation. The recipient must be an existing verified
+        member below the owned-workspace quota. Ownership, both roles and
+        activity entries commit atomically. Former owner becomes admin. Task
+        authorship is unchanged: deleting that account still deletes its
+        authored tasks. Transfer is immediate, without recipient acceptance
+        or automatic Undo. A shared five-attempt/15-minute per-account budget
+        also covers password change and account deletion. No automatic replay;
+        verify the current owner after an uncertain outcome. No-store.
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id, password]
+              properties:
+                user_id: { type: string, pattern: '^users:[A-Za-z0-9_-]+$' }
+                password: { type: string, minLength: 1, maxLength: 128, writeOnly: true }
+      responses:
+        "200":
+          description: Recipient owns the workspace; caller is now an admin
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workspace_id, owner_id, role]
+                properties:
+                  workspace_id: { type: string }
+                  owner_id: { type: string }
+                  role: { type: string, enum: [admin] }
+        "400": { description: Invalid input, self-transfer or ineligible target }
+        "401": { description: Not authenticated }
+        "403": { description: Invalid CSRF/password, unverified caller or caller is not current owner }
+        "404": { description: Workspace no longer exists }
+        "409": { description: Concurrent/inconsistent state; refresh before retrying }
+        "422": { description: Recipient owned-workspace quota reached; no change }
+        "429": { description: Shared sensitive-account attempt budget exhausted; Retry-After 900 }
+        "500": { description: Transfer failed or outcome uncertain; verify current ownership }
   /api/workspaces/{id}/directory:
     get:
       summary: Search one minimal page of workspace teammates

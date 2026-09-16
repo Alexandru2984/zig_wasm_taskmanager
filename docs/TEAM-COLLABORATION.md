@@ -103,9 +103,10 @@ rollback target. Old code understands renamed workspaces and the existing
 schema, but lacks this directory/rename UI. A binary rollback must not restore
 the database over newer task or workspace writes.
 
-Remaining P6/P7: archive/unarchive, controlled ownership transfer, saved-view
-sync, comments/mentions and notification preferences. No claim that these are
-implemented, and no client handoff is scheduled.
+Subsequent [P6b controlled ownership transfer](WORKSPACE-OWNERSHIP.md) adds a
+separate password-confirmed flow; ordinary role/remove controls still cannot
+modify the owner. Remaining P6/P7: archive/unarchive, saved-view sync,
+comments/mentions and notification preferences. No client handoff is scheduled.
 
 ### Verification recorded — 2026-09-15
 

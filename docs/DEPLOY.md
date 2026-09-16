@@ -88,6 +88,12 @@ and never restore a stale DB snapshot over newer writes as a routine rollback.
 
 ## Stage, migrate, promote
 
+The [P6b controlled ownership transfer](WORKSPACE-OWNERSHIP.md) needs no schema
+or runtime configuration change. Keep the matched `db29de4` release for
+binary-only rollback; existing owner IDs and membership roles remain compatible.
+Do not transfer a real workspace as a deployment test, or restore an older DB
+to undo deployment: an accepted transfer persists across a binary rollback.
+
 The [P6a team directory/assignment/rename](TEAM-COLLABORATION.md) needs no
 migration or runtime configuration change. Publish matching binary/assets and
 use the retained `a4c4485` live release for binary-only rollback. Renamed

@@ -83,6 +83,7 @@ jobs:
         env:
           RUN_SECURITY: '1'
           RUN_TEAM: '1'
+          RUN_OWNERSHIP: '1'
           RUN_OUTBOX: '1'
           RUN_QUOTAS: '1'
           RUN_MAIN_VIEW: '1'
@@ -121,6 +122,7 @@ jobs:
         env:
           RUN_UI: '1'
           RUN_TEAM: '1'
+          RUN_OWNERSHIP: '1'
           RUN_MAIN_VIEW: '1'
           RUN_QUOTAS: '1'
           RUN_VERSIONS: '1'

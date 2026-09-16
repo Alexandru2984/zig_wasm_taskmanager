@@ -195,6 +195,56 @@ pub fn rename(r: zap.Request, workspace_id: []const u8, a: std.mem.Allocator) !v
     try http.jsonSuccess(r, .{ .id = workspace_id, .name = input.name });
 }
 
+pub fn transfer(r: zap.Request, workspace_id: []const u8, a: std.mem.Allocator) !void {
+    const user_id = http.getCurrentUserId(a, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    // Share the password-guess budget with password changes/account deletion;
+    // a second endpoint must not provide an independent guessing allowance.
+    if (rate_limiter.password_change_limiter) |*limiter| {
+        if (!limiter.isAllowed(user_id)) {
+            r.setHeader("Retry-After", "900") catch {};
+            try http.jsonError(r, 429, "Too many sensitive account attempts. Please wait 15 minutes.");
+            return;
+        }
+    }
+    const input = http.parseBody(a, r, models.TransferWorkspaceRequest) catch {
+        try http.jsonError(r, 400, "Target member and current password are required");
+        return;
+    };
+    if (!@import("../db/http_client.zig").validRecordIdFor(input.user_id, "users") or std.mem.eql(u8, input.user_id, user_id) or input.password.len == 0 or input.password.len > 128) {
+        try http.jsonError(r, 400, "Invalid target member or password length");
+        return;
+    }
+    const role = try db.getWorkspaceRole(a, user_id, workspace_id);
+    defer if (role) |value| a.free(value);
+    if (role == null or !std.mem.eql(u8, role.?, "owner")) {
+        try http.jsonError(r, 403, "Only the current owner can transfer this workspace");
+        return;
+    }
+    const raw = try db.getUserById(a, user_id);
+    defer a.free(raw);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.User), a, raw, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (parsed.value.len != 1 or parsed.value[0].result.len != 1) {
+        try http.jsonError(r, 403, "Account unavailable");
+        return;
+    }
+    const user = parsed.value[0].result[0];
+    if (!user.email_verified or !(@import("../services/auth.zig").verifyPassword(a, user.password_hash, input.password) catch false)) {
+        try http.jsonError(r, 403, "Verified account and correct current password required");
+        return;
+    }
+    db.impl.transferWorkspace(a, user_id, workspace_id, input.user_id, user.password_hash) catch |err| {
+        if (err == error.WorkspaceQuotaExceeded) {
+            try http.jsonError(r, 422, "The recipient has reached the owned-workspace limit. Nothing was transferred.");
+        } else try http.mutationError(r, err, "Transfer failed. Refresh to verify the current owner before retrying.");
+        return;
+    };
+    try http.jsonSuccess(r, .{ .workspace_id = workspace_id, .owner_id = input.user_id, .role = "admin" });
+}
+
 pub fn createInvite(r: zap.Request, workspace_id: []const u8, req_alloc: std.mem.Allocator) !void {
     const user_id = http.getCurrentUserId(req_alloc, r) orelse {
         try http.jsonError(r, 401, "Not authenticated");

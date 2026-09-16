@@ -179,6 +179,11 @@ pub const RenameWorkspaceRequest = struct {
     expected_name: []const u8,
 };
 
+pub const TransferWorkspaceRequest = struct {
+    user_id: []const u8,
+    password: []const u8,
+};
+
 // Deliberately excludes email, membership IDs, timestamps and account secrets.
 pub const DirectoryMember = struct {
     user_id: []const u8,

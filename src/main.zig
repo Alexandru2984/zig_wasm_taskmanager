@@ -502,6 +502,21 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         const MembersSuffix = "/members";
         const InvitesSuffix = "/invites";
 
+        if (std.mem.endsWith(u8, rest, "/owner")) {
+            const workspace_id = http.decodePathSegment(req_alloc, rest[0 .. rest.len - "/owner".len]) orelse "";
+            if (!@import("db/http_client.zig").validRecordIdFor(workspace_id, "workspaces")) {
+                try http.jsonError(r, 400, "Invalid workspace ID");
+                return;
+            }
+            if (!std.mem.eql(u8, req_method, "POST")) {
+                r.setHeader("Allow", "POST") catch {};
+                try http.jsonError(r, 405, "Method not allowed");
+                return;
+            }
+            try workspaces_handler.transfer(r, workspace_id, req_alloc);
+            return;
+        }
+
         if (std.mem.endsWith(u8, rest, "/directory") or std.mem.indexOfScalar(u8, rest, '/') == null) {
             const is_directory = std.mem.endsWith(u8, rest, "/directory");
             const segment = if (is_directory) rest[0 .. rest.len - "/directory".len] else rest;

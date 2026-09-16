@@ -27,7 +27,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/favicon.svg">
     <link rel="manifest" href="/site.webmanifest">
-    <link rel="stylesheet" href="/style.css?v=4a8e7f1f">
+    <link rel="stylesheet" href="/style.css?v=01680259">
 
     <!-- Structured data. The CSP forbids inline <script>, but this is
          application/ld+json, which is data rather than script: the parser
@@ -479,6 +479,16 @@
             </div>
 
             <div class="tab-content active" id="workspaceTabMembers" role="tabpanel">
+                <form id="ownerTransferForm" class="ownership-confirm hidden" aria-labelledby="ownerTransferTitle">
+                    <h3 id="ownerTransferTitle">Transfer workspace ownership</h3>
+                    <p id="ownerTransferTarget"></p>
+                    <p>You will become an admin. The new owner can remove you and delete this workspace by deleting their account. Only the new owner can transfer ownership back.</p>
+                    <p>Task authorship does not change: deleting your own account still deletes tasks you created, even after this transfer.</p>
+                    <div class="form-group"><label for="ownerTransferPassword">Your current password</label><input id="ownerTransferPassword" type="password" autocomplete="current-password" maxlength="128" required></div>
+                    <label class="ownership-ack"><input id="ownerTransferAck" type="checkbox" required><span>I checked the recipient and understand that I will no longer own this workspace.</span></label>
+                    <div id="ownerTransferError" class="form-error" role="alert"></div>
+                    <div class="ownership-buttons"><button class="btn btn-danger" type="submit" id="ownerTransferSubmit">Transfer ownership</button><button class="btn btn-ghost" type="button" id="ownerTransferCancel">Cancel</button></div>
+                </form>
                 <form id="memberSearchForm" class="team-search">
                     <label for="memberSearch">Find teammates by name</label>
                     <input id="memberSearch" type="search" maxlength="80" autocomplete="off">
@@ -666,7 +676,7 @@
         </div>
     </div>
 
-    <script src="/app.js?v=e490d9d3"></script>
+    <script src="/app.js?v=07bddcf1"></script>
     <script src="/task-view.js?v=538cda55"></script>
 </body>
 </html>

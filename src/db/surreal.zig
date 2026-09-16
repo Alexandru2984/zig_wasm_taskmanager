@@ -869,6 +869,32 @@ pub fn renameWorkspace(a: std.mem.Allocator, user_id: []const u8, workspace_id: 
     , .{ .actor_id = rec(user_id), .workspace_id = rec(workspace_id), .name = name, .expected = expected });
 }
 
+pub fn transferWorkspace(a: std.mem.Allocator, actor_id: []const u8, workspace_id: []const u8, target_id: []const u8, expected_hash: []const u8) !void {
+    const limits = try task_quota.get();
+    const result = try queryWithVars(a, "BEGIN TRANSACTION;\n" ++ actorFence ++ workspaceFence ++ workspaceRole ++
+        \\IF $role != "owner" OR $scope[0].owner_id != $actor_id OR !$actor[0].email_verified { THROW "APP_FORBIDDEN"; };
+        \\IF $actor[0].password_hash != $expected_hash { THROW "APP_CONFLICT"; };
+        \\IF $target_id = $actor_id { THROW "APP_INVALID"; };
+        \\LET $owners = (SELECT VALUE user_id FROM workspace_members WHERE workspace_id = $workspace_id AND role = "owner");
+        \\IF array::len($owners) != 1 OR $owners[0] != $actor_id { THROW "APP_CONFLICT"; };
+        \\LET $target = (UPDATE users SET security_revision = (security_revision ?? 0) + 1 WHERE id = $target_id AND email_verified = true RETURN AFTER);
+        \\IF array::len($target) != 1 { THROW "APP_INVALID"; };
+        \\LET $target_role = (SELECT VALUE role FROM workspace_members WHERE workspace_id = $workspace_id AND user_id = $target_id)[0];
+        \\IF !($target_role INSIDE ["admin", "member", "viewer"]) { THROW "APP_INVALID"; };
+        \\LET $owned = (SELECT count() FROM workspaces WHERE owner_id = $target_id GROUP ALL TIMEOUT 2s)[0].count ?? 0;
+        \\IF $owned >= $quota_workspaces { THROW "APP_WORKSPACE_QUOTA"; };
+        \\LET $former = (UPDATE workspace_members SET role = "admin" WHERE workspace_id = $workspace_id AND user_id = $actor_id AND role = "owner" RETURN AFTER);
+        \\LET $next = (UPDATE workspace_members SET role = "owner" WHERE workspace_id = $workspace_id AND user_id = $target_id AND role INSIDE ["admin", "member", "viewer"] RETURN AFTER);
+        \\IF array::len($former) != 1 OR array::len($next) != 1 { THROW "APP_CONFLICT"; };
+        \\UPDATE workspaces SET owner_id = $target_id WHERE id = $workspace_id;
+        \\CREATE activity_events SET user_id = $actor_id, action = "transfer_workspace_ownership", entity_type = "workspace", entity_id = <string>$workspace_id;
+        \\CREATE activity_events SET user_id = $target_id, action = "receive_workspace_ownership", entity_type = "workspace", entity_id = <string>$workspace_id;
+        \\RETURN [];
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(actor_id), .workspace_id = rec(workspace_id), .target_id = rec(target_id), .expected_hash = expected_hash, .quota_workspaces = limits.workspaces });
+    a.free(result);
+}
+
 pub fn createWorkspaceInvite(
     allocator: std.mem.Allocator,
     workspace_id: []const u8,
@@ -1502,9 +1528,9 @@ pub fn exportUserTasks(allocator: std.mem.Allocator, user_id: []const u8) ![]u8 
 /// Order matters: rows referencing the user go first, so no dangling
 /// record<users> link is ever left behind. Workspaces the user owns are
 /// removed along with their membership rows and invites — the owner cannot be
-/// removed from a workspace by any other route, so deleting the account is the
-/// only way a workspace loses its owner, and an ownerless workspace would be
-/// unmanageable by anyone.
+/// removed by ordinary member operations. Ownership transfer updates both
+/// users and the workspace under the same fences; deletion follows CURRENT
+/// ownership, while tasks still follow their unchanged author user_id.
 pub fn deleteUserAccount(allocator: std.mem.Allocator, user_id: []const u8, expected_hash: []const u8) !void {
     const result = try queryWithVars(allocator,
         \\BEGIN TRANSACTION;

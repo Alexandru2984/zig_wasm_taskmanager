@@ -147,6 +147,10 @@ if [ "${RUN_TEAM:-0}" = 1 ]; then
     say "Workspace directory, assignment and rename regressions"
     BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" node scripts/team_test.mjs
 fi
+if [ "${RUN_OWNERSHIP:-0}" = 1 ]; then
+    say "Workspace ownership and account-boundary regressions"
+    BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" node scripts/ownership_test.mjs
+fi
 if [ "${RUN_SECURITY:-0}" = 1 ]; then
     say "Security regressions"
     BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" \

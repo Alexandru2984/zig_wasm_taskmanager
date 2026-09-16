@@ -47,6 +47,10 @@ systemd-sandboxed VPS deployment.
   invite acceptance. [Team directory and assignment](docs/TEAM-COLLABORATION.md)
   are available to ordinary members without exposing emails, with bounded name
   search/pages, plus owner/admin workspace renaming with conflict protection.
+- [Controlled ownership transfer](docs/WORKSPACE-OWNERSHIP.md) to an existing
+  verified teammate, with current-password confirmation, atomic roles/activity
+  and quota/conflict protection. Former owners become admins; task authorship
+  and account-deletion rules do not change.
 - Email verification, password reset and invitations through an encrypted,
   transactional email outbox, with bounded retries and per-account delivery status.
   Signup still reveals existing addresses; timing equivalence is not established.

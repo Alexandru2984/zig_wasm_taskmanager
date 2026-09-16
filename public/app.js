@@ -2400,7 +2400,61 @@ const ROLE_LABEL = {
 };
 
 let teamGeneration = 0, teamScope = 0, teamRead = 0, inviteRead = 0, labelRead = 0, teamNext = null, teamQuery = '';
+let ownerTransfer = null;
+const pendingOwnerTransfers = new Set();
+function resetOwnerTransfer(focus = false) {
+    const trigger = ownerTransfer?.trigger;
+    ownerTransfer = null;
+    $('ownerTransferForm').reset(); $('ownerTransferForm').classList.add('hidden');
+    $('ownerTransferTarget').textContent = ''; $('ownerTransferError').textContent = '';
+    setButtonLoading($('ownerTransferSubmit'), false);
+    $('ownerTransferCancel').textContent = 'Cancel';
+    $('memberSearchForm').classList.remove('hidden'); $('memberList').classList.remove('hidden');
+    if (focus && trigger?.isConnected) trigger.focus();
+}
+function beginOwnerTransfer(member, trigger) {
+    const ws = currentWorkspace();
+    if (!state.user || ws?.role !== 'owner' || member.user_id === state.user.id) return;
+    if (pendingOwnerTransfers.has(`${state.user.id}:${ws.id}`)) { toast('A transfer is still pending. Wait, then reopen the workspace to check its owner.', 'error'); return; }
+    resetOwnerTransfer();
+    ownerTransfer = { member: { ...member }, workspace: ws.id, current: teamContext(), trigger, submitting: false, locked: false };
+    $('ownerTransferTarget').textContent = `New owner: ${member.name || 'Teammate'} · ${member.user_id}`;
+    $('ownerTransferForm').classList.remove('hidden');
+    $('memberSearchForm').classList.add('hidden'); $('memberList').classList.add('hidden');
+    $('ownerTransferPassword').focus();
+}
+async function handleOwnerTransfer(event) {
+    event.preventDefault();
+    const operation = ownerTransfer;
+    if (!operation || operation.submitting || operation.locked || !operation.current() || !$('ownerTransferAck').checked) return;
+    const key = `${state.user.id}:${operation.workspace}`;
+    if (pendingOwnerTransfers.has(key)) return;
+    pendingOwnerTransfers.add(key); operation.submitting = true;
+    $('ownerTransferError').textContent = 'Submitting. Closing this form does not cancel a transfer already received by the server.';
+    $('ownerTransferCancel').textContent = 'Close confirmation'; setButtonLoading($('ownerTransferSubmit'), true);
+    // Password lives in the input/request only: never retain it in UI state,
+    // drafts, storage, URLs or activity. Clear immediately on every attempt.
+    const body = { user_id: operation.member.user_id, password: $('ownerTransferPassword').value };
+    $('ownerTransferPassword').value = ''; $('ownerTransferAck').checked = false;
+    let result;
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 20000);
+    try { result = await api(`/api/workspaces/${encodeURIComponent(operation.workspace)}/owner`, { method: 'POST', body, quiet: true, signal: controller.signal }); }
+    finally { clearTimeout(timeout); body.password = ''; pendingOwnerTransfers.delete(key); }
+    if (!operation.current() || ownerTransfer !== operation) return;
+    operation.submitting = false;
+    setButtonLoading($('ownerTransferSubmit'), false);
+    if (!result.ok || result.data?.workspace_id !== operation.workspace || result.data?.owner_id !== operation.member.user_id || result.data?.role !== 'admin') {
+        operation.locked = true; $('ownerTransferSubmit').disabled = true;
+        $('ownerTransferError').textContent = `${result.data?.error || 'The outcome could not be confirmed.'} Close and reopen this panel to check the current owner before making a new attempt.`;
+        return;
+    }
+    const ws = currentWorkspace(); if (ws?.id === operation.workspace) ws.role = 'admin';
+    resetOwnerTransfer(); renderWorkspaceBar();
+    toast('Ownership transferred. You are now an admin.', 'success');
+    await openWorkspacePanel();
+}
 function resetWorkspacePanel(close = false) {
+    resetOwnerTransfer();
     teamGeneration++; teamRead++; inviteRead++; teamNext = null; teamQuery = '';
     if (close) { teamScope++; labelRead++; state.members = []; }
     for (const id of ['memberList','inviteList']) $(id).replaceChildren();
@@ -2549,8 +2603,8 @@ function renderMember(member, workspace) {
 
     const isSelf = state.user && member.user_id === state.user.id;
 
-    // The owner's role is fixed and the owner cannot be removed — the server
-    // refuses both, so the UI shows a static label instead of dead controls.
+    // Ordinary member controls cannot modify/remove the owner. Ownership uses
+    // the separate password-confirmed transaction and explicit warning form.
     if (member.role === 'owner' || !['owner','admin'].includes(workspace.role)) {
         actions.appendChild(badge(ROLE_LABEL[member.role], 'badge badge-muted'));
     } else {
@@ -2576,6 +2630,14 @@ function renderMember(member, workspace) {
     }
 
     li.append(main, actions);
+    if (workspace.role === 'owner' && !isSelf && member.role !== 'owner') {
+        const transfer = document.createElement('button'); transfer.type = 'button';
+        transfer.className = 'btn btn-ghost btn-sm owner-transfer-trigger';
+        transfer.textContent = 'Make owner…'; transfer.dataset.transferUser = member.user_id;
+        transfer.setAttribute('aria-label', `Transfer ownership to ${member.name} · ${member.user_id}`);
+        transfer.addEventListener('click', () => beginOwnerTransfer(member, transfer));
+        li.appendChild(transfer);
+    }
     return li;
 }
 
@@ -2793,6 +2855,8 @@ const ACTION_LABEL = {
     restore_task: 'Task restored',
     create_workspace: 'Workspace created',
     rename_workspace: 'Workspace renamed',
+    transfer_workspace_ownership: 'Workspace ownership transferred',
+    receive_workspace_ownership: 'Workspace ownership received',
     invite_workspace_member: 'Invitation sent',
     accept_workspace_invite: 'Invitation accepted',
     revoke_workspace_invite: 'Invitation revoked',
@@ -3458,6 +3522,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (_) { /* ignore */ }
     bindActions();
     $('workspaceRenameForm').addEventListener('submit', handleWorkspaceRename);
+    $('ownerTransferForm').addEventListener('submit', handleOwnerTransfer);
+    $('ownerTransferCancel').addEventListener('click', () => resetOwnerTransfer(true));
     $('memberSearchForm').addEventListener('submit', event => { event.preventDefault(); void loadMembers(); });
     $('memberNext').addEventListener('click', () => { if (teamNext) void loadMembers(teamNext); });
     setView(state.view);
