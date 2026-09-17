@@ -25,6 +25,7 @@ pub const HttpError = error{
     WorkspaceQuotaExceeded,
     ParentDeleted,
     StaleTask,
+    WorkspaceArchived,
 };
 
 /// Database config
@@ -144,6 +145,7 @@ fn validateSurrealResponse(allocator: std.mem.Allocator, raw_response: []const u
                 const result = item.object.get("result") orelse continue;
                 if (result != .string) continue;
                 if (std.mem.indexOf(u8, result.string, "APP_STALE_TASK") != null) return HttpError.StaleTask;
+                if (std.mem.indexOf(u8, result.string, "APP_ARCHIVED") != null) return HttpError.WorkspaceArchived;
                 if (std.mem.indexOf(u8, result.string, "APP_TASK_QUOTA") != null) return HttpError.TaskQuotaExceeded;
                 if (std.mem.indexOf(u8, result.string, "APP_TEXT_QUOTA") != null) return HttpError.TextQuotaExceeded;
                 if (std.mem.indexOf(u8, result.string, "APP_WORKSPACE_QUOTA") != null) return HttpError.WorkspaceQuotaExceeded;
@@ -440,6 +442,9 @@ test "transaction conflicts are classified without treating user content as erro
 }
 
 test "transaction authorization errors are classified past rollback rows" {
+    try std.testing.expectError(HttpError.WorkspaceArchived, validateSurrealResponse(std.testing.allocator,
+        \\[{"status":"ERR","result":"Transaction failed"},{"status":"ERR","result":"APP_ARCHIVED"}]
+    ));
     try std.testing.expectError(HttpError.PermissionDenied, validateSurrealResponse(std.testing.allocator,
         \\[{"status":"ERR","result":"Transaction failed"},{"status":"ERR","result":"An error occurred: APP_FORBIDDEN"}]
     ));

@@ -195,6 +195,40 @@ pub fn rename(r: zap.Request, workspace_id: []const u8, a: std.mem.Allocator) !v
     try http.jsonSuccess(r, .{ .id = workspace_id, .name = input.name });
 }
 
+pub fn archive(r: zap.Request, workspace_id: []const u8, a: std.mem.Allocator) !void {
+    const user_id = http.getCurrentUserId(a, r) orelse {
+        try http.jsonError(r, 401, "Not authenticated");
+        return;
+    };
+    // Reuse the authenticated write budget; transitions must not provide an
+    // unlimited way to churn activity/history or repeatedly cancel invitations.
+    if (rate_limiter.task_write_limiter) |*limiter| {
+        if (!limiter.isAllowed(user_id)) {
+            r.setHeader("Retry-After", "60") catch {};
+            try http.jsonError(r, 429, "Too many workspace/task writes. Please wait 1 minute.");
+            return;
+        }
+    }
+    const input = http.parseBody(a, r, models.ArchiveWorkspaceRequest) catch {
+        try http.jsonError(r, 400, "Archive state and expected version are required");
+        return;
+    };
+    if (input.expected_version < 0 or input.expected_version >= 9007199254740991) {
+        try http.jsonError(r, 400, "Invalid workspace archive version");
+        return;
+    }
+    const raw = db.impl.archiveWorkspace(a, user_id, workspace_id, input.archived, input.expected_version) catch |err| {
+        try http.mutationError(r, err, "Archive outcome could not be confirmed. Refresh before retrying.");
+        return;
+    };
+    defer a.free(raw);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(models.Workspace), a, raw, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (parsed.value.len != 1 or parsed.value[0].result.len != 1) return error.InvalidResponse;
+    const ws = parsed.value[0].result[0];
+    try http.jsonSuccess(r, .{ .id = ws.id, .archived = ws.archived, .archive_version = ws.archive_version });
+}
+
 pub fn transfer(r: zap.Request, workspace_id: []const u8, a: std.mem.Allocator) !void {
     const user_id = http.getCurrentUserId(a, r) orelse {
         try http.jsonError(r, 401, "Not authenticated");

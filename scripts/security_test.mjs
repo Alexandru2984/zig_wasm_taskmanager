@@ -414,10 +414,23 @@ await check('overlapping account deletion and task creation leave no orphan data
         const pending = api(person, '/api/tasks', 'POST', { title: 'Must not survive deletion', workspace_id: workspace }).finally(() => { settled = true; });
         await new Promise(resolve => setTimeout(resolve, 250));
         assert.equal(settled, false);
-        assert.equal((await api(person, '/api/account', 'DELETE', { password: person.password })).status, 200);
-        // Password verification can outlast the delayed CREATE. Either order
-        // is valid: a committed task must be deleted, or its write must abort.
-        assert.ok([201, 409].includes((await pending).status));
+        const deletion = await api(person, '/api/account', 'DELETE', { password: person.password });
+        const creation = await pending;
+        // Either transaction may win. If CREATE commits after DELETE read its
+        // snapshot, DELETE correctly conflicts instead of committing stale data.
+        // Verify the intact state before a separate, deliberate deletion; this
+        // is fixture/operator review, not an automatic retry in the application.
+        assert.ok([200, 409].includes(deletion.status));
+        if (deletion.status === 409) {
+            assert.equal(creation.status, 201);
+            assert.equal((await sql(`SELECT id FROM ${person.id};`)).length, 1);
+            assert.equal((await sql(`SELECT id FROM ${workspace};`)).length, 1);
+            assert.equal((await sql(`SELECT id FROM tasks WHERE user_id = ${person.id};`)).length, 1);
+            assert.equal((await api(person, '/api/auth/me')).status, 200);
+            assert.equal((await api(person, '/api/account', 'DELETE', { password: person.password })).status, 200);
+        } else {
+            assert.ok([201, 401, 403, 409].includes(creation.status));
+        }
         assert.equal((await sql(`SELECT id FROM tasks WHERE user_id = ${person.id};`)).length, 0);
         assert.equal((await sql(`SELECT id FROM activity_events WHERE user_id = ${person.id};`)).length, 0);
         assert.equal((await sql(`SELECT id FROM ${person.id};`)).length, 0);

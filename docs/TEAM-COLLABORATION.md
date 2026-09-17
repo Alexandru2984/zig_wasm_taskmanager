@@ -105,8 +105,10 @@ the database over newer task or workspace writes.
 
 Subsequent [P6b controlled ownership transfer](WORKSPACE-OWNERSHIP.md) adds a
 separate password-confirmed flow; ordinary role/remove controls still cannot
-modify the owner. Remaining P6/P7: archive/unarchive, saved-view sync,
-comments/mentions and notification preferences. No client handoff is scheduled.
+modify the owner. [P6c archive/unarchive](WORKSPACE-ARCHIVE.md) pauses content
+writes and new invitations while retaining authorized access management.
+Remaining P6/P7: saved-view sync, comments/mentions and notification preferences.
+No client handoff is scheduled.
 
 ### Verification recorded — 2026-09-15
 

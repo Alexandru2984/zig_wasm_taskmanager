@@ -72,12 +72,14 @@ function worker(overrides = {}) {
     return new Promise((resolve, reject) => {
         const child = spawn(process.env.TEST_APP_BINARY, [], { cwd: work, env: {
             PATH: process.env.PATH, LD_LIBRARY_PATH: process.env.TEST_LIBRARY_DIR,
+            PORT: '0', INTERFACE: '127.0.0.1', MAIL_WORKER_ENABLED: '0', TASK_REMINDERS_ENABLED: '0',
             SURREAL_URL: database.origin, SURREAL_NS: 'taskmanager_it', SURREAL_DB: 'main', SURREAL_USER: 'itapp', SURREAL_PASS: 'integration-only-app', SURREAL_AUTH_LEVEL: 'database', DB_AUTO_MIGRATE: '0',
             MAIL_OUTBOX_KEY: key, MAIL_PROCESS_ONCE: '1', SMTP_HOST: '127.0.0.1', SMTP_PORT: String(port), SMTP_USER: 'fixture@example.invalid', SMTP_PASS: 'fixture-only', SMTP_FROM: 'fixture@example.invalid', SMTP_CA_FILE: cert, APP_BASE_URL: base.origin, ...overrides,
         }});
         children.add(child); let output = '';
+        const timeout = setTimeout(() => child.kill('SIGTERM'), 20000);
         child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
-        child.on('error', reject); child.on('close', code => { children.delete(child); resolve({ code, output }); });
+        child.on('error', reject); child.on('close', code => { clearTimeout(timeout); children.delete(child); resolve({ code, output }); });
     });
 }
 async function step() { const result = await worker(); assert.equal(result.code, 0, result.output.slice(-1500)); }
@@ -189,6 +191,30 @@ try {
         assert.match(body, /mail_outbox_jobs\{status="failed"\} 2\n/);
         assert.match(body, /mail_outbox_jobs\{status="delivered"\} 3\n/);
         assert.ok(!body.includes(owner.email)); assert.ok(!body.includes('encrypted_payload'));
+    });
+    await check('archive cancels queued invitations without SMTP and unarchive cannot revive them', async () => {
+        const item = await invite('archived'), before = messages.length;
+        assert.equal((await api(owner, `/api/workspaces/${workspace}/archive`, 'POST', { archived: true, expected_version: 0 })).status, 200);
+        await step(); const row = await current(item.job); assert.equal(row.status, 'cancelled'); assert.equal(row.encrypted_payload, ''); assert.equal(row.secret_hash, ''); assert.equal(messages.length, before);
+        assert.equal((await api(owner, `/api/workspaces/${workspace}/archive`, 'POST', { archived: false, expected_version: 1 })).status, 200);
+        await step(); assert.equal(messages.length, before);
+    });
+    await check('mail worker independently refuses legacy queued invitations for an archived workspace', async () => {
+        const item = await invite('legacy_archived'), before = messages.length;
+        await sql(`UPDATE ${workspace} SET archived = true;`);
+        try { await step(); assert.equal((await current(item.job)).status, 'cancelled'); assert.equal(messages.length, before); }
+        finally { await sql(`UPDATE ${workspace} SET archived = false;`); }
+    });
+    await check('archived reminders are skipped without consuming delivery attempts and resume after unarchive', async () => {
+        // Keep unrelated synthetic reminders outside this one-shot worker run.
+        await sql(`UPDATE tasks SET reminder_sent = true WHERE reminder_sent != true;
+            CREATE ${record('tasks','reminder')} SET user_id = ${owner.id}, workspace_id = ${workspace}, title = 'Archive reminder fixture', due_date = time::now() + 30m;
+            UPDATE ${workspace} SET archived = true;`);
+        const task=record('tasks','reminder'), before=messages.length;
+        const once=async()=>{const r=await worker({MAIL_PROCESS_ONCE:'0',REMINDERS_PROCESS_ONCE:'1'});assert.equal(r.code,0,r.output.slice(-1500));};
+        await once(); assert.equal(messages.length,before); assert.equal((await current(task)).reminder_sent,false); assert.equal((await current(task)).reminder_attempts,0);
+        await sql(`UPDATE ${workspace} SET archived = false;`); await once(); assert.equal(messages.length,before+1);assert.equal((await current(task)).reminder_sent,true);
+        await once();assert.equal(messages.length,before+1);
     });
     console.log(`${passed} durable email checks passed`);
 } finally {

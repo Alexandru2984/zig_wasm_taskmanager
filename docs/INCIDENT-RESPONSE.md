@@ -29,6 +29,11 @@ this document does not claim alert delivery or an external responder exists.
 
 ## Operational rollback
 
+Migration 016 adds [workspace archive](WORKSPACE-ARCHIVE.md#schema-upgrade-and-rollback).
+Never switch to pre-016 code while a workspace is archived: that binary ignores
+the read-only policy. Stop serving or deploy an archive-aware fix-forward build;
+do not automatically unarchive workspaces or restore an old DB over new writes.
+
 For migration 015, also read [the task-version rollback warning](TASK-VERSIONS.md#rollback).
 An older binary will not enforce conditional writes or advance versions.
 Returning to a version-aware build after old writes requires controlled
@@ -42,8 +47,9 @@ binary unchanged. Do not restore the database over newer customer writes.
 Deployment keeps a protected backup of the prior unit/nginx configuration and
 a database export. New schema fields are additive; do not restore a database
 backup for a binary-only rollback because that would lose newer user writes.
-Point `/opt/taskmanager/current` to the preceding release and restart the
-service; validate readiness and public HTML. The initial migration from the
+Only after the compatibility checks above, point `/opt/taskmanager/current`
+to a policy-compatible release and restart the service; validate readiness
+and public HTML. The initial migration from the
 old checkout also retains the prior unit as an emergency fallback, but that
 fallback restores the old `micu` identity and its security risks.
 

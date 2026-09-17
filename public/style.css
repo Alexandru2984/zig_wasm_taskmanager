@@ -1542,6 +1542,9 @@ select {
 .ownership-buttons { display: flex; flex-wrap: wrap; gap: var(--s2); }
 .ownership-buttons .btn { min-height: 44px; }
 .owner-transfer-trigger { min-height: 44px; }
+.archive-notice, .archive-controls { padding: var(--s3); margin-block: var(--s3); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow-wrap: anywhere; }
+.archive-controls p { margin-block: var(--s2); }
+.archive-controls .btn { min-height: 44px; }
 
 .danger-zone {
     margin-top: var(--s5);

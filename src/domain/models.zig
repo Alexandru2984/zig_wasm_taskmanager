@@ -141,6 +141,8 @@ pub const Workspace = struct {
     name: []const u8,
     owner_id: []const u8,
     created_at: []const u8,
+    archived: bool = false,
+    archive_version: i64 = 0,
 };
 
 pub const WorkspaceMembership = struct {
@@ -168,6 +170,13 @@ pub const WorkspaceResponse = struct {
     name: []const u8,
     role: []const u8,
     created_at: []const u8,
+    archived: bool = false,
+    archive_version: i64 = 0,
+};
+
+pub const ArchiveWorkspaceRequest = struct {
+    archived: bool,
+    expected_version: i64,
 };
 
 pub const CreateWorkspaceRequest = struct {

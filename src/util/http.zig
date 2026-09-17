@@ -316,6 +316,7 @@ pub fn jsonCreated(r: zap.Request, data: anytype) !void {
 
 pub fn mutationError(r: zap.Request, err: anyerror, fallback: []const u8) !void {
     switch (err) {
+        error.WorkspaceArchived => try jsonError(r, 423, "Workspace is archived and read-only. Ask an owner or admin to unarchive it."),
         error.PermissionDenied => try jsonError(r, 403, "Permission changed. Refresh your workspace."),
         error.InvalidOperation => try jsonError(r, 400, "Operation is no longer valid. Refresh and try again."),
         error.NotFound => try jsonError(r, 404, "Resource not found."),

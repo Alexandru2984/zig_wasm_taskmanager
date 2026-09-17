@@ -142,7 +142,11 @@ A completed rollback clears the previous pointer rather than offering a failed
 candidate as the next rollback target. An unavailable previous image must be
 reloaded from a trusted retained artifact.
 
-Only images declaring portable format 1 and schema family `015` are accepted.
+Only images declaring portable format 1 and schema family `016` are accepted.
+Existing family-015 installations require a separately reviewed upgrade;
+this tool intentionally refuses them. A family-015 binary can write archived
+workspaces, so it is not a safe rollback after archive use. This batch does
+not migrate another host or a client installation.
 This is a compatibility gate, not proof that an arbitrary image is trustworthy.
 Cross-family migrations/rollbacks require a new review/helper version. Never
 substitute a pre-trash or pre-version binary merely because it starts.

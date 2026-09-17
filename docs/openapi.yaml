@@ -2,7 +2,12 @@ openapi: 3.0.3
 info:
   title: Zig Task Manager API
   version: 1.0.0
-  description: API for the Zig Task Manager backend.
+  description: >-
+    API for the Zig Task Manager backend. Archived workspaces remain readable
+    and exportable. Task create/update/delete/restore, workspace rename,
+    ownership transfer and invitation create/accept can return 423 when the
+    authorized operation is blocked by archive state. Access management and
+    account-deletion rules continue to apply; archive is not immutable retention.
 servers:
   - url: https://task.micutu.com
   - url: http://127.0.0.1:9000
@@ -266,6 +271,50 @@ paths:
         "403": { description: Insufficient role or invalid CSRF }
         "404": { description: Workspace unavailable }
         "409": { description: Name or concurrent state changed; explicitly review before retrying }
+  /api/workspaces/{id}/archive:
+    post:
+      summary: Archive or unarchive a workspace as owner or admin
+      description: >-
+        Requires CSRF and the current archive_version. Task writes, restore,
+        rename, ownership transfer and invitations are refused while archived;
+        reads, exports, quotas, access management and account-deletion rules
+        continue. Archive permanently cancels unaccepted invitations and their
+        pending mail payloads atomically with the state/activity change.
+        Unarchive resumes reminder eligibility, not cancelled invitations.
+        Already in-flight SMTP cannot be recalled. A shared per-account
+        task-write budget allows 60 attempts/minute. No automatic replay.
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [archived, expected_version]
+              properties:
+                archived: { type: boolean }
+                expected_version: { type: integer, minimum: 0, maximum: 9007199254740990 }
+      responses:
+        "200":
+          description: Confirmed lifecycle change; no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, archived, archive_version]
+                properties:
+                  id: { type: string }
+                  archived: { type: boolean }
+                  archive_version: { type: integer, minimum: 1, maximum: 9007199254740991 }
+        "400": { description: Invalid body, record ID or revision }
+        "401": { description: Not authenticated }
+        "403": { description: Invalid CSRF or insufficient current authority }
+        "404": { description: Workspace unavailable }
+        "405": { description: Only POST is allowed }
+        "409": { description: Stale or concurrent state, or requested state already current; refresh before retry }
+        "429": { description: Shared task-write budget exhausted; Retry-After 60 }
+        "500": { description: Failed or uncertain change; verify current state before retry }
   /api/workspaces/{id}/owner:
     post:
       summary: Transfer ownership to an existing verified teammate
@@ -1357,6 +1406,14 @@ components:
           enum: [owner, admin, member, viewer]
         created_at:
           type: string
+        archived:
+          type: boolean
+          default: false
+        archive_version:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+          default: 0
     WorkspaceMember:
       type: object
       properties:

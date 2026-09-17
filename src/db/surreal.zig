@@ -103,6 +103,12 @@ const workspaceFence =
 const workspaceRole =
     \\LET $role = (SELECT VALUE role FROM workspace_members WHERE workspace_id = $workspace_id AND user_id = $actor_id)[0];
 ++ "\n";
+// Apply AFTER role authorization: archived state is not exposed to outsiders.
+// Access revocation/role management and account deletion deliberately omit this
+// content guard; archiving is a pause, not immutable retention or a legal hold.
+const activeWorkspace =
+    \\IF ($scope[0].archived ?? false) { THROW "APP_ARCHIVED"; };
+++ "\n";
 const adminFence = actorFence ++ workspaceFence ++ workspaceRole ++
     \\IF !($role INSIDE ["owner", "admin"]) { THROW "APP_FORBIDDEN"; };
 ++ "\n";
@@ -115,6 +121,7 @@ const taskScopeFence = actorFence ++
     \\} ELSE {
 ++ "\n" ++ workspaceFence ++ workspaceRole ++
     \\    IF !($role INSIDE ["owner", "admin", "member"]) { THROW "APP_FORBIDDEN"; };
+++ "\n" ++ activeWorkspace ++
     \\};
 ++ "\n";
 const taskFence = taskScopeFence ++
@@ -172,6 +179,7 @@ fn runMigration(allocator: std.mem.Allocator, version: []const u8, sql: []const 
 pub fn checkSchema(allocator: std.mem.Allocator) !void {
     if (!try migrationApplied(allocator, "013_mail_outbox")) return error.SchemaMigrationRequired;
     if (!try migrationApplied(allocator, "015_task_versions")) return error.SchemaMigrationRequired;
+    if (!try migrationApplied(allocator, "016_workspace_archive")) return error.SchemaMigrationRequired;
 }
 
 pub fn initSchema(allocator: std.mem.Allocator) !void {
@@ -395,6 +403,12 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD IF NOT EXISTS version ON tasks TYPE int DEFAULT 0 ASSERT $value >= 0 AND $value <= 9007199254740991;
     );
 
+    try runMigration(allocator, "016_workspace_archive",
+        \\DEFINE FIELD IF NOT EXISTS archived ON workspaces TYPE bool DEFAULT false;
+        \\DEFINE FIELD IF NOT EXISTS archive_version ON workspaces TYPE int DEFAULT 0 ASSERT $value >= 0 AND $value <= 9007199254740991;
+        \\DEFINE FIELD IF NOT EXISTS archived_at ON workspaces TYPE option<datetime>;
+    );
+
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
 }
 
@@ -453,7 +467,7 @@ pub fn mailStillValid(allocator: std.mem.Allocator, job: MailJob) !bool {
         \\RETURN [{ valid: $job != NONE AND $user != NONE AND (
         \\    $kind = "confirmation" AND !$user.email_verified AND $user.verification_token = $hash AND $user.verification_expires > time::unix() + 35
         \\    OR $kind = "password_reset" AND $user.reset_token = $hash AND $user.reset_expires > time::unix() + 35
-        \\    OR $kind = "workspace_invite" AND $invite != NONE AND $invite.invited_by = $owner AND $issuer INSIDE ["owner", "admin"]
+        \\    OR $kind = "workspace_invite" AND $invite != NONE AND $invite.workspace_id.id != NONE AND !($invite.workspace_id.archived ?? false) AND $invite.invited_by = $owner AND $issuer INSIDE ["owner", "admin"]
         \\) }];
     , .{ .job_id = rec(job.id), .owner = rec(job.owner_id), .reference = rec(job.reference_id), .hash = job.secret_hash, .kind = job.kind, .lease = job.lease_token });
     defer allocator.free(result);
@@ -768,7 +782,7 @@ pub fn listWorkspacesForUser(allocator: std.mem.Allocator, user_id: []const u8) 
     // the order came back however the index happened to yield rows, and the
     // selected entry could appear to jump between reloads.
     return queryWithVars(allocator,
-        \\SELECT workspace_id.id AS id, workspace_id.name AS name, role, workspace_id.created_at AS created_at FROM workspace_members WHERE user_id = $user_id ORDER BY created_at ASC;
+        \\SELECT workspace_id.id AS id, workspace_id.name AS name, role, workspace_id.created_at AS created_at, (workspace_id.archived ?? false) AS archived, (workspace_id.archive_version ?? 0) AS archive_version FROM workspace_members WHERE user_id = $user_id ORDER BY created_at ASC;
     , .{ .user_id = rec(user_id) });
 }
 
@@ -861,7 +875,7 @@ pub fn workspaceDirectory(a: std.mem.Allocator, user_id: []const u8, workspace_i
 }
 
 pub fn renameWorkspace(a: std.mem.Allocator, user_id: []const u8, workspace_id: []const u8, name: []const u8, expected: []const u8) ![]u8 {
-    return queryWithVars(a, "BEGIN TRANSACTION;\n" ++ adminFence ++
+    return queryWithVars(a, "BEGIN TRANSACTION;\n" ++ adminFence ++ activeWorkspace ++
         \\LET $changed = (UPDATE workspaces SET name = $name WHERE id = $workspace_id AND name = $expected RETURN AFTER);
         \\IF array::len($changed) != 1 { THROW "APP_CONFLICT"; };
         \\RETURN $changed;
@@ -869,10 +883,26 @@ pub fn renameWorkspace(a: std.mem.Allocator, user_id: []const u8, workspace_id: 
     , .{ .actor_id = rec(user_id), .workspace_id = rec(workspace_id), .name = name, .expected = expected });
 }
 
+pub fn archiveWorkspace(a: std.mem.Allocator, actor_id: []const u8, workspace_id: []const u8, archived: bool, expected_version: i64) ![]u8 {
+    return queryWithVars(a, "BEGIN TRANSACTION;\n" ++ adminFence ++
+        \\IF ($scope[0].archive_version ?? 0) != $expected OR ($scope[0].archived ?? false) = $archived { THROW "APP_CONFLICT"; };
+        \\IF $archived {
+        \\    LET $invites = (SELECT VALUE id FROM workspace_invites WHERE workspace_id = $workspace_id AND accepted_at = NONE);
+        \\    UPDATE mail_outbox SET status = "cancelled", encrypted_payload = "", secret_hash = "", lease_token = NONE, lease_until = 0, last_error = "workspace_archived" WHERE kind = "workspace_invite" AND reference_id IN $invites AND status INSIDE ["pending", "processing"];
+        \\    DELETE workspace_invites WHERE workspace_id = $workspace_id AND accepted_at = NONE;
+        \\};
+        \\LET $changed = (UPDATE workspaces SET archived = $archived, archive_version = $expected + 1, archived_at = IF $archived { time::now(); } ELSE { NONE; } WHERE id = $workspace_id RETURN AFTER);
+        \\CREATE activity_events SET user_id = $actor_id, action = IF $archived { "archive_workspace"; } ELSE { "unarchive_workspace"; }, entity_type = "workspace", entity_id = <string>$workspace_id;
+        \\RETURN $changed;
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(actor_id), .workspace_id = rec(workspace_id), .archived = archived, .expected = expected_version });
+}
+
 pub fn transferWorkspace(a: std.mem.Allocator, actor_id: []const u8, workspace_id: []const u8, target_id: []const u8, expected_hash: []const u8) !void {
     const limits = try task_quota.get();
     const result = try queryWithVars(a, "BEGIN TRANSACTION;\n" ++ actorFence ++ workspaceFence ++ workspaceRole ++
         \\IF $role != "owner" OR $scope[0].owner_id != $actor_id OR !$actor[0].email_verified { THROW "APP_FORBIDDEN"; };
+    ++ "\n" ++ activeWorkspace ++
         \\IF $actor[0].password_hash != $expected_hash { THROW "APP_CONFLICT"; };
         \\IF $target_id = $actor_id { THROW "APP_INVALID"; };
         \\LET $owners = (SELECT VALUE user_id FROM workspace_members WHERE workspace_id = $workspace_id AND role = "owner");
@@ -908,7 +938,7 @@ pub fn createWorkspaceInvite(
     const token_hash = hashToken(token);
     const encrypted = try mail_payload.seal(allocator, .{ .kind = "workspace_invite", .email = email, .name = workspace_name, .secret = token });
     defer allocator.free(encrypted);
-    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ adminFence ++
+    return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ adminFence ++ activeWorkspace ++
         \\IF !$actor[0].email_verified { THROW "APP_FORBIDDEN"; };
         \\IF array::len(SELECT id FROM workspace_invites WHERE workspace_id = $workspace_id AND email = $email AND accepted_at = NONE AND expires_at >= time::unix()) > 0 { THROW "APP_INVALID"; };
         \\LET $created = (CREATE workspace_invites SET workspace_id = $workspace_id, email = $email, role = $invite_role, token = $invite_token, invited_by = $actor_id, expires_at = $expires_at, accepted_at = NONE, created_at = time::now());
@@ -959,6 +989,7 @@ pub fn acceptWorkspaceInviteAtomic(allocator: std.mem.Allocator, user_id: []cons
         \\IF !$actor[0].email_verified OR string::lowercase($actor[0].email) != string::lowercase($invite.email) { THROW "APP_FORBIDDEN"; };
         \\LET $issuer_role = (SELECT VALUE role FROM workspace_members WHERE user_id = $invite.invited_by AND workspace_id = $workspace_id)[0];
         \\IF !($issuer_role INSIDE ["owner", "admin"]) { THROW "APP_FORBIDDEN"; };
+    ++ "\n" ++ activeWorkspace ++
         \\IF $invite.accepted_at != NONE OR $invite.expires_at < time::unix() { THROW "APP_INVALID"; };
         \\IF array::len(SELECT id FROM workspace_members WHERE user_id = $actor_id AND workspace_id = $workspace_id) > 0 { THROW "APP_INVALID"; };
         \\UPDATE $invite.id SET accepted_at = time::unix();
@@ -1055,6 +1086,7 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
 
     const sql = try std.fmt.allocPrint(allocator, "BEGIN TRANSACTION;\n{s}{s}{s}" ++
         \\IF !($role INSIDE ["owner", "admin", "member"]) {{ THROW "APP_FORBIDDEN"; }};
+        \\{s}
         \\IF $has_parent {{
         \\    LET $parent = (SELECT * FROM ONLY $parent_id);
         \\    IF $parent == NONE OR $parent.deleted_at != NONE OR $parent.workspace_id != $workspace_id OR $parent.parent_id != NONE {{ THROW "APP_INVALID"; }};
@@ -1064,7 +1096,7 @@ pub fn createTask(allocator: std.mem.Allocator, task: NewTask) ![]u8 {
         \\{s}
         \\RETURN $created;
         \\COMMIT TRANSACTION;
-    , .{ actorFence, workspaceFence, workspaceRole, sets.items, taskQuotaCheck });
+    , .{ actorFence, workspaceFence, workspaceRole, activeWorkspace, sets.items, taskQuotaCheck });
     defer allocator.free(sql);
 
     var due_owned: ?[]u8 = null;
@@ -1468,8 +1500,21 @@ pub fn getDueTasksForReminders(allocator: std.mem.Allocator, lead_seconds: i64, 
     defer allocator.free(lead);
 
     return queryWithVars(allocator,
-        \\SELECT * FROM tasks WHERE deleted_at = NONE AND completed = false AND due_date != NONE AND due_date <= time::now() + type::duration($lead) AND (reminder_sent = false OR reminder_sent = NONE) AND (reminder_attempts OR 0) < $max_attempts LIMIT 25;
+        \\SELECT * FROM tasks WHERE deleted_at = NONE AND completed = false AND due_date != NONE AND due_date <= time::now() + type::duration($lead) AND (reminder_sent = false OR reminder_sent = NONE) AND (reminder_attempts OR 0) < $max_attempts AND (workspace_id = NONE OR (workspace_id.id != NONE AND !(workspace_id.archived ?? false))) LIMIT 25;
     , .{ .lead = lead, .max_attempts = max_attempts });
+}
+
+/// Last read before SMTP: stale task content or archive state must not start a
+/// new reminder. SMTP already in flight cannot be recalled; delivery markers
+/// may still advance afterwards to avoid resending on unarchive.
+pub fn reminderStillActive(a: std.mem.Allocator, task: models.Task) !bool {
+    const raw = try queryWithVars(a,
+        \\SELECT id FROM tasks WHERE id = $id AND (version ?? 0) = $version AND deleted_at = NONE AND completed = false AND (workspace_id = NONE OR (workspace_id.id != NONE AND !(workspace_id.archived ?? false)));
+    , .{ .id = rec(task.id), .version = task.version });
+    defer a.free(raw);
+    const parsed = try std.json.parseFromSlice([]models.SurrealResponse(struct { id: []const u8 }), a, raw, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    return parsed.value.len == 1 and parsed.value[0].result.len == 1;
 }
 
 /// Record a failed delivery. Once the count reaches the cap the task drops out

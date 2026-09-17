@@ -2,8 +2,8 @@
 
 This batch stays on the existing VPS. It does not hand off the installation,
 move hosts, transfer any real workspace automatically, or introduce an external
-backup/provider. Archive/unarchive remains separate work: all task writers,
-background recurrence/reminders and invitation flows need its write policy.
+backup/provider. Subsequent [P6c archive/unarchive](WORKSPACE-ARCHIVE.md) adds
+a shared write policy; ownership transfer requires an active workspace.
 
 ## User flow and consequences
 
@@ -132,7 +132,7 @@ the previous version recognizes these existing fields, though it cannot offer
 the transfer UI. Never restore a stale DB over newer writes to undo a binary
 release. Do not automatically transfer production data as a deployment test.
 
-Remaining: archive/unarchive, saved-view sync, comments/mentions, durable abuse
+Remaining after P6c: saved-view sync, comments/mentions, durable abuse
 controls and owner-routed alerts. No off-host recovery or client handoff claim.
 
 ### Verification recorded — 2026-09-16

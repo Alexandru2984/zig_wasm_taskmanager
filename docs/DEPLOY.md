@@ -25,6 +25,11 @@ guides record their verification and compatibility requirements.
 
 ## Verify in a separate checkout
 
+Migration 016 introduces [workspace archive](WORKSPACE-ARCHIVE.md). A pre-016
+binary ignores archived state: it is not a safe unconditional rollback target.
+Test migration on a separate restored copy and preserve the current DB on
+failure. Runtime startup requires 016; only the migration identity applies it.
+
 Migration 015 adds required conditional task writes. Read the
 [version compatibility and rollback warning](TASK-VERSIONS.md#rollback)
 before promotion: older binaries ignore If-Match and do not advance counters.
@@ -37,7 +42,7 @@ keep production credentials out of it.
 ```bash
 npm ci
 ./scripts/check.sh
-OPTIMIZE=ReleaseSafe RUN_MAIN_VIEW=1 RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_VERSIONS=1 RUN_SEARCH=1 RUN_QUOTAS=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh
+OPTIMIZE=ReleaseSafe RUN_ARCHIVE=1 RUN_OWNERSHIP=1 RUN_TEAM=1 RUN_MAIN_VIEW=1 RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_VERSIONS=1 RUN_SEARCH=1 RUN_QUOTAS=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh
 zig build -j4 -Doptimize=ReleaseSafe
 ./scripts/stamp-assets.sh
 ```
@@ -87,6 +92,10 @@ pre-quota binary removes enforcement and the usage API; publish matched assets
 and never restore a stale DB snapshot over newer writes as a routine rollback.
 
 ## Stage, migrate, promote
+
+For P6c, the [archive-aware recovery rules](WORKSPACE-ARCHIVE.md#schema-upgrade-and-rollback)
+take precedence over the older binary-only rollback notes below. No nginx,
+Cloudflare or other application's configuration change is required.
 
 The [P6b controlled ownership transfer](WORKSPACE-OWNERSHIP.md) needs no schema
 or runtime configuration change. Keep the matched `db29de4` release for

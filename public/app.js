@@ -188,6 +188,16 @@ async function api(path, { method = 'GET', body = null, quiet = false, signal, v
     }
     if (conditional) pendingTaskWrites.delete(pendingKey);
 
+    if (response.status === 423 && state.user === requestUser && state.currentWorkspaceId === requestWorkspace) {
+        // A different tab/admin may have archived the workspace. Keep drafts
+        // but stop offering writes; a fresh settings read obtains its revision.
+        document.querySelectorAll('.task-edit').forEach(captureTaskDraft);
+        const ws = currentWorkspace(); if (ws) ws.archived = true;
+        state.selection.clear(); resetWorkspacePanel(true);
+        renderWorkspaceBar(); renderTasks();
+        toast(data?.error || 'This workspace is archived and read-only.', 'error');
+    }
+
     if (response.status === 401 && requestUser !== null && state.user === requestUser) {
         showLoggedOut();
         if (!quiet) toast('Your session expired. Please log in again.', 'error');
@@ -805,7 +815,7 @@ function canWrite() {
     if (!isLoggedIn()) return true; // anonymous tasks are always writable
     const ws = currentWorkspace();
     if (!ws) return true;
-    return ws.role === 'owner' || ws.role === 'admin' || ws.role === 'member';
+    return !ws.archived && ['owner','admin','member'].includes(ws.role);
 }
 
 function canAdmin() {
@@ -827,7 +837,7 @@ async function loadWorkspaces() {
             saved = localStorage.getItem('workspaceId');
         } catch (_) { /* ignore */ }
         const preferred = state.workspaces.find(w => w.id === saved);
-        state.currentWorkspaceId = (preferred || state.workspaces[0])?.id || null;
+        state.currentWorkspaceId = (preferred || state.workspaces.find(ws => !ws.archived) || state.workspaces[0])?.id || null;
     }
     renderWorkspaceBar();
 }
@@ -840,7 +850,7 @@ function renderWorkspaceBar() {
     for (const ws of state.workspaces) {
         const option = document.createElement('option');
         option.value = ws.id;
-        option.textContent = ws.name;
+        option.textContent = `${ws.archived ? '[Archived] ' : ''}${ws.name}`;
         if (ws.id === state.currentWorkspaceId) option.selected = true;
         select.appendChild(option);
     }
@@ -848,6 +858,7 @@ function renderWorkspaceBar() {
     const ws = currentWorkspace();
     role.textContent = ws ? ws.role : '';
     role.classList.toggle('hidden', !ws);
+    $('workspaceArchiveNotice').classList.toggle('hidden', !ws?.archived);
 
     // The composer is pointless for a viewer, who cannot create anything.
     const writable = canWrite();
@@ -1654,7 +1665,7 @@ function renderTaskEditor(task) {
     save.type = 'submit';
     save.className = 'btn btn-primary btn-sm';
     save.textContent = 'Save';
-    save.disabled = draft.conflict;
+    save.disabled = draft.conflict || !canWrite();
     actions.append(cancel, save);
 
     form.append(title, notes, row, row2, tags, actions);
@@ -2147,7 +2158,7 @@ async function loadTrash(more = false) {
         const detail = document.createElement('div'); detail.className = 'panel-item-sub';
         detail.textContent = `${task.parent_id ? 'Subtask · ' : ''}Deleted ${new Date(task.deleted_at * 1000).toLocaleString()}`;
         main.append(title, detail); row.append(main);
-        if (ws.role !== 'viewer') {
+        if (ws.role !== 'viewer' && !ws.archived) {
             const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-ghost btn-sm';
             button.textContent = 'Restore'; button.setAttribute('aria-label', `Restore ${task.title}`);
             button.dataset.action = 'restore-task'; button.dataset.id = task.id; button.dataset.batch = task.delete_batch; row.append(button);
@@ -2156,7 +2167,7 @@ async function loadTrash(more = false) {
     }
     trashCursor = data.next_cursor;
     $('trashMore').classList.toggle('hidden', !trashCursor);
-    $('trashStatus').textContent = $('trashList').children.length ? 'Restore a parent before any subtasks deleted with it.' : 'No deleted tasks in this workspace.';
+    $('trashStatus').textContent = ws.archived ? 'Archived workspace: trash is retained. An owner or admin must unarchive before restoring tasks.' : $('trashList').children.length ? 'Restore a parent before any subtasks deleted with it.' : 'No deleted tasks in this workspace.';
 }
 async function restoreTrashedTask(id, button, batch = null) {
     const user = state.user;
@@ -2400,6 +2411,33 @@ const ROLE_LABEL = {
 };
 
 let teamGeneration = 0, teamScope = 0, teamRead = 0, inviteRead = 0, labelRead = 0, teamNext = null, teamQuery = '';
+const pendingArchives = new Set();
+async function handleWorkspaceArchive() {
+    const ws = currentWorkspace(), button = $('workspaceArchiveAction');
+    if (!state.user || !canAdmin() || button.disabled || $('workspaceModal').hidden) return;
+    const current = teamContext(), key = `${state.user.id}:${ws.id}`, archived = !ws.archived, version = ws.archive_version;
+    if (pendingArchives.has(key) || !Number.isSafeInteger(version)) return;
+    const message = archived
+        ? `Archive “${ws.name}”?\n\nTasks stay readable/exportable, but editing, rename, ownership transfer and reminders pause. All unaccepted invitations are permanently cancelled. Access management and account deletion still work. Unsaved task drafts remain local and cannot be saved while archived.`
+        : `Unarchive “${ws.name}”?\n\nEditing and reminders resume, including overdue reminders. Cancelled invitations are not restored; send new invitations if needed.`;
+    if (!window.confirm(message) || !current()) return;
+    pendingArchives.add(key); button.disabled = true;
+    $('workspaceArchiveError').textContent = 'Submitting. Closing this panel does not cancel a change already received by the server.';
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 20000);
+    let result;
+    try { result = await api(`/api/workspaces/${encodeURIComponent(ws.id)}/archive`, { method: 'POST', body: { archived, expected_version: version }, quiet: true, signal: controller.signal }); }
+    finally { clearTimeout(timeout); pendingArchives.delete(key); }
+    if (!current() || $('workspaceModal').hidden) return;
+    if (!result.ok || result.data?.id !== ws.id || result.data?.archived !== archived || result.data?.archive_version !== version + 1) {
+        $('workspaceArchiveError').textContent = `${result.data?.error || 'The outcome could not be confirmed.'} Close and reopen Workspace settings to review its current state before retrying.`;
+        return; // Locked until a fresh settings read; never replay a write.
+    }
+    document.querySelectorAll('.task-edit').forEach(captureTaskDraft);
+    Object.assign(ws, result.data); state.selection.clear(); resetTrash(); resetTaskSearch(true); resetUsage();
+    renderWorkspaceBar(); renderTasks();
+    toast(archived ? 'Workspace archived. Pending invitations cancelled.' : 'Workspace unarchived.', 'success');
+    await openWorkspacePanel();
+}
 let ownerTransfer = null;
 const pendingOwnerTransfers = new Set();
 function resetOwnerTransfer(focus = false) {
@@ -2414,7 +2452,7 @@ function resetOwnerTransfer(focus = false) {
 }
 function beginOwnerTransfer(member, trigger) {
     const ws = currentWorkspace();
-    if (!state.user || ws?.role !== 'owner' || member.user_id === state.user.id) return;
+    if (!state.user || ws?.role !== 'owner' || ws.archived || member.user_id === state.user.id) return;
     if (pendingOwnerTransfers.has(`${state.user.id}:${ws.id}`)) { toast('A transfer is still pending. Wait, then reopen the workspace to check its owner.', 'error'); return; }
     resetOwnerTransfer();
     ownerTransfer = { member: { ...member }, workspace: ws.id, current: teamContext(), trigger, submitting: false, locked: false };
@@ -2455,6 +2493,9 @@ async function handleOwnerTransfer(event) {
 }
 function resetWorkspacePanel(close = false) {
     resetOwnerTransfer();
+    $('workspaceArchiveControls').classList.add('hidden');
+    $('workspaceArchiveHint').textContent = ''; $('workspaceArchiveError').textContent = '';
+    $('workspaceArchiveAction').disabled = true;
     teamGeneration++; teamRead++; inviteRead++; teamNext = null; teamQuery = '';
     if (close) { teamScope++; labelRead++; state.members = []; }
     for (const id of ['memberList','inviteList']) $(id).replaceChildren();
@@ -2534,14 +2575,21 @@ async function openWorkspacePanel() {
     const fresh = latest.ok && Array.isArray(latest.data) ? latest.data.find(row => row.id === ws.id) : null;
     if (!fresh) { hideModal('workspaceModal'); toast('Could not refresh workspace access. Retry after refreshing the page.', 'error'); return; }
     state.workspaces = state.workspaces.map(row => row.id === fresh.id ? fresh : row); ws = fresh;
-    renderWorkspaceBar();
+    document.querySelectorAll('.task-edit').forEach(captureTaskDraft);
+    renderWorkspaceBar(); renderTasks();
     $('workspaceTitle').textContent = ws.name;
     $('workspaceSubtitle').textContent = canAdmin() ? 'Team, invitations and workspace name' : 'Your team · Names and roles only';
     $('workspaceRename').value = ws.name;
     $('workspaceRenameForm').dataset.expected = ws.name;
-    $('workspaceRenameForm').classList.toggle('hidden', !canAdmin());
+    $('workspaceRenameForm').classList.toggle('hidden', !canAdmin() || ws.archived);
+    $('workspaceArchiveControls').classList.toggle('hidden', !canAdmin());
+    $('workspaceArchiveAction').textContent = ws.archived ? 'Unarchive workspace…' : 'Archive workspace…';
+    $('workspaceArchiveAction').disabled = pendingArchives.has(`${state.user.id}:${ws.id}`);
+    $('workspaceArchiveHint').textContent = ws.archived
+        ? 'Archived: task editing and reminders are paused. Members can still read/export; access management and account deletion remain available.'
+        : 'Archive to pause task editing and reminders without deleting tasks. Unaccepted invitations will be permanently cancelled. Access management and account deletion remain available.';
     $('workspaceInvitesTab').classList.toggle('hidden', !canAdmin());
-    $('inviteForm').classList.toggle('hidden', !canAdmin());
+    $('inviteForm').classList.toggle('hidden', !canAdmin() || ws.archived);
     switchTab('workspace', 'members', document.querySelector('[data-scope="workspace"][data-tab="members"]'));
     await Promise.all([loadMembers(), ...(canAdmin() ? [loadInvites()] : [])]);
 }
@@ -2630,7 +2678,7 @@ function renderMember(member, workspace) {
     }
 
     li.append(main, actions);
-    if (workspace.role === 'owner' && !isSelf && member.role !== 'owner') {
+    if (workspace.role === 'owner' && !workspace.archived && !isSelf && member.role !== 'owner') {
         const transfer = document.createElement('button'); transfer.type = 'button';
         transfer.className = 'btn btn-ghost btn-sm owner-transfer-trigger';
         transfer.textContent = 'Make owner…'; transfer.dataset.transferUser = member.user_id;
@@ -2855,6 +2903,8 @@ const ACTION_LABEL = {
     restore_task: 'Task restored',
     create_workspace: 'Workspace created',
     rename_workspace: 'Workspace renamed',
+    archive_workspace: 'Workspace archived',
+    unarchive_workspace: 'Workspace unarchived',
     transfer_workspace_ownership: 'Workspace ownership transferred',
     receive_workspace_ownership: 'Workspace ownership received',
     invite_workspace_member: 'Invitation sent',
@@ -3522,6 +3572,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (_) { /* ignore */ }
     bindActions();
     $('workspaceRenameForm').addEventListener('submit', handleWorkspaceRename);
+    $('workspaceArchiveAction').addEventListener('click', handleWorkspaceArchive);
     $('ownerTransferForm').addEventListener('submit', handleOwnerTransfer);
     $('ownerTransferCancel').addEventListener('click', () => resetOwnerTransfer(true));
     $('memberSearchForm').addEventListener('submit', event => { event.preventDefault(); void loadMembers(); });

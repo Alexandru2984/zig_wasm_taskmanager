@@ -74,6 +74,10 @@ pub fn main() !void {
     if (migrate_only) return;
     try @import("services/mail_payload.zig").validateKey();
     try db.impl.checkMailKey(allocator);
+    if (std.mem.eql(u8, config.getOrDefault("REMINDERS_PROCESS_ONCE", "0"), "1")) {
+        try reminders.processOnce(allocator);
+        return;
+    }
     if (std.mem.eql(u8, config.getOrDefault("MAIL_PROCESS_ONCE", "0"), "1")) {
         try db.impl.maintainMail(allocator);
         _ = try email.processOne(allocator);
@@ -501,6 +505,21 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         const rest = path["/api/workspaces/".len..];
         const MembersSuffix = "/members";
         const InvitesSuffix = "/invites";
+
+        if (std.mem.endsWith(u8, rest, "/archive")) {
+            const workspace_id = http.decodePathSegment(req_alloc, rest[0 .. rest.len - "/archive".len]) orelse "";
+            if (!@import("db/http_client.zig").validRecordIdFor(workspace_id, "workspaces")) {
+                try http.jsonError(r, 400, "Invalid workspace ID");
+                return;
+            }
+            if (!std.mem.eql(u8, req_method, "POST")) {
+                r.setHeader("Allow", "POST") catch {};
+                try http.jsonError(r, 405, "Method not allowed");
+                return;
+            }
+            try workspaces_handler.archive(r, workspace_id, req_alloc);
+            return;
+        }
 
         if (std.mem.endsWith(u8, rest, "/owner")) {
             const workspace_id = http.decodePathSegment(req_alloc, rest[0 .. rest.len - "/owner".len]) orelse "";

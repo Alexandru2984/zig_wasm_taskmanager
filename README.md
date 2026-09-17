@@ -51,6 +51,9 @@ systemd-sandboxed VPS deployment.
   verified teammate, with current-password confirmation, atomic roles/activity
   and quota/conflict protection. Former owners become admins; task authorship
   and account-deletion rules do not change.
+- [Workspace archive/unarchive](docs/WORKSPACE-ARCHIVE.md): retained read-only
+  tasks, paused reminders, cancelled pending invitations and conflict-safe
+  reactivation. Access management and account-deletion rules still apply.
 - Email verification, password reset and invitations through an encrypted,
   transactional email outbox, with bounded retries and per-account delivery status.
   Signup still reveals existing addresses; timing equivalence is not established.

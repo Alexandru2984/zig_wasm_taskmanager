@@ -27,7 +27,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/favicon.svg">
     <link rel="manifest" href="/site.webmanifest">
-    <link rel="stylesheet" href="/style.css?v=01680259">
+    <link rel="stylesheet" href="/style.css?v=0da34486">
 
     <!-- Structured data. The CSP forbids inline <script>, but this is
          application/ld+json, which is data rather than script: the parser
@@ -125,6 +125,8 @@
                 <button class="icon-btn" type="button" data-action="new-workspace"
                         aria-label="New workspace" title="New workspace">＋</button>
             </div>
+
+            <p id="workspaceArchiveNotice" class="archive-notice hidden" role="status">Archived workspace · Tasks are read-only. An owner or admin can unarchive it in Workspace settings. Access management and account-deletion rules still apply.</p>
 
             <form class="composer" id="taskForm">
                 <div class="composer-row">
@@ -467,6 +469,11 @@
             <button class="modal-close" data-action="hide-modal" data-target="workspaceModal" aria-label="Close">×</button>
             <h2 id="workspaceTitle">Workspace</h2>
             <p class="modal-desc" id="workspaceSubtitle">Members and invitations</p>
+            <section id="workspaceArchiveControls" class="archive-controls hidden" aria-label="Workspace archive">
+                <p id="workspaceArchiveHint"></p>
+                <button id="workspaceArchiveAction" class="btn btn-secondary" type="button">Archive workspace…</button>
+                <p id="workspaceArchiveError" class="form-error" role="alert"></p>
+            </section>
             <form id="workspaceRenameForm" class="hidden">
                 <div class="form-group"><label for="workspaceRename">Workspace name</label><input id="workspaceRename" required maxlength="80" autocomplete="off"></div>
                 <div id="workspaceRenameError" class="form-error" role="alert"></div>
@@ -676,7 +683,7 @@
         </div>
     </div>
 
-    <script src="/app.js?v=07bddcf1"></script>
+    <script src="/app.js?v=210741f6"></script>
     <script src="/task-view.js?v=538cda55"></script>
 </body>
 </html>

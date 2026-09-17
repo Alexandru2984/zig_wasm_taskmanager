@@ -33,7 +33,7 @@ fn leadSeconds() i64 {
 /// within a few minutes rather than for the life of the task.
 const MAX_REMINDER_ATTEMPTS: i64 = 3;
 
-fn processDueReminders(allocator: std.mem.Allocator) !void {
+pub fn processOnce(allocator: std.mem.Allocator) !void {
     const task_result = try db.getDueTasksForReminders(allocator, leadSeconds(), MAX_REMINDER_ATTEMPTS);
     defer allocator.free(task_result);
 
@@ -72,6 +72,7 @@ fn processDueReminders(allocator: std.mem.Allocator) !void {
         // A task may have moved to trash after this cycle selected it.
         // Recheck immediately before SMTP; already in-flight mail cannot be recalled.
         if (!try db.canWriteTask(allocator, task.id, task.user_id)) continue;
+        if (!try db.impl.reminderStillActive(allocator, task)) continue;
         email.sendTaskReminderEmail(allocator, user.email, user.name, task.title, due_date) catch |err| {
             log.warn("Reminder email failed for task {s}: {}", .{ task.id, err });
             db.bumpReminderAttempts(allocator, task.id) catch |bump_err| {
@@ -89,7 +90,7 @@ fn processDueReminders(allocator: std.mem.Allocator) !void {
 fn reminderLoop(allocator: std.mem.Allocator) void {
     while (reminder_running.load(.acquire)) {
         var arena = std.heap.ArenaAllocator.init(allocator);
-        processDueReminders(arena.allocator()) catch |err| {
+        processOnce(arena.allocator()) catch |err| {
             log.warn("Reminder cycle failed: {}", .{err});
         };
         arena.deinit();
