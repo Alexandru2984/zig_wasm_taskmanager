@@ -25,6 +25,11 @@ guides record their verification and compatibility requirements.
 
 ## Verify in a separate checkout
 
+Migration 017 introduces [private saved views](SAVED-VIEWS.md), including export
+and transactional account/membership cleanup. Runtime now requires 017. Older
+binaries lack those data-lifecycle hooks: after views have been used, prefer
+fix-forward or stop serving, not an unconditional binary downgrade.
+
 Migration 016 introduces [workspace archive](WORKSPACE-ARCHIVE.md). A pre-016
 binary ignores archived state: it is not a safe unconditional rollback target.
 Test migration on a separate restored copy and preserve the current DB on
@@ -42,7 +47,7 @@ keep production credentials out of it.
 ```bash
 npm ci
 ./scripts/check.sh
-OPTIMIZE=ReleaseSafe RUN_ARCHIVE=1 RUN_OWNERSHIP=1 RUN_TEAM=1 RUN_MAIN_VIEW=1 RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_VERSIONS=1 RUN_SEARCH=1 RUN_QUOTAS=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh
+OPTIMIZE=ReleaseSafe RUN_SAVED_VIEWS=1 RUN_ARCHIVE=1 RUN_OWNERSHIP=1 RUN_TEAM=1 RUN_MAIN_VIEW=1 RUN_SECURITY=1 RUN_TRASH=1 RUN_PAGINATION=1 RUN_VERSIONS=1 RUN_SEARCH=1 RUN_QUOTAS=1 RUN_UI=1 RUN_OUTBOX=1 ./scripts/integration_test.sh
 zig build -j4 -Doptimize=ReleaseSafe
 ./scripts/stamp-assets.sh
 ```

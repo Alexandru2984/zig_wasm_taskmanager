@@ -335,6 +335,23 @@ fn buildVarsQuery(allocator: std.mem.Allocator, query_template: []const u8, vars
                 try writeEscapedElement(writer, item);
             }
             try writer.writeAll("];\n");
+        } else if (FieldType == []const @import("../domain/models.zig").SavedView) {
+            // Only this bounded, typed object array is accepted. Every string
+            // uses the existing SurrealQL escaper; no raw JSON/SQL interpolation.
+            try writer.writeByte('[');
+            for (value, 0..) |item, index| {
+                if (index > 0) try writer.writeByte(',');
+                try writer.writeByte('{');
+                inline for (.{ "id", "name", "search", "filter", "tagFilter", "sort", "view" }, 0..) |key, n| {
+                    if (n > 0) try writer.writeByte(',');
+                    try writer.print("{s}:", .{key});
+                    if (comptime std.mem.eql(u8, key, "tagFilter")) {
+                        if (item.tagFilter) |tag| try writeEscapedElement(writer, tag) else try writer.writeAll("NULL");
+                    } else try writeEscapedElement(writer, @field(item, key));
+                }
+                try writer.writeByte('}');
+            }
+            try writer.writeAll("];\n");
         } else if (FieldType == [64]u8) {
             // Fixed-size array (session token) — hex only by construction, but
             // validate defensively: if anything non-hex shows up, refuse.
@@ -373,6 +390,15 @@ pub fn executeQueryWithVars(allocator: std.mem.Allocator, query_template: []cons
     // SurrealDB 3 emits a null result for COMMIT after the explicit RETURN.
     const transaction = std.mem.endsWith(u8, std.mem.trim(u8, query_template, " \t\r\n"), "COMMIT TRANSACTION;");
     return try extractSurrealResult(allocator, raw_response, if (transaction) 2 else 1);
+}
+
+test "saved view object binds escape strings and preserve nullable fields" {
+    const item = @import("../domain/models.zig").SavedView{ .id = "v", .name = "\"; DELETE users; --", .search = "slash\\quote\"", .filter = "all", .tagFilter = null, .sort = "title", .view = "list" };
+    const query_text = try buildVarsQuery(std.testing.allocator, "RETURN $items;", .{ .items = @as([]const @import("../domain/models.zig").SavedView, &.{item}) });
+    defer std.testing.allocator.free(query_text);
+    try std.testing.expect(std.mem.indexOf(u8, query_text, "name:\"\\\"; DELETE users; --\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, query_text, "tagFilter:NULL") != null);
+    try std.testing.expect(std.mem.endsWith(u8, query_text, "RETURN $items;"));
 }
 
 fn extractLastSurrealResult(allocator: std.mem.Allocator, raw_response: []const u8) ![]u8 {

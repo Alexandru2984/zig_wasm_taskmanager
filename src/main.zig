@@ -29,6 +29,7 @@ test {
     _ = @import("util/task_search.zig");
     _ = @import("util/task_quota.zig");
     _ = @import("util/task_view.zig");
+    _ = @import("util/saved_views.zig");
     _ = @import("db/http_client.zig");
     _ = @import("services/auth.zig");
     _ = @import("services/mail_payload.zig");
@@ -505,6 +506,21 @@ fn handleApi(r: zap.Request, path: []const u8, req_alloc: std.mem.Allocator) !vo
         const rest = path["/api/workspaces/".len..];
         const MembersSuffix = "/members";
         const InvitesSuffix = "/invites";
+
+        if (std.mem.endsWith(u8, rest, "/views")) {
+            const workspace_id = http.decodePathSegment(req_alloc, rest[0 .. rest.len - "/views".len]) orelse "";
+            if (!@import("db/http_client.zig").validRecordIdFor(workspace_id, "workspaces")) {
+                try http.jsonError(r, 400, "Invalid workspace ID");
+                return;
+            }
+            if (!std.mem.eql(u8, req_method, "GET") and !std.mem.eql(u8, req_method, "PUT")) {
+                r.setHeader("Allow", "GET, PUT") catch {};
+                try http.jsonError(r, 405, "Method not allowed");
+                return;
+            }
+            try @import("handlers/saved_views.zig").handle(r, workspace_id, req_alloc);
+            return;
+        }
 
         if (std.mem.endsWith(u8, rest, "/archive")) {
             const workspace_id = http.decodePathSegment(req_alloc, rest[0 .. rest.len - "/archive".len]) orelse "";

@@ -271,13 +271,77 @@ paths:
         "403": { description: Insufficient role or invalid CSRF }
         "404": { description: Workspace unavailable }
         "409": { description: Name or concurrent state changed; explicitly review before retrying }
+  /api/workspaces/{id}/views:
+    get:
+      summary: Read the current member's private saved views
+      description: >-
+        Personal to the authenticated account and workspace, never shared with
+        teammates. All current roles may read, including in archived workspaces.
+        Empty reads return version 0 and no items without creating a row.
+        Shares the 120/minute per-account search budget. Always no-store.
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      responses:
+        "200":
+          description: Current personal collection and membership epoch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavedViewSet" }
+        "400": { description: Invalid workspace ID }
+        "401": { description: Not authenticated }
+        "403": { description: Not a current member or scope unavailable }
+        "429": { description: Shared search budget exhausted; Retry-After 60 }
+        "500": { description: Read failed; explicitly refresh before writing }
+    put:
+      summary: Replace only the current member's private saved views
+      description: >-
+        Requires CSRF and both membership_id and version from a successful GET.
+        The membership epoch prevents replay after removal and rejoining.
+        At most 12 unique opaque IDs; at most 32 KiB for the entire request.
+        Empty replacement increments version, preventing delete/recreate ABA.
+        Allowed to viewers and in archived workspaces as personal preferences,
+        not task writes. Account/workspace fences serialize with revocation and
+        deletion. No automatic retry after conflict or ambiguous response.
+        Shares the 60/minute task-write budget; no-store. Caller-supplied owner
+        fields cannot redirect the authenticated owner. Removal/account deletion
+        erase related collections atomically; ownership transfer does not share them.
+      parameters:
+        - $ref: "#/components/parameters/WorkspaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_membership, expected_version, items]
+              properties:
+                expected_membership: { type: string, description: Current caller's workspace_members record ID from GET }
+                expected_version: { type: integer, minimum: 0, maximum: 9007199254740990 }
+                items:
+                  type: array
+                  maxItems: 12
+                  items: { $ref: "#/components/schemas/SavedView" }
+      responses:
+        "200":
+          description: Confirmed replacement with exact next revision
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SavedViewSet" }
+        "400": { description: Invalid fields, duplicate IDs, size or revision }
+        "401": { description: Not authenticated }
+        "403": { description: Invalid CSRF or no current membership }
+        "404": { description: Workspace no longer exists }
+        "405": { description: Only GET and PUT are allowed }
+        "409": { description: Stale membership/revision or concurrent mutation; refresh and review before retry }
+        "429": { description: Shared task-write budget exhausted; Retry-After 60 }
+        "500": { description: Failed or uncertain outcome; explicitly refresh before retry }
   /api/workspaces/{id}/archive:
     post:
       summary: Archive or unarchive a workspace as owner or admin
       description: >-
         Requires CSRF and the current archive_version. Task writes, restore,
         rename, ownership transfer and invitations are refused while archived;
-        reads, exports, quotas, access management and account-deletion rules
+        reads, exports, quotas, personal saved views, access management and account-deletion rules
         continue. Archive permanently cancels unaccepted invitations and their
         pending mail payloads atomically with the state/activity change.
         Unarchive resumes reminder eligibility, not cancelled invitations.
@@ -948,8 +1012,10 @@ paths:
     get:
       summary: Export everything the account holds
       description: >-
-        Returns the account, its tasks, workspaces and activity as one JSON
-        document, with Content-Disposition set so a browser saves it.
+        Returns the account, its tasks, workspaces, activity, email delivery
+        metadata and personal saved_views as one JSON document, with
+        Content-Disposition set so a browser saves it. saved_views contains
+        workspace_id, version and items only for the caller's current memberships.
       responses:
         "200":
           description: Export document
@@ -1394,6 +1460,27 @@ components:
           type: string
           minLength: 1
           maxLength: 120
+    SavedView:
+      type: object
+      required: [id, name, search, filter, tagFilter, sort, view]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9_-]+$' }
+        name: { type: string, minLength: 1, maxLength: 48, description: At most 48 Unicode codepoints; not empty or ASCII-space-only; no control characters }
+        search: { type: string, maxLength: 500, description: At most 500 UTF-8 bytes; no control characters }
+        filter: { type: string, enum: [all, active, completed, overdue, high, today, upcoming] }
+        tagFilter: { type: string, nullable: true, maxLength: 128, description: At most 128 UTF-8 bytes; no control characters }
+        sort: { type: string, enum: [created_desc, created_asc, due_asc, priority, title] }
+        view: { type: string, enum: [list, board] }
+    SavedViewSet:
+      type: object
+      required: [membership_id, version, items]
+      properties:
+        membership_id: { type: string, description: The caller's membership record, not an authorization credential }
+        version: { type: integer, minimum: 0, maximum: 9007199254740991 }
+        items:
+          type: array
+          maxItems: 12
+          items: { $ref: "#/components/schemas/SavedView" }
     Workspace:
       type: object
       properties:

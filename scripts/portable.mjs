@@ -13,7 +13,7 @@ import {pipeline} from 'node:stream/promises';
 
 const execute=promisify(execFile), repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 export const DB_IMAGE='surrealdb/surrealdb:v3.2.4@sha256:51baed8709f57f67dcf04b30e3177db846803fa9342dae2be58c6fa5f8d59843';
-const SCHEMA='016', FORMAT=1;
+const SCHEMA='017', FORMAT=1;
 const secret=()=>randomBytes(32).toString('hex');
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const dockerEnv=()=>Object.fromEntries(Object.entries(process.env).filter(([key])=>!key.startsWith('COMPOSE_')&&!key.startsWith('TM_')));

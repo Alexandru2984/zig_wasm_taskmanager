@@ -1232,14 +1232,17 @@ function syncSavedViews() {
         state.savedViewContext = key;
         state.savedViews = [];
         state.activeSavedView = '';
+        $('savedViewName').value = '';
         state.filter = 'all'; state.search = ''; state.tagFilter = null;
         state.selection.clear(); state.editingId = null;
         try {
             const stored = JSON.parse(localStorage.getItem(key) || '[]');
-            if (Array.isArray(stored)) state.savedViews = stored.filter(validSavedView).slice(0, 12);
+            if (!state.user && Array.isArray(stored)) state.savedViews = stored.filter(validSavedView).slice(0, 12);
             const sort = localStorage.getItem(`${key}:sort`);
             state.sort = VIEW_SORTS.includes(sort) ? sort : 'created_desc';
         } catch (_) { /* unavailable or corrupt storage */ }
+        resetSavedViewSync();
+        if (state.user && state.currentWorkspaceId) void refreshSavedViews();
     }
     const select = $('savedViews');
     select.replaceChildren(new Option('Saved views', ''));
@@ -1253,6 +1256,7 @@ function syncSavedViews() {
     document.querySelectorAll('#filterChips [data-filter]').forEach(chip => {
         chip.setAttribute('aria-pressed', String(chip.dataset.filter === state.filter));
     });
+    renderSavedViewSync();
 }
 function persistSavedViews() {
     try { localStorage.setItem(viewStorageKey(), JSON.stringify(state.savedViews)); }
@@ -1260,6 +1264,8 @@ function persistSavedViews() {
     return true;
 }
 function bindSavedViews() {
+    $('refreshViewsBtn').addEventListener('click', refreshSavedViews);
+    $('importViewsBtn').addEventListener('click', importDeviceViews);
     $('taskSearchForm').addEventListener('submit', e => { e.preventDefault(); loadTaskSearch(0, true); });
     $('taskSearchForm').addEventListener('input', () => {
         resetTaskSearch();
@@ -1270,13 +1276,18 @@ function bindSavedViews() {
     $('taskSearchNext').addEventListener('click', () => loadTaskSearch(taskSearch.page + 1));
     $('taskSearchCancel').addEventListener('click', () => { resetTaskSearch(); $('taskSearchStatus').textContent = 'Search cancelled. Press Search to try again.'; $('taskSearchSubmit').focus(); });
     $('taskSearchReveal').addEventListener('click', revealSearchTask);
-    $('saveViewForm').addEventListener('submit', e => {
+    $('saveViewForm').addEventListener('submit', async e => {
         e.preventDefault();
         const name = $('savedViewName').value.trim();
         if (!name) return;
         if (state.savedViews.length >= 12) { toast('You can save up to 12 views per workspace.', 'error'); return; }
         const view = { id: crypto.randomUUID(), name, search: state.search.slice(0, 500),
             filter: state.filter, tagFilter: state.tagFilter, sort: state.sort, view: state.view };
+        if (state.user) {
+            if (!validCloudView(view)) { toast('Use a name up to 48 characters, search up to 500 UTF-8 bytes and tag up to 128 bytes, without control characters.', 'error'); return; }
+            if (await saveRemoteViews([...state.savedViews, view], view.id)) $('savedViewName').value = '';
+            return;
+        }
         state.savedViews.push(view);
         if (!persistSavedViews()) { state.savedViews.pop(); return; }
         state.activeSavedView = view.id;
@@ -1284,6 +1295,7 @@ function bindSavedViews() {
         renderTasks(); toast('View saved', 'success');
     });
     $('savedViews').addEventListener('change', e => {
+        if (isLoggedIn() && !leaveMainDrafts()) { syncSavedViews(); return; }
         state.activeSavedView = e.target.value;
         const view = state.savedViews.find(item => item.id === e.target.value);
         if (view) {
@@ -1293,7 +1305,8 @@ function bindSavedViews() {
             setView(view.view);
         } else renderTasks();
     });
-    $('deleteViewBtn').addEventListener('click', () => {
+    $('deleteViewBtn').addEventListener('click', async () => {
+        if (state.user) { await saveRemoteViews(state.savedViews.filter(view => view.id !== state.activeSavedView), ''); return; }
         const previous = state.savedViews;
         state.savedViews = previous.filter(view => view.id !== state.activeSavedView);
         if (!persistSavedViews()) { state.savedViews = previous; return; }

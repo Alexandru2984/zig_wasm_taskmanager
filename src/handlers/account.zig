@@ -195,6 +195,11 @@ pub fn exportData(r: zap.Request, req_alloc: std.mem.Allocator) !void {
     const parsed_mail = try std.json.parseFromSlice([]models.SurrealResponse(models.MailDelivery), req_alloc, mail_result, .{ .ignore_unknown_fields = true });
     defer parsed_mail.deinit();
 
+    const views_result = try db.impl.exportSavedViews(req_alloc, user_id);
+    defer req_alloc.free(views_result);
+    const parsed_views = try std.json.parseFromSlice([]models.SurrealResponse(models.ExportSavedViews), req_alloc, views_result, .{ .ignore_unknown_fields = true });
+    defer parsed_views.deinit();
+
     const export_doc = models.ExportDocument{
         .exported_at = std.time.timestamp(),
         .account = .{
@@ -207,6 +212,7 @@ pub fn exportData(r: zap.Request, req_alloc: std.mem.Allocator) !void {
         .workspaces = if (parsed_ws.value.len > 0) parsed_ws.value[0].result else &.{},
         .activity = if (parsed_activity.value.len > 0) parsed_activity.value[0].result else &.{},
         .email_deliveries = if (parsed_mail.value.len > 0) parsed_mail.value[0].result else &.{},
+        .saved_views = if (parsed_views.value.len > 0) parsed_views.value[0].result else &.{},
     };
 
     // Content-Disposition makes the browser save it rather than render it, so

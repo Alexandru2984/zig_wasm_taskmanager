@@ -151,6 +151,10 @@ if [ "${RUN_OWNERSHIP:-0}" = 1 ]; then
     say "Workspace ownership and account-boundary regressions"
     BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" node scripts/ownership_test.mjs
 fi
+if [ "${RUN_SAVED_VIEWS:-0}" = 1 ]; then
+    say "Private saved views, concurrency and device sync"
+    BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" node scripts/saved_views_test.mjs
+fi
 if [ "${RUN_ARCHIVE:-0}" = 1 ]; then
     say "Workspace archive lifecycle and read-only enforcement"
     BASE_URL="http://127.0.0.1:$APP_PORT" TEST_DB_URL="http://127.0.0.1:$DB_PORT" node scripts/archive_test.mjs

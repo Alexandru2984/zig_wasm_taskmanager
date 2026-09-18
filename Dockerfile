@@ -36,7 +36,7 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 ARG VCS_REF=unversioned
 LABEL org.opencontainers.image.revision=$VCS_REF \
     io.taskmanager.portable-format="1" \
-    io.taskmanager.schema="016"
+    io.taskmanager.schema="017"
 
 # ca-certificates + curl: the app shells out to /usr/bin/curl to send email.
 RUN apt-get update \

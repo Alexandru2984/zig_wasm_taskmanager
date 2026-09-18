@@ -19,6 +19,7 @@ the directory, usage and trash inspection remain available to existing members.
 | Rename or transfer ownership | Unarchive first |
 | Create/accept invitations | Refused; unaccepted invitations are cancelled on archive |
 | Change roles, remove members, revoke invitations | Still available to authorized administrators |
+| Personal saved views | Current members may read/save their own preferences; not task content |
 | Account export/deletion and assignment cleanup | Existing rules continue to apply |
 | Reminder discovery and pre-SMTP validation | Skip archived workspaces |
 | Delivery bookkeeping after SMTP started | May still advance; in-flight email cannot be recalled |
@@ -146,7 +147,7 @@ is invalid. This is a technical/desk walkthrough, not a staffed alert or legal
 notification exercise. Production activation remains gated on completed tests,
 restored-copy migration and canary evidence recorded below.
 
-Remaining P6: per-workspace saved-view synchronization. Comments/mentions,
+P6 follow-up: [private saved-view synchronization](SAVED-VIEWS.md). Comments/mentions,
 notification preferences, durable abuse controls and off-host recovery remain
 separate work, not claims made by this batch.
 

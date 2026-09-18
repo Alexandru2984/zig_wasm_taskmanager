@@ -179,6 +179,34 @@ pub const ArchiveWorkspaceRequest = struct {
     expected_version: i64,
 };
 
+pub const SavedView = struct {
+    id: []const u8,
+    name: []const u8,
+    search: []const u8,
+    filter: []const u8,
+    tagFilter: ?[]const u8,
+    sort: []const u8,
+    view: []const u8,
+};
+
+pub const SavedViewSet = struct {
+    membership_id: []const u8,
+    version: i64,
+    items: []const SavedView,
+};
+
+pub const SaveViewsRequest = struct {
+    expected_membership: []const u8,
+    expected_version: i64,
+    items: []const SavedView,
+};
+
+pub const ExportSavedViews = struct {
+    workspace_id: []const u8,
+    version: i64,
+    items: []const SavedView,
+};
+
 pub const CreateWorkspaceRequest = struct {
     name: []const u8,
 };
@@ -318,6 +346,7 @@ pub const ExportDocument = struct {
     workspaces: []const WorkspaceResponse,
     activity: []const ActivityResponse,
     email_deliveries: []const MailDelivery = &.{},
+    saved_views: []const ExportSavedViews = &.{},
 };
 
 // --- Common ---

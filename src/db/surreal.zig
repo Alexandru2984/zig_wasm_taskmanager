@@ -180,6 +180,7 @@ pub fn checkSchema(allocator: std.mem.Allocator) !void {
     if (!try migrationApplied(allocator, "013_mail_outbox")) return error.SchemaMigrationRequired;
     if (!try migrationApplied(allocator, "015_task_versions")) return error.SchemaMigrationRequired;
     if (!try migrationApplied(allocator, "016_workspace_archive")) return error.SchemaMigrationRequired;
+    if (!try migrationApplied(allocator, "017_saved_views")) return error.SchemaMigrationRequired;
 }
 
 pub fn initSchema(allocator: std.mem.Allocator) !void {
@@ -407,6 +408,16 @@ pub fn initSchema(allocator: std.mem.Allocator) !void {
         \\DEFINE FIELD IF NOT EXISTS archived ON workspaces TYPE bool DEFAULT false;
         \\DEFINE FIELD IF NOT EXISTS archive_version ON workspaces TYPE int DEFAULT 0 ASSERT $value >= 0 AND $value <= 9007199254740991;
         \\DEFINE FIELD IF NOT EXISTS archived_at ON workspaces TYPE option<datetime>;
+    );
+
+    try runMigration(allocator, "017_saved_views",
+        \\DEFINE TABLE IF NOT EXISTS saved_view_sets SCHEMAFULL;
+        \\DEFINE FIELD IF NOT EXISTS owner_id ON saved_view_sets TYPE record<users>;
+        \\DEFINE FIELD IF NOT EXISTS workspace_id ON saved_view_sets TYPE record<workspaces>;
+        \\DEFINE FIELD IF NOT EXISTS membership_id ON saved_view_sets TYPE record<workspace_members>;
+        \\DEFINE FIELD IF NOT EXISTS version ON saved_view_sets TYPE int ASSERT $value >= 1 AND $value <= 9007199254740991;
+        \\DEFINE FIELD IF NOT EXISTS items ON saved_view_sets TYPE array<object> FLEXIBLE ASSERT array::len($value) <= 12;
+        \\DEFINE INDEX IF NOT EXISTS saved_views_owner_workspace ON saved_view_sets FIELDS owner_id, workspace_id UNIQUE;
     );
 
     std.debug.print("✅ SurrealDB schema initialized\n", .{});
@@ -1013,10 +1024,49 @@ pub fn updateWorkspaceMemberRole(allocator: std.mem.Allocator, actor_id: []const
 
 /// Remove a member from a workspace. RETURN BEFORE yields the deleted row(s),
 /// so an empty result means there was nothing to remove.
+// Views are personal preferences, writable by every current member (including
+// viewers and archived spaces). Never accept an owner ID from the client.
+const viewMembership =
+    \\LET $membership = (SELECT id FROM workspace_members WHERE user_id = $actor_id AND workspace_id = $workspace_id AND role INSIDE ["owner", "admin", "member", "viewer"])[0];
+    \\IF $membership == NONE { THROW "APP_FORBIDDEN"; };
+++ "\n";
+
+pub fn getWorkspaceViews(a: std.mem.Allocator, user: []const u8, workspace: []const u8) ![]u8 {
+    return queryWithVars(a, "BEGIN TRANSACTION;\n" ++ viewMembership ++
+        \\IF !(record::exists($actor_id) AND record::exists($workspace_id)) { THROW "APP_FORBIDDEN"; };
+        \\LET $saved = (SELECT version, items FROM saved_view_sets WHERE owner_id = $actor_id AND workspace_id = $workspace_id AND membership_id = $membership.id)[0];
+        \\RETURN [{ membership_id: $membership.id, version: $saved.version ?? 0, items: $saved.items ?? [] }];
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(user), .workspace_id = rec(workspace) });
+}
+
+pub fn saveWorkspaceViews(a: std.mem.Allocator, user: []const u8, workspace: []const u8, input: models.SaveViewsRequest) ![]u8 {
+    return queryWithVars(a, "BEGIN TRANSACTION;\n" ++ actorFence ++ workspaceFence ++ viewMembership ++
+        \\IF $membership.id != $expected_membership { THROW "APP_CONFLICT"; };
+        \\LET $existing = (SELECT id, version, membership_id FROM saved_view_sets WHERE owner_id = $actor_id AND workspace_id = $workspace_id)[0];
+        \\LET $version = IF $existing.membership_id = $membership.id { $existing.version } ELSE { 0 };
+        \\IF $version != $expected_version { THROW "APP_CONFLICT"; };
+        \\IF $existing == NONE {
+        \\    CREATE saved_view_sets SET owner_id = $actor_id, workspace_id = $workspace_id, membership_id = $membership.id, version = $version + 1, items = $items;
+        \\} ELSE {
+        \\    UPDATE $existing.id SET membership_id = $membership.id, version = $version + 1, items = $items;
+        \\};
+        \\RETURN [{ membership_id: $membership.id, version: $version + 1, items: $items }];
+        \\COMMIT TRANSACTION;
+    , .{ .actor_id = rec(user), .workspace_id = rec(workspace), .expected_membership = rec(input.expected_membership), .expected_version = input.expected_version, .items = input.items });
+}
+
+pub fn exportSavedViews(a: std.mem.Allocator, user: []const u8) ![]u8 {
+    return queryWithVars(a,
+        \\SELECT workspace_id, version, items FROM saved_view_sets WHERE owner_id = $user AND membership_id IN (SELECT VALUE id FROM workspace_members WHERE user_id = $user) AND record::exists(workspace_id);
+    , .{ .user = rec(user) });
+}
+
 pub fn removeWorkspaceMember(allocator: std.mem.Allocator, actor_id: []const u8, workspace_id: []const u8, user_id: []const u8) ![]u8 {
     return queryWithVars(allocator, "BEGIN TRANSACTION;\n" ++ adminFence ++
         \\LET $deleted = (DELETE workspace_members WHERE workspace_id = $workspace_id AND user_id = $user_id AND role != "owner" RETURN BEFORE);
         \\IF array::len($deleted) > 0 {
+        \\    DELETE saved_view_sets WHERE workspace_id = $workspace_id AND owner_id = $user_id;
         \\    UPDATE tasks SET assignee_id = NONE, version = (version ?? 0) + 1 WHERE workspace_id = $workspace_id AND assignee_id = $user_id;
         \\    DELETE workspace_invites WHERE workspace_id = $workspace_id AND invited_by = $user_id AND accepted_at = NONE;
         \\};
@@ -1592,6 +1642,7 @@ pub fn deleteUserAccount(allocator: std.mem.Allocator, user_id: []const u8, expe
         \\UPDATE tasks SET parent_id = NONE, version = (version ?? 0) + 1 WHERE parent_id IN $removed_tasks;
         \\DELETE tasks WHERE user_id = $record_id OR workspace_id IN $owned;
         \\DELETE workspace_invites WHERE invited_by = $record_id OR workspace_id IN $owned;
+        \\DELETE saved_view_sets WHERE owner_id = $record_id OR workspace_id IN $owned;
         \\DELETE workspace_members WHERE user_id = $record_id OR workspace_id IN $owned;
         \\DELETE workspaces WHERE owner_id = $record_id;
         \\DELETE activity_events WHERE user_id = $record_id;

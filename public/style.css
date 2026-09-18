@@ -2031,6 +2031,9 @@ kbd {
 .save-view-form input { flex: 1; }
 .save-view-form button { flex-shrink: 0; }
 .saved-view-hint { color: var(--text-muted); font-size: 0.75rem; margin-top: var(--s2); }
+.saved-view-actions { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s2); }
+.saved-view-actions .btn { min-height: 44px; }
+#savedViewsStatus { overflow-wrap: anywhere; }
 .task-load-error {
     display: flex;
     flex-wrap: wrap;

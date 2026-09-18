@@ -27,7 +27,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="/favicon.svg">
     <link rel="manifest" href="/site.webmanifest">
-    <link rel="stylesheet" href="/style.css?v=0da34486">
+    <link rel="stylesheet" href="/style.css?v=9070e137">
 
     <!-- Structured data. The CSP forbids inline <script>, but this is
          application/ld+json, which is data rather than script: the parser
@@ -232,7 +232,12 @@
                         <button type="submit" class="btn btn-secondary btn-sm">Save view</button>
                     </form>
                 </div>
-                <p class="saved-view-hint">Save a search, filter and sort for this workspace on this device.</p>
+                <div class="saved-view-actions">
+                    <button type="button" class="btn btn-ghost btn-sm hidden" id="refreshViewsBtn">Refresh views</button>
+                    <button type="button" class="btn btn-ghost btn-sm hidden" id="importViewsBtn">Import device views</button>
+                </div>
+                <p class="saved-view-hint" id="savedViewsHint">Guest views stay on this device.</p>
+                <p class="saved-view-hint" id="savedViewsStatus" role="status" aria-live="polite"></p>
                 </details>
             </div>
 
@@ -683,7 +688,8 @@
         </div>
     </div>
 
-    <script src="/app.js?v=210741f6"></script>
+    <script src="/app.js?v=4564bcb8"></script>
     <script src="/task-view.js?v=538cda55"></script>
+    <script src="/saved-views.js?v=bc7505e3"></script>
 </body>
 </html>

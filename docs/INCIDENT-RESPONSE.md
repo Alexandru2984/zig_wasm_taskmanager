@@ -29,6 +29,12 @@ this document does not claim alert delivery or an external responder exists.
 
 ## Operational rollback
 
+Migration 017 adds [private saved views](SAVED-VIEWS.md). Pre-017 executables do
+not export or erase them during account/member deletion. Once the feature has
+stored data, use a views-aware fix-forward release or stop serving while
+reviewing recovery. Do not silently delete preferences to permit a downgrade,
+and never restore an older database over newer writes.
+
 Migration 016 adds [workspace archive](WORKSPACE-ARCHIVE.md#schema-upgrade-and-rollback).
 Never switch to pre-016 code while a workspace is archived: that binary ignores
 the read-only policy. Stop serving or deploy an archive-aware fix-forward build;

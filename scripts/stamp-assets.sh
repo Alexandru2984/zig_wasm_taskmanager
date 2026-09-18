@@ -38,6 +38,7 @@ stamp_one() {
 echo "==> Stamping asset URLs"
 stamp_one app.js
 stamp_one task-view.js
+stamp_one saved-views.js
 stamp_one style.css
 stamp_one reset-password.js
 

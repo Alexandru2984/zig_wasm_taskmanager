@@ -26,6 +26,9 @@ systemd-sandboxed VPS deployment.
   refreshes. See [bounded main view](docs/TASK-VIEW.md).
 - A Kanban board alongside the list, with drag-and-drop on pointer devices and
   arrow buttons everywhere else.
+- [Private saved views](docs/SAVED-VIEWS.md) per account/workspace across devices,
+  with explicit refresh, conflict-safe save/delete and opt-in device import.
+  Guest views stay local; teammates do not receive your search text.
 - Subtasks, which are ordinary tasks with a parent, so they inherit editing,
   tags, due dates and the workspace permission model.
 - Recurring tasks (daily, weekly, monthly); completing one creates the next.
